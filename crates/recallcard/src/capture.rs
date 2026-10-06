@@ -4,6 +4,26 @@ use regex::Regex;
 use serde_json::Value;
 
 pub fn redact_event(input: &mut EventInput) -> Result<()> {
+    fn synthetic_origin(text: &str) -> Option<Origin> {
+        if text.contains("recallcard.context/1") {
+            Some(Origin::ContextInjection)
+        } else if text.contains("recallcard.dream-job/1")
+            || text.contains("recallcard.dream-result/1")
+        {
+            Some(Origin::RecallcardDreamJob)
+        } else {
+            None
+        }
+    }
+    if let Some(origin) = synthetic_origin(&input.content) {
+        input.origin = origin;
+    }
+    for part in &mut input.parts {
+        if let Some(origin) = synthetic_origin(&part.text) {
+            part.origin = origin;
+        }
+    }
+
     let patterns = [
         r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b",
         r"(?i)\b(?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*[^\s,;]+",
@@ -72,6 +92,10 @@ pub fn redact_event(input: &mut EventInput) -> Result<()> {
     }
     count += walk(&mut input.metadata, &rules);
     input.capture.redacted |= count > 0;
-    input.capture.redaction_count += count;
+    input.capture.redaction_count = input
+        .capture
+        .redaction_count
+        .checked_add(count)
+        .ok_or("脱敏计数超过上限")?;
     input.validate()
 }

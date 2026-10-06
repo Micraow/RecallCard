@@ -235,3 +235,103 @@ fn malformed_and_oversized_transport_fails_closed() {
     .is_err());
     assert!(out.is_empty());
 }
+
+#[test]
+fn complete_responses_respect_server_byte_budgets() {
+    let (_d, v) = setup();
+    for i in 0..8 {
+        let id = capture(
+            &v,
+            "personal",
+            &i.to_string(),
+            &"合成中文预算测试。".repeat(150),
+        );
+        let input:MemoryInput=serde_json::from_value(json!({"content":"合成中文预算测试。".repeat(150),"source_refs":[id],"evidence":"user_explicit","labels":["bootstrap"]})).unwrap();
+        v.add_memory(input).unwrap();
+    }
+    let c = context(&v);
+    for budget in [512, 1024, 1500, 4096] {
+        let mut args = search("中文");
+        args.budget_tokens = budget;
+        let r = c.search(args).unwrap();
+        assert!(serde_json::to_vec(&r).unwrap().len() <= budget);
+        let r = c
+            .bootstrap(BootstrapArgs {
+                budget_tokens: budget,
+            })
+            .unwrap();
+        assert!(serde_json::to_vec(&r).unwrap().len() <= budget);
+        let refs = v
+            .events()
+            .unwrap()
+            .iter()
+            .map(|e| format!("event:{}", e.id))
+            .collect();
+        let r = c
+            .read(ReadArgs {
+                refs,
+                budget_tokens: budget,
+            })
+            .unwrap();
+        assert!(serde_json::to_vec(&r).unwrap().len() <= budget);
+    }
+}
+
+#[test]
+fn recaptured_capsule_is_not_new_evidence_or_search_noise() {
+    let (_d, v) = setup();
+    let id = capture(
+        &v,
+        "personal",
+        "echo",
+        r#"用户附言加上上下文 {"schema":"recallcard.context/1","result":"合成被复述事实"}"#,
+    );
+    assert_eq!(
+        v.event(&id).unwrap().data.origin,
+        recallcard::Origin::ContextInjection
+    );
+    assert!(
+        context(&v).search(search("合成被复述事实")).unwrap()["results"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let input: MemoryInput = serde_json::from_value(
+        json!({"content":"合成被复述事实","source_refs":[id],"evidence":"user_explicit"}),
+    )
+    .unwrap();
+    assert!(v.add_memory(input).is_err());
+}
+
+#[test]
+fn metadata_only_file_sources_report_missing_body() {
+    let (_d, v) = setup();
+    let input:EventInput=serde_json::from_value(json!({"occurred_at":null,"role":"tool","origin":"tool_output","kind":"file","metadata":{"path":"synthetic.txt","size":12},"source":{"platform":"demo","conversation_id":"demo","message_id":"file"}})).unwrap();
+    let e = v.capture(input).unwrap();
+    let r = context(&v)
+        .read(ReadArgs {
+            refs: vec![format!("event:{}", e.id)],
+            budget_tokens: 12000,
+        })
+        .unwrap();
+    assert_eq!(r["results"][0]["retention"], "content_not_retained");
+}
+#[test]
+fn disposable_index_and_empty_directories_are_rebuilt_offline() {
+    let (_d, v) = setup();
+    capture(&v, "personal", "a", "离线恢复合成内容");
+    std::fs::remove_dir_all(v.root().join(".index")).unwrap();
+    std::fs::remove_dir_all(v.root().join("generated")).unwrap();
+    std::fs::remove_dir_all(v.root().join("memories")).unwrap();
+    std::fs::remove_dir_all(v.root().join("objects")).unwrap();
+    let reopened = Vault::open(v.root()).unwrap();
+    reopened.rebuild().unwrap();
+    assert!(reopened.root().join(".index/text.json").exists());
+    assert_eq!(
+        context(&reopened).search(search("离线恢复")).unwrap()["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}

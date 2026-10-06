@@ -1,0 +1,6 @@
+{
+  "session": {"nonce":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","session_ref":"chatgpt:11111111-1111-4111-8111-111111111111"},
+  "valid": {"protocol":"recallcard.action/1","request_id":"r_fixture_01","nonce":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","session_ref":"chatgpt:11111111-1111-4111-8111-111111111111","action":"search","arguments":{"query":"Rust 与 Python 的决定","target":"all","limit":5,"detail":"context","budget_tokens":1500}},
+  "unsupported": ["capture", "remember", "delete", "shell", "exec", "fetch", "sync", "dream"],
+  "bad_refs": ["../../etc/passwd", "file:///etc/passwd", "https://example.test/data", "event:../../secret", "memory:mem_a@0", "view:../profile"]
+}

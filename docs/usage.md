@@ -83,3 +83,7 @@ recallcard --vault <目录> restore <id>
 抑制 Memory 同时抑制其来源 Event，以阻止下一次提炼重新出现。范围较保守，可能一并屏蔽同条原话的其他内容。恢复必须显式执行。Git 历史、其他设备 clone、已发送到模型的内容不会因此被擦除。
 
 配置和凭据不要放入 Vault。受限容器若无法写标准状态目录，可设置 `RECALLCARD_STATE_DIR=/可写路径`。不同 Vault 使用不同摘要子目录和操作系统文件锁；崩溃释放锁，不依赖删除锁文件猜测进程存活。
+
+## 6. 注入内容再次导入
+
+Core 会识别自己的 `recallcard.context/1`、`recallcard.dream-job/1`、`recallcard.dream-result/1` 标记，重新捕获时标成 synthetic origin，不把复述当新的独立记忆证据，也不混入默认文本检索。正文仍留在原始事件，可按明确编号审计。含用户附言与上下文的混合消息在首版整条保守排除，避免来源被清洗；不会假装已实现精确块级证据批准。

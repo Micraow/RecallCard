@@ -42,6 +42,30 @@ enum Command {
         #[arg(long)]
         scope: String,
     },
+    /// 手工 Dream：导出、预览、按摘要批准与恢复
+    Dream {
+        #[command(subcommand)]
+        action: DreamCommand,
+    },
+    /// 以浏览器原生消息协议提供受限只读访问
+    NativeHost {
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+        #[arg(long)]
+        allowed_extension: String,
+        origin: String,
+        #[arg(long)]
+        parent_window: Option<u64>,
+    },
+    /// 生成待人工检查/注册的 Native Messaging 文件
+    NativeInstall {
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+        #[arg(long)]
+        extension_id: String,
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
     /// 人工管理长期记忆
     Memory {
         #[command(subcommand)]
@@ -51,6 +75,13 @@ enum Command {
     Read { id: String },
     /// 返回记忆的原始证据
     Sources { id: String },
+    /// 按当前授权/抑制状态导出可选Embedding输入；不会发送云端
+    EmbeddingExport {
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+    },
+    /// 离线重建文本快照与视图，不重新调用模型
+    Rebuild,
     /// 根据 canonical Memory 重新生成人类视图
     Views,
     /// 检查 schema、摘要与证据完整性
@@ -87,6 +118,34 @@ enum Command {
     },
     /// 显式撤销一条抑制规则
     Restore { id: String },
+}
+#[derive(Subcommand)]
+enum DreamCommand {
+    /// 导出明确选择的有界来源；不自动发送任何云端
+    Export {
+        #[arg(long, required = true)]
+        source: Vec<String>,
+        #[arg(long)]
+        memory: Vec<String>,
+        #[arg(long)]
+        scope: String,
+    },
+    /// 校验结果并显示逐条差异，不发布
+    Review {
+        #[arg(long)]
+        file: String,
+    },
+    /// 按 review 返回的摘要显式批准发布
+    Apply {
+        #[arg(long)]
+        file: String,
+        #[arg(long)]
+        approve: String,
+        #[arg(long)]
+        approve_protected: bool,
+    },
+    /// 恢复中断的本机多文件事务，冲突时停止
+    Recover,
 }
 #[derive(Subcommand)]
 enum MemoryCommand {
@@ -159,6 +218,32 @@ fn run(cli: Cli) -> Result<Value> {
             let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
             recallcard::import::import_text(&vault, &format, &text, &scope)
         }
+        Command::NativeInstall {
+            scope,
+            extension_id,
+            output_dir,
+        } => recallcard::native::prepare_install(&vault, scope, &extension_id, &output_dir),
+        Command::NativeHost { .. } => Err("Native host 必须使用 framed stdio 模式".into()),
+        Command::Dream { action } => match action {
+            DreamCommand::Export {
+                source,
+                memory,
+                scope,
+            } => value(vault.dream_export(&source, &memory, &scope)?),
+            DreamCommand::Review { file } => {
+                value(vault.dream_review(&input::<recallcard::dream::DreamResult>(&file)?)?)
+            }
+            DreamCommand::Apply {
+                file,
+                approve,
+                approve_protected,
+            } => value(vault.dream_apply(
+                &input::<recallcard::dream::DreamResult>(&file)?,
+                &approve,
+                approve_protected,
+            )?),
+            DreamCommand::Recover => vault.dream_recover(),
+        },
         Command::Memory { action } => match action {
             MemoryCommand::Add { file } => value(vault.add_memory(input::<MemoryInput>(&file)?)?),
             MemoryCommand::Update { id, revision, file } => {
@@ -179,8 +264,18 @@ fn run(cli: Cli) -> Result<Value> {
                 },
             )?),
         },
-        Command::Read { id } => vault.read(&id),
-        Command::Sources { id } => value(vault.sources(&id)?),
+        Command::Read { id } => {
+            ensure_visible(&vault, &id)?;
+            vault.read(&id)
+        }
+        Command::Sources { id } => {
+            ensure_visible(&vault, &id)?;
+            value(vault.sources(&id)?)
+        }
+        Command::EmbeddingExport { scope } => {
+            Context::new(&vault, Access::new(scope)?).embedding_corpus()
+        }
+        Command::Rebuild => vault.rebuild(),
         Command::Views => Ok(json!({"ok":true,"memories":vault.rebuild_views()?})),
         Command::Doctor => vault.doctor(),
         Command::Bootstrap {
@@ -210,6 +305,27 @@ fn run(cli: Cli) -> Result<Value> {
 }
 fn main() {
     let cli = Cli::parse();
+    if let Command::NativeHost {
+        scope,
+        allowed_extension,
+        origin,
+        ..
+    } = &cli.command
+    {
+        let result = Vault::open(&cli.vault).and_then(|vault| {
+            recallcard::native::serve_native(
+                &vault,
+                Access::new(scope.clone())?,
+                allowed_extension,
+                origin,
+            )
+        });
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Command::Mcp { scope } = &cli.command {
         let result = Vault::open(&cli.vault).and_then(|vault| {
             recallcard::transport::serve_mcp(&vault, Access::new(scope.clone())?)
@@ -235,4 +351,22 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn ensure_visible(vault: &Vault, id: &str) -> Result<()> {
+    let suppressed = vault.suppressed_ids()?;
+    if suppressed.contains(id) {
+        return Err("记录已被抑制；需要恢复时请显式执行 restore".into());
+    }
+    if id.starts_with("mem_")
+        && vault
+            .memory(id)?
+            .data
+            .source_refs
+            .iter()
+            .any(|id| suppressed.contains(id))
+    {
+        return Err("记忆的来源已被抑制".into());
+    }
+    Ok(())
 }

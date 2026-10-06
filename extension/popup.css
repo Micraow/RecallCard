@@ -1,0 +1,18 @@
+:root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
+body { width: 440px; margin: 0; padding: 18px; background: light-dark(#f7f8fa, #181b20); color: light-dark(#18232e, #e5e9ef); }
+header { display: flex; align-items: baseline; justify-content: space-between; }
+h1 { font-size: 22px; margin: 0 0 8px; }
+header span, .muted { font-size: 12px; opacity: .78; }
+p { margin: 8px 0 12px; }
+.notice { border-left: 3px solid #4278a0; padding-left: 10px; }
+#status { border-radius: 6px; padding: 9px; background: light-dark(#e7edf2, #27323d); overflow-wrap: anywhere; }
+#status.error { background: light-dark(#ffeded, #49282c); }
+label { display: block; margin: 12px 0 5px; font-weight: 600; }
+textarea { box-sizing: border-box; width: 100%; resize: vertical; border: 1px solid #8796a4; border-radius: 6px; padding: 8px; font: 12px/1.45 ui-monospace, monospace; background: light-dark(white, #11151b); color: inherit; }
+button { padding: 8px 11px; border: 1px solid transparent; border-radius: 6px; cursor: pointer; background: light-dark(#245b79, #94c8e5); color: light-dark(white, #102c3c); margin: 5px 0; font: inherit; }
+button.secondary { background: transparent; color: inherit; border-color: #8796a4; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, textarea:focus-visible { outline: 3px solid #d89944; outline-offset: 2px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+details { margin-top: 8px; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }

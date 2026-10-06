@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "RecallCard 手动上下文桥",
+  "version": "0.1.0",
+  "description": "预览本机 RecallCard 上下文，保留草稿，由你手动发送。不会抓取聊天回复。",
+  "minimum_chrome_version": "116",
+  "permissions": ["nativeMessaging", "storage"],
+  "host_permissions": ["https://chatgpt.com/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "RecallCard 手动上下文桥" },
+  "content_scripts": [{
+    "matches": ["https://chatgpt.com/*"],
+    "js": ["composer-adapter.js", "content.js"],
+    "run_at": "document_idle",
+    "all_frames": false,
+    "world": "ISOLATED"
+  }],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'none'"
+  }
+}
