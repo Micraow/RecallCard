@@ -1,0 +1,7 @@
+{
+  "name": "com.recallcard.host",
+  "description": "RecallCard 本机只读上下文桥",
+  "path": "/ABSOLUTE/PATH/TO/recallcard-native-host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://REPLACE_WITH_YOUR_32_CHARACTER_EXTENSION_ID/"]
+}

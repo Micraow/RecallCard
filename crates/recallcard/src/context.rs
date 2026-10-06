@@ -85,6 +85,7 @@ impl<'a> Context<'a> {
         Self { vault, access }
     }
     pub fn documents(&self) -> Result<Vec<Document>> {
+        let _read_guard = self.vault.read_guard()?;
         let suppressed = self.vault.suppressed_ids()?;
         let events = self.vault.events()?;
         let revisions: BTreeSet<String> = events
@@ -94,6 +95,16 @@ impl<'a> Context<'a> {
         let mut docs = Vec::new();
         for event in &events {
             if !self.access.permits(&event.data.scope)
+                || matches!(
+                    event.data.origin,
+                    Origin::ContextInjection | Origin::RecallcardDreamJob
+                )
+                || event.data.parts.iter().any(|p| {
+                    matches!(
+                        p.origin,
+                        Origin::ContextInjection | Origin::RecallcardDreamJob
+                    )
+                })
                 || suppressed.contains(&event.id)
                 || revisions.contains(&event.id)
             {
@@ -192,9 +203,22 @@ impl<'a> Context<'a> {
         let text=format!("{}\n\n个人参考资料（仅用户显式标记 bootstrap 的受保护记忆）：\n{}\n可用目录：{}\n授权范围：{}\n",RULES,profile,labels.into_iter().collect::<Vec<_>>().join("、"),self.access.scopes().join("、"));
         let stable_text = truncate_utf8(&text, args.budget_tokens.saturating_sub(180));
         let version = hash(stable_text.as_bytes());
-        Ok(
-            json!({"bootstrap_version":version,"stable_text":stable_text,"reference_data":true,"refs":refs,"coverage":{"captured_events":docs.iter().filter(|d|d.kind=="event").count(),"semantic_search":"unavailable","scope_filtered":true},"truncated":stable_text.len()!=text.len(),"budget_unit":"UTF-8字节上界（保守token估算）"}),
-        )
+        let mut response = json!({"bootstrap_version":version,"stable_text":stable_text,"reference_data":true,"refs":refs,"coverage":{"captured_events":docs.iter().filter(|d|d.kind=="event").count(),"semantic_search":"unavailable","scope_filtered":true},"truncated":stable_text.len()!=text.len(),"budget_unit":"conservative_utf8_bytes"});
+        while json_size(&response)? > args.budget_tokens {
+            response["truncated"] = json!(true);
+            if !response["refs"].as_array().unwrap().is_empty() {
+                response["refs"].as_array_mut().unwrap().pop();
+                continue;
+            }
+            let old = response["stable_text"].as_str().unwrap();
+            if old.len() < 16 {
+                return Err("预算不足以输出启动资料".into());
+            }
+            response["stable_text"] = json!(truncate_utf8(old, old.len().saturating_sub(64)));
+        }
+        response["bootstrap_version"] =
+            json!(hash(response["stable_text"].as_str().unwrap().as_bytes()));
+        Ok(response)
     }
     pub fn search(&self, args: SearchArgs) -> Result<Value> {
         check_budget(args.budget_tokens)?;
@@ -298,9 +322,22 @@ impl<'a> Context<'a> {
         }
         let next = offset + consumed;
         let truncated = next < total;
-        Ok(
-            json!({"results":results,"coverage":{"event_search":"available","semantic_search":"unavailable","undreamed_events_included":true,"scope_filtered":true,"indexed_generation":generation},"truncated":truncated,"next_cursor":if truncated&&consumed>0{Some(format!("{binding}:{next}"))}else{None},"budget_exhausted":truncated&&consumed==0,"budget_unit":"UTF-8字节上界（保守token估算）"}),
-        )
+        let mut response = json!({"results":results,"coverage":{"event_search":"available","semantic_search":"unavailable","undreamed_events_included":true,"scope_filtered":true,"indexed_generation":generation},"truncated":truncated,"next_cursor":if truncated&&consumed>0{Some(format!("{binding}:{next}"))}else{None},"budget_exhausted":truncated&&consumed==0,"budget_unit":"conservative_utf8_bytes"});
+        while json_size(&response)? > args.budget_tokens {
+            let count = response["results"].as_array().unwrap().len();
+            if count == 0 {
+                return Err("预算不足以容纳搜索状态".into());
+            }
+            response["results"].as_array_mut().unwrap().pop();
+            response["truncated"] = json!(true);
+            response["next_cursor"] = if count > 1 {
+                json!(format!("{binding}:{}", offset + count - 1))
+            } else {
+                Value::Null
+            };
+            response["budget_exhausted"] = json!(count == 1);
+        }
+        Ok(response)
     }
     pub fn read(&self, args: ReadArgs) -> Result<Value> {
         self.read_internal(args, false)
@@ -309,6 +346,7 @@ impl<'a> Context<'a> {
         self.read_internal(args, true)
     }
     fn read_internal(&self, args: ReadArgs, sources: bool) -> Result<Value> {
+        let _read_guard = self.vault.read_guard()?;
         check_budget(args.budget_tokens)?;
         if args.refs.is_empty() || args.refs.len() > 32 {
             return Err("refs 必须包含 1–32 个引用".into());
@@ -331,7 +369,8 @@ impl<'a> Context<'a> {
                 if !self.access.permits(&event.data.scope) || suppressed.contains(id) {
                     return Err("引用不可访问或已被抑制".into());
                 }
-                json!({"ref":reference,"record":event,"content_retained":true})
+                let retained = event.data.kind != "file" || !event.data.text().is_empty();
+                json!({"ref":reference,"record":event,"content_retained":retained,"retention":if retained{"inline"}else{"content_not_retained"}})
             } else {
                 let memory = self.vault.memory(id)?;
                 if !self.memory_visible(&memory, &suppressed)? {
@@ -342,7 +381,12 @@ impl<'a> Context<'a> {
                 }
                 if sources {
                     let events = self.vault.sources(id)?;
-                    json!({"ref":reference,"events":events,"content_retained":true,"note":"文件仅有路径/摘要时，不代表保留了文件正文"})
+                    let missing = events
+                        .iter()
+                        .filter(|e| e.data.kind == "file" && e.data.text().is_empty())
+                        .map(|e| format!("event:{}", e.id))
+                        .collect::<Vec<_>>();
+                    json!({"ref":reference,"events":events,"content_not_retained":missing,"note":"文件仅有路径/摘要时，不代表保留了文件正文"})
                 } else {
                     json!({"ref":reference,"record":memory})
                 }
@@ -355,9 +399,19 @@ impl<'a> Context<'a> {
             used += len;
             results.push(value);
         }
-        Ok(
-            json!({"results":results,"truncated":!pending.is_empty(),"pending_refs":pending,"hint":"预算不足时可分批 read，或使用 search(detail=brief/context) 获取有界片段"}),
-        )
+        let mut response = json!({"results":results,"truncated":!pending.is_empty(),"pending_refs":pending,"hint":"预算不足时分批 read 或使用 search 获取片段"});
+        while json_size(&response)? > args.budget_tokens {
+            response["truncated"] = json!(true);
+            if !response["results"].as_array().unwrap().is_empty() {
+                response["results"].as_array_mut().unwrap().pop();
+            } else if !response["pending_refs"].as_array().unwrap().is_empty() {
+                response["pending_refs"].as_array_mut().unwrap().pop();
+                response["pending_list_truncated"] = json!(true);
+            } else {
+                return Err("预算不足以输出读取状态".into());
+            }
+        }
+        Ok(response)
     }
 }
 
@@ -466,5 +520,48 @@ fn check_budget(n: usize) -> Result<()> {
         Err("budget_tokens 必须在 512–32768 之间；使用保守字节上界".into())
     } else {
         Ok(())
+    }
+}
+
+fn json_size(value: &Value) -> Result<usize> {
+    serde_json::to_vec(value)
+        .map(|b| b.len())
+        .map_err(|e| e.to_string())
+}
+
+impl<'a> Context<'a> {
+    pub fn embedding_corpus(&self) -> Result<Value> {
+        let documents=self.documents()?.into_iter().filter(|d|d.kind=="memory"&&matches!(d.state.as_str(),"active"|"tentative")).map(|d|json!({"ref":d.reference,"content_hash":hash(d.text.as_bytes()),"text":d.text,"scope":d.scope})).collect::<Vec<_>>();
+        let generation = hash(&serde_json::to_vec(&documents).map_err(|e| e.to_string())?);
+        Ok(
+            json!({"schema":"recallcard.embedding-corpus/1","generation":generation,"scope":self.access.scopes(),"documents":documents}),
+        )
+    }
+}
+impl Vault {
+    pub fn rebuild(&self) -> Result<Value> {
+        self.doctor()?;
+        let views = self.rebuild_views()?;
+        self.ensure_derived()?;
+        let mut scopes = BTreeSet::new();
+        for e in self.events()? {
+            scopes.insert(e.data.scope);
+        }
+        for m in self.memories()? {
+            scopes.insert(m.data.scope);
+        }
+        if scopes.is_empty() {
+            scopes.insert("personal".into());
+        }
+        let docs = Context::new(self, Access::new(scopes.into_iter().collect())?).documents()?;
+        let generation = hash(&serde_json::to_vec(&docs).map_err(|e| e.to_string())?);
+        let _lock = self.lock()?;
+        self.write_replace(
+            &self.root().join(".index/text.json"),
+            &json!({"schema":"recallcard.text-index/1","generation":generation,"documents":docs}),
+        )?;
+        Ok(
+            json!({"ok":true,"memories":views,"indexed_generation":generation,"semantic_index":"not_rebuilt","note":"文本快照与视图已离线重建；向量重建需要原模型或已缓存向量"}),
+        )
     }
 }

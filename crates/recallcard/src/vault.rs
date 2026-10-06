@@ -23,7 +23,7 @@ impl Drop for WriteGuard {
 
 impl Vault {
     pub fn init(root: &Path) -> Result<Self> {
-        reject_symlink(root)?;
+        reject_root_symlink(root)?;
         fs::create_dir_all(root).map_err(err)?;
         let root = fs::canonicalize(root).map_err(err)?;
         for name in [
@@ -70,15 +70,25 @@ impl Vault {
         Ok(vault)
     }
     pub fn open(root: &Path) -> Result<Self> {
-        reject_symlink(root)?;
+        reject_root_symlink(root)?;
         let root = fs::canonicalize(root).map_err(err)?;
         let vault = Self { root };
         vault.check_marker()?;
-        for name in ["events", "memories", "control", "objects"] {
+        for name in [
+            "events",
+            "memories",
+            "control",
+            "objects",
+            "control/dream-receipts",
+            "control/suppressions",
+        ] {
             let path = vault.root.join(name);
             reject_symlink(&path)?;
+            if !path.exists() {
+                fs::create_dir_all(&path).map_err(err)?;
+            }
             if !path.is_dir() {
-                return Err(format!("Vault 缺少目录 {name}"));
+                return Err(format!("Vault 目录不是目录：{name}"));
             }
         }
         Ok(vault)
@@ -92,6 +102,8 @@ impl Vault {
             .or_else(dirs::state_dir)
             .or_else(dirs::data_local_dir)
             .ok_or("无法确定本机状态目录，请设置 RECALLCARD_STATE_DIR")?;
+        fs::create_dir_all(&base).map_err(err)?;
+        let base = fs::canonicalize(base).map_err(err)?;
         let path = base
             .join("recallcard")
             .join(hash(self.root.to_string_lossy().as_bytes()));
@@ -408,6 +420,22 @@ impl Vault {
         self.ensure_no_pending_dream()?;
         Ok(guard)
     }
+    pub(crate) fn read_guard(&self) -> Result<WriteGuard> {
+        let path = self.state_dir()?.join("write.lock");
+        reject_symlink(&path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(err)?;
+        file.try_lock_shared()
+            .map_err(|e| format!("Vault 正在更新，请稍后重试：{e}"))?;
+        let guard = WriteGuard(file);
+        self.ensure_no_pending_dream()?;
+        Ok(guard)
+    }
     pub(crate) fn lock_unchecked(&self) -> Result<WriteGuard> {
         let path = self.state_dir()?.join("write.lock");
         reject_symlink(&path)?;
@@ -567,4 +595,13 @@ fn sync_parent(path: &Path) -> Result<()> {
 }
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+
+fn reject_root_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.is_symlink() => Err("Vault 根目录不能是符号链接".into()),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(err(e)),
+    }
 }

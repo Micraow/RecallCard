@@ -4,7 +4,7 @@
 
 RecallCard 是本地优先、文件原生的个人上下文层。Rust 主程序保存可追溯事件和长期记忆，向本地 Agent 提供只读检索。数据留在你选定的 Vault；初始化不会配置远端，也不调用任何云模型。
 
-## 当前可运行的第一段
+## 当前可运行能力
 
 - JSONL 原始事件封段、重复导入去重、内容修订链
 - Markdown + YAML frontmatter 长期记忆、原子替换、版本冲突保护
@@ -12,9 +12,11 @@ RecallCard 是本地优先、文件原生的个人上下文层。Rust 主程序�
 - MCP stdio 的 `bootstrap / search / read / sources` 四个只读工具
 - 按客户端绑定 scope；来源校验、反注入回声、秘密模式脱敏、遗忘抑制
 - 主动导入手工 JSONL、ChatGPT 官方导出所选分支、Claude Code JSONL 日志
+- 手动 Dream：有界导出、差异预览、按摘要批准、保护记录、幂等收据和崩溃恢复
+- Chrome 扩展 + Native Messaging：只读查询、可见草稿、人工发送，不扫描网页回复
 - 确定性人类视图、Git 初始化、离线健康检查
 
-这是开发中的首个纵切，不代表整份设计已完成。手动 Dream、浏览器桥、可选云向量、同步与跨平台硬化分段交付，见[实施进度](docs/progress.md)。目前不需要 Python、API key 或向量数据库。
+这是开发中的分阶段实现，不代表整份设计已完成。可选云向量、同步与跨平台硬化仍在继续，见[实施进度](docs/progress.md)。目前不需要 Python、API key 或向量数据库。
 
 ## 快速开始
 
@@ -61,6 +63,8 @@ vault/
 - [整体设计 v0.2](docs/RecallCard-DESIGN-v0.2.md) 为实施依据；[v0.1](docs/RecallCard-DESIGN.md) 保留历史
 - [本地使用与数据格式](docs/usage.md)
 - [安全边界](docs/security.md)
+- [手动 Dream](docs/dream.md)
+- [浏览器桥安装与人工验收](docs/browser.md)
 - [实施进度与验收](docs/progress.md)
 
 ```bash

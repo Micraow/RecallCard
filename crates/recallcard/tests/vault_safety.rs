@@ -856,3 +856,20 @@ fn credential_metadata_keys_trigger_redaction_before_storage() {
     assert!(raw.contains("正常中文仍可保留"));
     assert!(event.data.capture.redacted);
 }
+
+#[test]
+fn untrusted_redaction_counter_cannot_overflow_and_panic() {
+    let (_dir, vault) = vault();
+    let mut input = event_input(Role::User, Origin::Native, "脱敏计数溢出");
+    input.content = "合成测试：password=FAKE_OVERFLOW_TEST_ONLY".into();
+    input.capture.redaction_count = usize::MAX;
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| vault.capture(input)));
+    assert!(
+        outcome.is_ok(),
+        "不可信输入的脱敏计数溢出必须安全处理，不能 panic"
+    );
+    if let Ok(event) = outcome.unwrap() {
+        assert!(!event.data.content.contains("FAKE_OVERFLOW_TEST_ONLY"));
+        assert!(event.data.capture.redacted);
+    }
+}
