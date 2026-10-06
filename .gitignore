@@ -1,0 +1,12 @@
+/target/
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+/vault/
+/test-vault/
+*.log
+.DS_Store
+
