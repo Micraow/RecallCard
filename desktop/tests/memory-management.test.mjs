@@ -1,7 +1,7 @@
 // 合成 Vault 上的真实 Chromium DOM 回归；不读取真实对话或连接外部 AI。
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { workspaceAssets, idle, button, navigate, openSearch, openDream, openContinuation } from './workspace-browser-helpers.mjs';
 import { chromium } from '../../extension/node_modules/playwright/index.mjs';
 
 const vault = { session_id: 'synthetic-memory-session', display_name: '合成记忆库',
@@ -16,11 +16,9 @@ const source = { id: 'evt_synthetic', scope: 'personal', role: 'assistant',
   content: '完整原始 AI 建议，不能当作用户亲口确认的事实。',
   source: { platform: 'synthetic', conversation_id: 'conversation', message_id: 'message' } };
 let browser;
-const assets = new Map();
+let assets;
 before(async () => {
-  for (const file of ['index.html', 'app.js', 'model.js', 'memory-management.js', 'styles.css']) {
-    assets.set(`/${file}`, await readFile(new URL(`../ui/${file}`, import.meta.url)));
-  }
+  assets = await workspaceAssets();
   browser = await chromium.launch(process.env.RECALLCARD_CHROMIUM_PATH ? { executablePath: process.env.RECALLCARD_CHROMIUM_PATH } : {});
 });
 after(async () => { await browser?.close(); });
@@ -63,8 +61,8 @@ async function fixture(t, overrides = {}) {
       case 'browse_records': case 'search_records': return { results: data.hidden ? [] : [{ ref: `memory:${data.memory.id}@${data.memory.revision}`, text: data.memory.content }], truncated: false };
       case 'read_record': return { results: [{ ref: payload.reference, record: data.memory }] };
       case 'read_sources': return { results: [{ events: [source] }] };
-      case 'list_conversations': return { conversations: [{ session_ref: 'conversation', title: '合成会话', message_count: 1 }] };
-      case 'conversation_messages': return { messages: [{ ref: 'event:evt_synthetic', role: 'assistant', text: source.content }], total: 1, next_offset: null };
+      case 'list_conversations': return { conversations: data.hidden || payload.scope !== 'personal' ? [] : [{ session_ref: 'conversation', title: '合成会话', platform: source.source.platform, message_count: 1, captured_at: source.captured_at, coverage: 'partial' }], total: data.hidden || payload.scope !== 'personal' ? 0 : 1, next_offset: null };
+      case 'conversation_messages': return { session_ref: 'conversation', title: '合成会话', platform: source.source.platform, messages: data.hidden ? [] : [{ ref: 'event:evt_synthetic', role: 'assistant', text: source.content, occurred_at: null }], total: data.hidden ? 0 : 1, next_offset: null, order_known: false };
       case 'prepare_continuation': return { text: '需要清空的旧交接正文', message_count: 1, available_messages: 1 };
       default: throw new Error(`未定义的测试命令：${command}`);
     }
@@ -91,12 +89,9 @@ async function fixture(t, overrides = {}) {
   });
   await page.goto('https://recallcard.test/index.html');
   await button(page, '打开已有资料库'); await idle(page);
-  await navigate(page, '记忆管理');
+  await navigate(page, '记忆');
   return { page, native };
 }
-async function idle(page) { await page.waitForFunction(() => document.querySelector('#operation').textContent === '准备就绪'); }
-async function button(page, name) { await page.getByRole('button', { name, exact: true }).click(); }
-async function navigate(page, name) { await page.locator('#navigation').getByRole('button', { name, exact: true }).click(); await idle(page); }
 async function select(page) { await page.locator('.memory-list .result-card').first().click(); await idle(page); }
 async function edit(page) { await select(page); await button(page, '修改正文、标签与保护'); await page.locator('#memory-content').fill('纠正后的记忆正文'); }
 async function review(page) { await button(page, '检查变更与影响'); await idle(page); }
@@ -186,7 +181,7 @@ test('遗忘影响共享出处与其他受保护记忆，恢复仍受其他规�
   assert.equal(native.matching('review_memory_visibility').at(-1).payload.restore, true);
   await select(page);
   assert.equal(await page.getByRole('button', { name: '撤销这条遗忘规则', exact: true }).count(), 0);
-  assert.match(await page.locator('.memory-detail').textContent(), /当前隐藏来自其他记忆或来源/);
+  assert.match(await page.locator('.memory-detail').textContent(), /其他记忆或来源/);
 });
 
 test('保存期间禁用重复确认和范围切换；快照冲突撤销预览，允许重新审查', async t => {
@@ -212,15 +207,23 @@ test('范围与资料库切换废弃全文、来源、草稿、隐藏筛选和�
   await page.locator('#include-hidden-memories').check(); await idle(page);
   await edit(page); await review(page); await page.locator('#memory-protected-approval').check();
   await page.getByRole('combobox', { name: '资料范围' }).selectOption('work'); await idle(page);
+  assert.equal(await page.getByRole('combobox', { name: '资料范围' }).inputValue(), 'personal');
+  await page.locator('#modal').getByRole('button', { name: '继续编辑', exact: true }).click();
+  assert.equal(await page.locator('#memory-review').count(), 1);
+  assert.equal(await page.locator('#memory-content').inputValue(), '纠正后的记忆正文');
+  await page.getByRole('combobox', { name: '资料范围' }).selectOption('work');
+  await page.locator('#modal').getByRole('button', { name: '放弃更改', exact: true }).click(); await idle(page);
   assert.equal(await page.locator('#memory-review, #memory-content, .memory-full-text').count(), 0);
   assert.equal(await page.locator('#include-hidden-memories').isChecked(), false);
   assert.equal(native.matching('manage_memories').at(-1).payload.scope, 'work');
   await page.getByRole('combobox', { name: '资料范围' }).selectOption('personal'); await idle(page);
   await edit(page); await review(page);
   await button(page, '切换资料库');
+  assert.equal(await page.locator('#modal').getByRole('heading', { name: '还有未保存的更改', exact: true }).count(), 1);
+  await page.locator('#modal').getByRole('button', { name: '放弃更改', exact: true }).click();
   native.next('choose_vault', () => ({ ...vault, session_id: 'second-session', display_name: '另一个合成库' }));
   await page.locator('#modal').getByRole('button', { name: '打开已有资料库', exact: true }).click(); await idle(page);
-  await navigate(page, '记忆管理');
+  await navigate(page, '记忆');
   assert.equal(await page.locator('#memory-review, #memory-content, .memory-full-text').count(), 0);
   assert.equal(native.matching('manage_memories').at(-1).payload.sessionId, 'second-session');
   assert.equal(native.count('confirm_memory_change'), 0);
@@ -240,18 +243,18 @@ test('已替代记忆只在主动筛选后出现且不能编辑，读取失败�
 
 test('遗忘后旧检索、来源选择与交接正文被丢弃，往返页面不会恢复旧预览', async t => {
   const { page, native } = await fixture(t);
-  await navigate(page, '查找与阅读');
-  await page.locator('.result-card').click(); await idle(page);
+  await openSearch(page);
+  await page.locator('[data-reference]').click(); await idle(page);
   await button(page, '选择这条资料'); await idle(page);
-  await navigate(page, '会话与接续'); await page.getByRole('button', { name: /合成会话/ }).click(); await idle(page);
-  await button(page, '准备交接内容'); await idle(page);
+  await navigate(page, '会话'); await page.getByRole('button', { name: /合成会话/ }).click(); await idle(page);
+  await openContinuation(page); await button(page, '准备交接内容'); await idle(page);
   assert.equal(await page.getByRole('textbox', { name: '交接内容预览' }).count(), 1);
-  await navigate(page, '记忆管理'); await select(page); await button(page, '设置遗忘规则');
+  await navigate(page, '记忆'); await select(page); await button(page, '设置遗忘规则');
   await page.locator('#memory-forget-reason').fill('不再使用'); await review(page); await approve(page); await commit(page);
-  await navigate(page, '查找与阅读'); assert.equal(await page.locator('.result-card, .reading-pane .body-text').count(), 0);
-  await navigate(page, '整理记忆'); assert.equal(await page.getByRole('button', { name: '移除', exact: true }).count(), 0);
-  await navigate(page, '会话与接续'); assert.equal(await page.getByRole('textbox', { name: '交接内容预览' }).count(), 0);
-  await navigate(page, '记忆管理'); assert.equal(await page.locator('#memory-review').count(), 0);
+  await openSearch(page); assert.equal(await page.locator('.result-card, .reading-pane .body-text').count(), 0);
+  await openDream(page); assert.equal(await page.getByRole('button', { name: '移除', exact: true }).count(), 0);
+  await navigate(page, '会话'); assert.equal(await page.getByRole('textbox', { name: '交接内容预览' }).count(), 0);
+  await navigate(page, '记忆'); assert.equal(await page.locator('#memory-review').count(), 0);
   assert.equal(native.count('confirm_memory_change'), 1);
 });
 
@@ -262,7 +265,14 @@ test('恶意标记保持纯文本，离开管理页撤销尚未保存的审阅',
   await button(page, '修改正文、标签与保护'); await page.locator('#memory-content').fill(`${hostile}更新`); await review(page);
   assert.equal(await page.locator('#content img, #content script, #content [onerror]').count(), 0);
   assert.equal(await page.evaluate(() => window.__bad), undefined);
-  await navigate(page, '概览'); await navigate(page, '记忆管理');
+  await navigate(page, '会话');
+  assert.equal(await page.locator('#modal').evaluate(node => node.open), true);
+  assert.equal(await page.locator('#memory-review').count(), 1);
+  await page.locator('#modal').getByRole('button', { name: '继续编辑', exact: true }).click();
+  assert.equal(await page.locator('#memory-content').inputValue(), `${hostile}更新`);
+  await navigate(page, '会话');
+  await page.locator('#modal').getByRole('button', { name: '放弃更改', exact: true }).click(); await idle(page);
+  await navigate(page, '记忆');
   assert.equal(await page.locator('#memory-review').count(), 0);
   assert.equal(native.count('confirm_memory_change'), 0);
 });

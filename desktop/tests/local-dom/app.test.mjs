@@ -30,12 +30,10 @@ function noExecutableMarkup(ui, root = ui.one('#content')) {
 
 test('实际首页与资料入口存在，选择资料库以前没有原生写入', async t => {
   const ui = await fixture(t);
-  assert.equal(ui.one('#content h1').textContent, '换一个 AI，也能接着聊。');
+  assert.equal(ui.one('#content h1').textContent, '你的对话与记忆');
   ui.button('创建新资料库'); ui.button('打开已有资料库');
-  assert.equal(ui.one('#navigation').querySelectorAll('button').length, 7);
+  assert.equal(ui.one('#navigation').querySelectorAll('button').length, 2);
   await ui.navigate('添加资料');
-  assert.equal(ui.one('#content h1').textContent, '打开资料库');
-  await ui.click('选择资料库');
   assert.equal(ui.modal().open, true);
   ui.button('创建新资料库', ui.modal()); ui.button('打开已有资料库', ui.modal());
   await ui.click('取消', ui.modal());
@@ -113,6 +111,9 @@ test('仅提交所选会话，预览保留用户/助手/工具、来源和时间
     sessionId: vault.session_id, previewId: preview.preview_id,
   });
   assert.equal(ui.modal().open, false);
+  assert.equal(ui.one('#content h1').textContent, '会话');
+  assert.equal(ui.document.querySelector('.archive-selection'), null);
+  await ui.navigate('添加资料'); await ui.click('选择文件并预览');
   assert.ok([...ui.document.querySelectorAll('.archive-selection input')].every(node => !node.checked));
   assert.equal(ui.button('预览所选会话').disabled, true);
 });

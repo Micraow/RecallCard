@@ -74,6 +74,17 @@ test('Bootstrap 为会话快照，重开弹窗复用；不重复注入已发送�
   assert.equal(h.calls.length,3);
   assert.equal(new Set(h.calls.map(x=>x.request.request_id)).size,3);
 });
+test('准备随身背景沿用本机默认预算，显式请求预算仍由调用者决定',async()=>{
+  const h=harness();
+  await h.broker.handle(h.message('bootstrap'),popup);
+  assert.equal(h.calls[0].request.action,'bootstrap');
+  assert.deepEqual(h.calls[0].request.arguments,{});
+  const other=harness();
+  const request={protocol:'recallcard.action/1',request_id:'r_explicit_background',nonce:other.state().nonce,
+    session_ref:other.state().session_ref,action:'bootstrap',arguments:{budget_tokens:4096}};
+  await other.broker.handle(other.message('execute',{text:'```recallcard-action\n'+JSON.stringify(request)+'\n```'}),popup);
+  assert.deepEqual(other.calls[0].request.arguments,{budget_tokens:4096});
+});
 test('未知 host 响应不会准备任何草稿',async()=>{
   for(const response of [{ok:true},{ok:'yes'},null,{ok:false,error:'未授权范围'}]) {
     const h=harness();h.api.native=async()=>response;

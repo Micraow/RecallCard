@@ -145,6 +145,93 @@ async fn read_sources(
     .await
 }
 #[tauri::command]
+async fn event_location(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    reference: String,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.event_location(&session_id, &scope, &reference)
+    })
+    .await
+}
+#[tauri::command]
+async fn read_background(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> Result<recallcard::desktop::BackgroundPage, String> {
+    execute(state.service.clone(), move |s| {
+        s.read_background(&session_id, &scope)
+    })
+    .await
+}
+#[tauri::command]
+async fn read_background_page(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    offset: usize,
+) -> Result<recallcard::desktop::BackgroundPage, String> {
+    execute(state.service.clone(), move |s| {
+        s.read_background_page(&session_id, &scope, offset)
+    })
+    .await
+}
+#[tauri::command]
+async fn background_memory(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    id: String,
+) -> Result<recallcard::model::Memory, String> {
+    execute(state.service.clone(), move |s| {
+        s.background_memory(&session_id, &scope, &id)
+    })
+    .await
+}
+#[tauri::command]
+async fn background_memory_source(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    memory_id: String,
+    event_id: String,
+) -> Result<recallcard::model::Event, String> {
+    execute(state.service.clone(), move |s| {
+        s.background_memory_source(&session_id, &scope, &memory_id, &event_id)
+    })
+    .await
+}
+#[tauri::command]
+async fn review_background_change(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    id: String,
+    revision: u64,
+    include: bool,
+) -> Result<recallcard::desktop::BackgroundReview, String> {
+    execute(state.service.clone(), move |s| {
+        s.review_background_change(&session_id, &scope, &id, revision, include)
+    })
+    .await
+}
+#[tauri::command]
+async fn confirm_background_change(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    preview_id: String,
+    approve_protected: bool,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.confirm_background_change(&session_id, &scope, &preview_id, approve_protected)
+    })
+    .await
+}
+#[tauri::command]
 async fn manage_memories(
     state: State<'_, AppState>,
     session_id: String,
@@ -651,6 +738,13 @@ fn main() {
             search_records,
             read_record,
             read_sources,
+            event_location,
+            read_background,
+            read_background_page,
+            background_memory,
+            background_memory_source,
+            review_background_change,
+            confirm_background_change,
             manage_memories,
             managed_memory,
             managed_memory_source,

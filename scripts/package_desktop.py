@@ -29,7 +29,7 @@ def main():
     files = {
         'recallcard-desktop': (args.binary.read_bytes(), True),
         'recallcard': (args.cli.read_bytes(), True),
-        '开始使用-中文.md': ((ROOT/'docs/desktop-quickstart-v0.3.md').read_bytes(), False),
+        '开始使用-中文.md': ((ROOT/'docs/desktop-quickstart-v0.4.md').read_bytes(), False),
         '运行桌面版.sh': (b'#!/bin/sh\nset -eu\nAPP_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\nexec "$APP_DIR/recallcard-desktop"\n', True),
     }
     for directory in ['docs', 'fixtures']:

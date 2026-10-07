@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """真实 Tauri/WebKitGTK 冒烟回归：仅使用临时合成数据，不替换 invoke。
 
-在已安装官方 tauri-driver、WebKitWebDriver、xdotool、xclip、scrot、openbox、
+在已安装官方 WebKitWebDriver、xdotool、xclip、scrot、openbox、
 python3-pyatspi 的 Linux 上运行：
 dbus-run-session -- xvfb-run -a /usr/bin/python3 desktop/tests/native_smoke.py
 应用按钮使用 W3C WebDriver；系统文件选择窗口使用正常 X11 键盘和 AT-SPI。
@@ -117,6 +117,15 @@ class WebDriver:
             self.click("#file-import-details > summary")
         if label in {"选择结果并审阅", "导出本次来源包"} and not self.observe("return document.querySelector('#dream-file-options').open"):
             self.click("#dream-file-options > summary")
+        if label.startswith(("查看出处 ", "查看背景出处 ")):
+            if self.observe("return Boolean(document.querySelector('details.source-details:not([open])'))"):
+                self.click("details.source-details:not([open]) > summary")
+        if label == "选择这条资料" or label.startswith("前往整理（"):
+            if self.observe("return Boolean(document.querySelector('details.organize-details:not([open])'))"):
+                self.click("details.organize-details:not([open]) > summary")
+        if label in {"复制当前随身背景", "带上背景继续会话"}:
+            if self.observe("return Boolean(document.querySelector('#background-current:not([open])'))"):
+                self.click("#background-current > summary")
         # 测试中的中文标签没有引号；由浏览器正常派发点击，不调用业务方法。
         try:
             self.click(f"{container}//button[normalize-space(.)='{label}']", "xpath")
@@ -168,10 +177,35 @@ class WebDriver:
             raise AssertionError(f"应用显示错误：{error}")
 
     def navigate(self, label):
-        # 导航按钮包含装饰图标，因此匹配最后一个文本节点。
-        self.click(f"//nav[@id='navigation']/button[text()='{label}']", "xpath")
+        # 通过当前产品真正可见的入口进入工作流，不注入路由或调用业务方法。
+        if label in {"概览", "会话与接续"}:
+            self.click('#navigation [data-workspace="conversations"]')
+        elif label == "记忆管理":
+            self.click('#navigation [data-workspace="memories"]')
+            self.idle()
+            self.click('[data-action="memory-all"]')
+        elif label == "添加资料":
+            self.click('#import-button')
+        elif label == "连接与状态":
+            self.click('#connect-button')
+        elif label == "查找与阅读":
+            self.button("查找")
+        elif label == "随身背景":
+            self.click('#navigation [data-workspace="memories"]')
+            self.idle()
+            self.click('[data-action="background-select"]')
+        elif label == "整理记忆":
+            self.click('#navigation [data-workspace="memories"]')
+            self.idle()
+            self.button("整理记忆")
+        else:
+            self.button(label)
         self.idle()
-        assert self.text("#location") == label
+
+    def open_continuation(self):
+        self.click('[data-action="open-continuation"]')
+        self.idle()
+        assert self.observe("return Boolean(document.querySelector('#continuation-panel'))")
 
     def close(self):
         if self.session:
@@ -326,6 +360,8 @@ class NativeSmoke:
         self.driver.idle()
 
     def preview_import(self, source):
+        if not self.driver.observe("return Boolean(document.querySelector('#file-import-details'))"):
+            self.driver.navigate("添加资料")
         self.driver.button("选择文件并预览")
         self.dialog("选择要导入的对话文件", source)
         assert EVENT_TEXT in self.driver.text(".file-preview")
@@ -364,12 +400,42 @@ class NativeSmoke:
             fixture.writestr("attachment.txt", "合成附件占位，不作为会话正文导入。")
         return archive
 
+    def create_workspace_fixture(self):
+        """仅合成数据：覆盖常见备份密度、长标题、代码、多角色与未知时间。"""
+        archive = self.temporary / "synthetic-workspace-53.zip"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as fixture:
+            for number in range(1, 54):
+                identifier = f"workspace-density-{number:02d}"
+                title = f"工作区验收·{number:02d} 资料整理与跨端接续"
+                user = f"合成任务 {number:02d}：紫杉项目先核对来源、再继续实现。"
+                if number == 53:
+                    title += "：阅读长标题时仍应能够区分相邻会话与来源"
+                    user += "\n" + ("这是一段用于版面验收的合成长消息，内容不包含个人数据。\n" * 100)
+                assistant = f"合成回复 {number:02d}：建议先检查输入。\n```python\nprint('synthetic')\n```\n该建议尚未确认。"
+                nodes = {"root": {"parent": None, "message": None}}
+                parent = "root"
+                for index, (role, body) in enumerate([("user", user), ("assistant", assistant)]):
+                    node = f"{identifier}-{role}"
+                    message = {"id": node, "author": {"role": role},
+                               "content": {"content_type": "text", "parts": [body]}}
+                    if number % 4:
+                        message["create_time"] = ZIP_TIMESTAMP + number * 60 + index
+                    nodes[node] = {"parent": parent, "message": message}
+                    parent = node
+                fixture.writestr(f"{identifier}.json", json.dumps({"id": identifier,
+                    "title": title, "current_node": parent, "mapping": nodes}, ensure_ascii=False))
+        return archive
+
     def preview_zip(self, archive):
         browser = self.driver
+        if not browser.observe("return Boolean(document.querySelector('#file-import-details'))"):
+            browser.navigate("添加资料")
         browser.button("选择文件并预览")
         self.dialog("选择要导入的对话文件", archive)
         assert browser.observe("return document.querySelectorAll('.archive-selection input[type=checkbox]').length") == 2
         assert not browser.observe("return [...document.querySelectorAll('.archive-selection input[type=checkbox]')].some(input => input.checked)"), "ZIP 会话不得自动全选"
+        if browser.observe("return Boolean(document.querySelector('.archive-selection details:not([open])'))"):
+            browser.click(".archive-selection details:not([open]) > summary")
         selection = browser.text(".archive-selection")
         assert "2 个会话 / 4 条消息" in selection
         assert "隐藏推理消息未收集：1" in selection
@@ -448,14 +514,14 @@ class NativeSmoke:
     def verify_search_records(self, expected):
         browser = self.driver
         # WebDriver 可见文本会插入布局空白。先核对可见卡片的正文节点，再真实打开每条原文。
-        rows = browser.observe("return Array.from(document.querySelectorAll('.results .result-card'), node => ({text:node.querySelector('p').textContent, visible:node.getClientRects().length > 0}));")
+        rows = browser.observe("return Array.from(document.querySelectorAll('.results .result-card'), node => ({text:node.querySelector('.result-excerpt').textContent, visible:node.getClientRects().length > 0}));")
         assert len(rows) == len(expected) and all(row["visible"] for row in rows)
         assert {row["text"] for row in rows} == set(expected)
         for index, row in enumerate(rows):
             browser.click(f".results .result-card:nth-child({index + 1})")
             browser.idle()
             assert browser.observe("return document.querySelector('.reading-pane .body-text').textContent") == row["text"]
-            assert browser.observe("return document.querySelector('.reading-pane .ref').textContent") == expected[row["text"]]
+            assert browser.observe("return document.querySelector('.reading-pane > .reader-scroll > .technical-details .info-line .value').textContent") == expected[row["text"]]
 
     def exercise_memory_management(self, original):
         browser = self.driver
@@ -470,7 +536,7 @@ class NativeSmoke:
         browser.idle()
         assert browser.text(".memory-full-text") == MEMORY_TEXT
         assert "用户明确表达" in browser.text(".memory-detail")
-        browser.click(".memory-source-link")
+        browser.button("查看出处 1")
         browser.idle()
         evidence = browser.text(".memory-source")
         assert ZIP_USER_TEXT in evidence and "用户原话" in evidence and "chatgpt-export" in evidence
@@ -582,6 +648,7 @@ class NativeSmoke:
         browser.click("#file-import-details details > summary")
         browser.type("#import-scope", "work")
         browser.blur("#import-scope")
+        browser.click("#note-import-details > summary")
         browser.type("#note-content", WORK_NOTE_TEXT)
         browser.button("预览并保存")
         browser.idle()
@@ -589,7 +656,7 @@ class NativeSmoke:
         browser.idle()
         assert any(event["content"] == WORK_NOTE_TEXT and event["scope"] == "work" for event in self.events())
         assert browser.observe("return document.querySelector('select[aria-label=\"资料范围\"]').value") == "work"
-        assert WORK_NOTE_TEXT in browser.observe("return Array.from(document.querySelectorAll('.results .result-card p'), node => node.textContent)")
+        assert WORK_NOTE_TEXT in browser.observe("return Array.from(document.querySelectorAll('.results .result-card .result-excerpt'), node => node.textContent)")
         assert ZIP_USER_TEXT not in browser.text("#content") and EDITED_MEMORY_TEXT not in browser.text("#content")
         browser.navigate("记忆管理")
         assert not browser.observe("return !!document.querySelector('.memory-list .result-card')")
@@ -608,6 +675,222 @@ class NativeSmoke:
         browser.idle()
         assert browser.observe("return document.querySelectorAll('.results .result-card').length") == 2
         self.checkpoint("GUI明确切换范围且搜索记忆任务隔离")
+
+    def mcp_tool(self, server, name, arguments):
+        # 启动窗口实际生成的固定范围组件，完整走 MCP 初始化与工具协议。
+        messages = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2024-11-05", "capabilities": {},
+                "clientInfo": {"name": "RecallCard原生验收", "version": "0.3"},
+            }},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": name, "arguments": arguments}},
+        ]
+        request = "\n".join(json.dumps(message) for message in messages) + "\n"
+        process = subprocess.run([server["command"], *server["args"]], input=request,
+                                 capture_output=True, text=True, check=True, timeout=15)
+        responses = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+        assert len(responses) == 2 and [value.get("id") for value in responses] == [1, 2], responses
+        assert all("error" not in value for value in responses), responses
+        result = responses[1]["result"]
+        assert result["isError"] is False, result
+        assert len(result["content"]) == 1 and result["content"][0]["type"] == "text", result
+        return json.loads(result["content"][0]["text"])
+
+    def exercise_background_selection(self, original, server):
+        browser = self.driver
+        memory_id = original["id"]
+        candidate = f'article.background-candidate[data-memory-id="{memory_id}"]'
+        checkbox = candidate + ' input[type="checkbox"]'
+        preview_selector = 'textarea[aria-label="当前实际随身背景"]'
+        after_selector = 'textarea[aria-label="保存后的实际随身背景"]'
+
+        def shown(selector=preview_selector):
+            if selector == preview_selector and browser.observe("return Boolean(document.querySelector('#background-current:not([open])'))"):
+                browser.click('#background-current > summary')
+            return browser.observe(f"return document.querySelector({json.dumps(selector)}).value")
+
+        def checked():
+            return browser.observe(f"return document.querySelector({json.dumps(checkbox)}).checked")
+
+        def current_memory():
+            return self.cli_command("read", f"memory:{memory_id}")
+
+        def reference(memory):
+            return f"memory:{memory_id}@{memory['revision']}"
+
+        def review():
+            browser.button("检查随身背景变更")
+            browser.idle()
+            assert browser.observe("return document.querySelector('#background-review > .body-text').textContent") == original["content"]
+
+        def confirm():
+            browser.button("保存随身背景选择", "//section[@id='background-review']")
+            browser.button("确认保存选择", "//dialog[@id='modal']")
+            browser.idle()
+
+        def unchanged_content(memory, previous):
+            changed_fields = {"revision", "updated_at", "protected", "labels"}
+            assert {key: value for key, value in memory.items() if key not in changed_fields} == {
+                key: value for key, value in previous.items() if key not in changed_fields
+            }, "背景选择与标签编辑不得改变正文、证据、来源、时间或其他记忆属性"
+
+        # 先完成原有 20 个步骤，再使用实际当前版本；不沿用编辑前的 @3 引用。
+        assert current_memory() == original
+        original_events = self.events()
+        original_files = self.canonical_memories()
+        browser.navigate("随身背景")
+        assert browser.observe("return document.querySelector('select[aria-label=\"资料范围\"]').value") == "personal"
+        assert browser.observe("return document.querySelectorAll('.background-candidate').length") == 1
+        assert not checked() and original["protected"] is False
+        before_text = shown()
+        assert original["content"] not in before_text and reference(original) not in before_text
+        browser.button("查看全文与出处", f"//article[@data-memory-id='{memory_id}']")
+        browser.idle()
+        assert browser.observe("return document.querySelector('.background-full-text').textContent") == original["content"]
+        browser.button("查看背景出处 1")
+        browser.idle()
+        assert browser.observe("return document.querySelector('.background-source .body-text').textContent") == ZIP_USER_TEXT
+        assert "用户原话" in browser.text(".background-source") and "chatgpt-export" in browser.text(".background-source")
+        browser.click(checkbox)
+        assert checked()
+        review()
+        proposed = shown(after_selector)
+        assert original["content"] in proposed and "recallcard.context/1" in proposed
+        assert shown() == before_text, "未保存的选择不能替换当前实际背景"
+        assert self.canonical_memories() == original_files and self.events() == original_events
+        browser.button("保存随身背景选择", "//section[@id='background-review']")
+        browser.button("取消", "//dialog[@id='modal']")
+        assert self.canonical_memories() == original_files
+        browser.button("取消本次选择", "//section[@id='background-review']")
+        browser.idle()
+        assert not checked() and shown() == before_text
+        assert self.canonical_memories() == original_files and self.events() == original_events
+        self.checkpoint("随身背景原始出处与选择预览取消不写入")
+
+        browser.click(checkbox)
+        review()
+        proposed = shown(after_selector)
+        assert not browser.observe("return !!document.querySelector('#background-protected-approval')")
+        confirm()
+        included = current_memory()
+        unchanged_content(included, original)
+        assert included["revision"] == original["revision"] + 1
+        assert included["protected"] is True
+        assert set(included["labels"]) == set(original["labels"]) | {"bootstrap"}
+        assert checked() and shown() == proposed
+        browser.button("复制当前随身背景")
+        browser.idle()
+        copied = run("xclip", "-selection", "clipboard", "-o")
+        assert copied == proposed, "真实剪贴板须逐字等于实际背景预览"
+        bootstrap = self.mcp_tool(server, "bootstrap", {})
+        assert bootstrap == self.cli_command("bootstrap", "--scope", "personal")
+        assert not bootstrap["truncated"] and bootstrap["refs"] == [reference(included)]
+        assert copied.endswith(bootstrap["stable_text"]) and bootstrap["bootstrap_version"] in copied
+        browser.button("带上背景继续会话")
+        browser.idle()
+        browser.click("//button[contains(@class,'result-card')][.//strong[contains(text(),'合成验收')]]", "xpath")
+        browser.idle()
+        browser.open_continuation()
+        browser.type("textarea[aria-label='接下来要做什么']", "带上已确认背景继续核对原始证据")
+        browser.button("准备交接内容")
+        browser.idle()
+        continuation = shown('textarea[aria-label="交接内容预览"]')
+        continuation_background = continuation.split("## 我的稳定背景与资料访问说明\n", 1)[1].split("\n\n## 来源与覆盖\n", 1)[0]
+        assert continuation_background == bootstrap["stable_text"], "GUI 接续与默认 MCP 必须使用同一份稳定背景"
+        assert original["content"] in continuation and reference(included) in continuation
+        assert self.events() == original_events
+        self.checkpoint("确认随身背景保护与剪贴板MCP接续内容一致")
+
+        # 普通标签编辑不能显示或丢失内部成员标记；仍走受保护内容的实际确认。
+        browser.navigate("记忆管理")
+        browser.click(".memory-list .result-card")
+        browser.idle()
+        browser.button("修改正文、标签与保护")
+        assert shown("#memory-labels").splitlines() == original["labels"]
+        assert "bootstrap" not in shown("#memory-labels")
+        ordinary_labels = [*original["labels"], "背景复核"]
+        browser.type("#memory-labels", "\n".join(ordinary_labels))
+        assert browser.observe("return document.querySelector('#memory-protected').checked")
+        included_files = self.canonical_memories()
+        self.review_memory_change()
+        assert not browser.observe("return document.querySelector('#memory-protected-approval').checked")
+        assert self.canonical_memories() == included_files
+        browser.click("#memory-protected-approval")
+        self.confirm_memory_change()
+        labeled = current_memory()
+        unchanged_content(labeled, included)
+        assert labeled["revision"] == included["revision"] + 1 and labeled["protected"] is True
+        assert set(labeled["labels"]) == set(ordinary_labels) | {"bootstrap"}
+        browser.navigate("随身背景")
+        assert checked()
+        personal_text = shown()
+        personal_bootstrap = self.mcp_tool(server, "bootstrap", {})
+        assert personal_bootstrap["refs"] == [reference(labeled)]
+        assert personal_text.endswith(personal_bootstrap["stable_text"])
+        browser.select('select[aria-label="资料范围"]', "work")
+        assert not browser.observe("return !!document.querySelector('.background-candidate')")
+        work_text = shown()
+        assert original["content"] not in work_text and memory_id not in work_text
+        assert "合成验收" not in work_text and "背景复核" not in work_text
+        browser.navigate("连接与状态")
+        browser.button("生成客户端配置")
+        browser.idle()
+        work_server = json.loads(shown('textarea[aria-label="MCP客户端配置"]'))["mcpServers"]["recallcard"]
+        work_bootstrap = self.mcp_tool(work_server, "bootstrap", {})
+        assert work_bootstrap == self.cli_command("bootstrap", "--scope", "work")
+        assert work_bootstrap["refs"] == [] and work_text.endswith(work_bootstrap["stable_text"])
+        assert original["content"] not in work_bootstrap["stable_text"] and memory_id not in work_bootstrap["stable_text"]
+        assert self.mcp_tool(server, "bootstrap", {}) == personal_bootstrap, "切换 GUI 范围不能改变已生成的个人 MCP 授权"
+        browser.navigate("随身背景")
+        browser.select('select[aria-label="资料范围"]', "personal")
+        assert checked() and shown() == personal_text
+        assert current_memory() == labeled and self.events() == original_events
+        self.checkpoint("随身背景普通标签保留成员且个人工作范围隔离")
+
+        labeled_files = self.canonical_memories()
+        browser.click(checkbox)
+        review()
+        removed_preview = shown(after_selector)
+        assert original["content"] not in removed_preview and memory_id not in removed_preview
+        assert not browser.observe("return document.querySelector('#background-protected-approval').checked")
+        browser.button("保存随身背景选择", "//section[@id='background-review']")
+        assert not browser.observe("return document.querySelector('#modal').open"), "未批准不能移除受保护背景"
+        assert "请先勾选额外确认" in browser.text("#notice")
+        assert self.canonical_memories() == labeled_files
+        browser.click('#notice button[aria-label="关闭提示"]')
+        browser.click("#background-protected-approval")
+        browser.button("保存随身背景选择", "//section[@id='background-review']")
+        browser.button("取消", "//dialog[@id='modal']")
+        assert self.canonical_memories() == labeled_files
+        browser.button("取消本次选择", "//section[@id='background-review']")
+        browser.idle()
+        assert checked() and shown() == personal_text
+        browser.click(checkbox)
+        review()
+        assert not browser.observe("return document.querySelector('#background-protected-approval').checked"), "重新审阅必须重新批准"
+        browser.click("#background-protected-approval")
+        confirm()
+        removed = current_memory()
+        unchanged_content(removed, labeled)
+        assert removed["revision"] == labeled["revision"] + 1 and removed["protected"] is True
+        assert set(removed["labels"]) == set(ordinary_labels) and "bootstrap" not in removed["labels"]
+        assert not checked() and shown() == removed_preview
+        removed_bootstrap = self.mcp_tool(server, "bootstrap", {})
+        assert removed_bootstrap["refs"] == [] and original["content"] not in removed_bootstrap["stable_text"]
+        assert shown().endswith(removed_bootstrap["stable_text"])
+        browser.navigate("查找与阅读")
+        browser.type("#query", "核对证据")
+        browser.button("查找")
+        browser.idle()
+        self.verify_search_records({original["content"]: reference(removed), ZIP_USER_TEXT: f"event:{original['source_refs'][0]}"})
+        assert self.events() == original_events and len(self.memories()) == len(original_files)
+        self.checkpoint("移除随身背景须重新批准且记忆证据标签保护仍保留")
+        return {"before": original, "included": included, "labeled": labeled, "removed": removed,
+                "copied_text": copied, "bootstrap": bootstrap, "continuation": continuation,
+                "personal_bootstrap": personal_bootstrap, "work_bootstrap": work_bootstrap,
+                "removed_bootstrap": removed_bootstrap}
 
     def exercise(self):
         self.vault.mkdir()
@@ -638,9 +921,10 @@ class NativeSmoke:
         wait_for(ready, "WebDriver 启动")
         self.driver = WebDriver(self.application)
         browser = self.driver
-        wait_for(lambda: browser.text("h1") == "换一个 AI，也能接着聊。", "真实 WebKit 首页")
+        wait_for(lambda: bool(browser.text("h1")), "真实 WebKit 初次打开界面")
         browser.idle()
         assert browser.observe("return !!window.__TAURI__?.core?.invoke")
+        assert browser.observe("return document.querySelectorAll('#navigation [data-workspace]').length") == 2
         self.checkpoint("真实桌面首页")
 
         browser.button("打开已有资料库")
@@ -657,7 +941,8 @@ class NativeSmoke:
         self.checkpoint("原生资料库创建选择与取消")
 
         browser.navigate("添加资料")
-        assert not browser.observe("return document.querySelector('#file-import-details').open")
+        assert browser.observe("return document.querySelector('#file-import-details').open")
+        browser.click("#note-import-details > summary")
         browser.type("#note-content", NOTE_TEXT)
         browser.button("预览并保存")
         browser.idle()
@@ -777,10 +1062,12 @@ class NativeSmoke:
         browser.type("#query", "核对证据")
         browser.button("查找")
         browser.idle()
-        browser.click("//button[contains(@class,'result-card')][.//span[text()='长期记忆']]", "xpath")
+        browser.click('.results .result-card[data-reference^="memory:"]')
         browser.idle()
         assert browser.text(".reading-pane .body-text") == MEMORY_TEXT
-        assert ZIP_USER_TEXT in browser.text(".reading-pane .sample")
+        browser.click('.reading-pane details.source-details > summary')
+        assert ZIP_USER_TEXT in browser.text(".reading-pane .source-record .body-text")
+        workspace_evidence = self.exercise_workspace_usability()
         doctor = self.cli_command("doctor")
         assert doctor["ok"], doctor
         self.checkpoint("长期记忆出处与发布防重放")
@@ -812,6 +1099,7 @@ class NativeSmoke:
         browser.idle()
         assert "保存原始消息和来源" in browser.text(".conversation-layout")
         assert "时间未知" in browser.text(".conversation-message")
+        browser.open_continuation()
         browser.type("textarea[aria-label='接下来要做什么']", "继续实现已经确认的决定")
         browser.button("准备交接内容")
         browser.idle()
@@ -837,12 +1125,94 @@ class NativeSmoke:
         mcp = subprocess.run([server["command"], *server["args"]], input=mcp_request, capture_output=True, text=True, check=True, timeout=15)
         assert "离线会话" in mcp.stdout and "event:" in mcp.stdout
         self.checkpoint("GUI生成的持久MCP组件读取刚保存会话")
+        background_evidence = self.exercise_background_selection(edited_memory, server)
+        workspace_evidence = self.exercise_workspace_usability()
         doctor = self.cli_command("doctor")
         assert doctor["ok"], doctor
         (self.artifacts / "canonical-evidence.json").write_text(json.dumps({
             "events": self.events(), "memory": memory, "edited_memory": edited_memory,
             "visibility_rules": visibility_rules, "receipt": receipt, "doctor": doctor, "job": job,
+            "background_selection": background_evidence, "workspace_usability": workspace_evidence,
         }, ensure_ascii=False, indent=2))
+
+    def exercise_workspace_usability(self):
+        browser = self.driver
+        archive = self.create_workspace_fixture()
+        before = len(self.events())
+        browser.navigate("添加资料")
+        browser.button("选择文件并预览")
+        self.dialog("选择要导入的对话文件", archive)
+        assert browser.observe("return document.querySelectorAll('.archive-selection input[type=checkbox]').length") == 53
+        browser.button("选择全部可导入会话")
+        browser.button("预览所选会话")
+        browser.idle()
+        self.confirm_import(106)
+        assert len(self.events()) == before + 106
+        assert browser.observe("return Boolean(document.querySelector('.conversation-list'))"), "保存后应直接进入本批会话成果"
+        assert not browser.observe("return Boolean(document.querySelector('.archive-selection'))"), "保存后不应留在旧导入清单"
+        assert browser.observe("return [...document.querySelectorAll('#navigation [data-workspace]')].map(n=>n.dataset.workspace).join('|')") == "conversations|memories"
+        visible = browser.observe("return [...document.querySelectorAll('.conversation-list .result-card')].filter(n=>{const r=n.getBoundingClientRect();return r.height>0&&r.top>=0&&r.bottom<=innerHeight;}).length")
+        assert visible >= 8, f"默认窗口列表首屏应至少显示8行，实际{visible}行"
+        self.checkpoint("五十三会话导入成果与双工作区可读列表")
+
+        wanted = "工作区验收·53"
+        for _ in range(2):
+            found = browser.observe("return [...document.querySelectorAll('.conversation-list .result-card')].some(n=>n.textContent.includes('工作区验收·53'))")
+            if found:
+                break
+            browser.button("更多会话")
+            browser.idle()
+        assert found, "导入的长会话必须可由列表访问"
+        browser.click("//button[contains(@class,'result-card')][.//strong[contains(text(),'工作区验收·53')]]", "xpath")
+        browser.idle()
+        header = browser.observe("return (()=>{const n=document.querySelector('[data-action=open-continuation]');if(!n)return null;const r=n.getBoundingClientRect();return {top:r.top,bottom:r.bottom,visible:r.height>0&&r.top>=0&&r.bottom<=innerHeight};})()")
+        assert header and header["visible"], "长消息不应把接续主操作推到首屏之外"
+        selected = browser.observe("return document.querySelector('.conversation-list .selected')?.textContent")
+        scroll = browser.observe("return document.querySelector('.conversation-list').scrollTop")
+        browser.navigate("记忆管理")
+        browser.navigate("会话与接续")
+        assert browser.observe("return document.querySelector('.conversation-list .selected')?.textContent") == selected
+        assert abs(browser.observe("return document.querySelector('.conversation-list').scrollTop") - scroll) < 3
+        browser.open_continuation()
+        browser.type("textarea[aria-label='接下来要做什么']", "核对紫杉项目原话，再继续整理；保留当前阅读位置")
+        browser.button("准备交接内容")
+        browser.idle()
+        text = browser.observe("return document.querySelector('textarea[aria-label=交接内容预览]').value")
+        assert "recallcard.context/1" in text and "核对紫杉项目原话" in text
+        browser.button("复制交接内容")
+        browser.idle()
+        assert run("xclip", "-selection", "clipboard", "-o") == text
+        self.checkpoint("长正文固定接续操作与浏览状态恢复")
+        browser.click('[data-action="close-continuation"]')
+        browser.idle()
+        assert browser.observe("return document.querySelector('.conversation-list .selected')?.textContent") == selected
+        browser.type('#query', '合成任务 17')
+        browser.button('查找')
+        browser.idle()
+        assert browser.observe("return document.querySelectorAll('.results .result-card').length") == 1
+        assert '用户原话' in browser.text('.results .result-card')
+        assert 'chatgpt-export' in browser.text('.results .result-card')
+        browser.click('.results .result-card')
+        browser.idle()
+        search_reference = browser.observe("return document.querySelector('.results .result-card.selected').dataset.reference")
+        browser.button('查看相邻消息')
+        browser.idle()
+        assert browser.observe("return document.querySelector('.located-message').dataset.reference") == search_reference
+        assert '合成任务 17：紫杉项目' in browser.text('.located-message .body-text')
+        browser.button('返回之前的阅读')
+        browser.idle()
+        assert browser.observe("return document.querySelector('#query').value") == '合成任务 17'
+        assert browser.observe("return document.querySelector('.results .result-card.selected').dataset.reference") == search_reference
+        self.checkpoint('搜索原话定位上下文并恢复阅读选择')
+        browser.command("POST", "/window/rect", {"width": 860, "height": 820})
+        browser.idle()
+        assert browser.observe("return document.documentElement.scrollWidth <= innerWidth + 2"), "窄窗口不得产生整页横向溢出"
+        self.checkpoint("窄窗口保留当前阅读任务")
+        browser.command("POST", "/window/rect", {"width": 1180, "height": 820})
+        return {"synthetic_conversations": 53, "synthetic_messages": 106,
+                "default_visible_rows": visible, "fixed_primary_action": header,
+                "selected_restored": True, "copied_exact_preview": True,
+                "source_location_restored": search_reference}
 
     def close(self):
         if self.driver:

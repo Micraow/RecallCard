@@ -4,7 +4,7 @@ import { newState, activateVault, resetScope, recordText, recordRef, nativeInstr
 test('切换资料库清除所有旧结果、选中来源和写入预览', () => {
   const s = newState(); Object.assign(s, { results: [1], selected: {}, sources: [1], importPreview: {}, dreamPreview: {}, selectedRefs: ['event:old'], query: 'old', page: 'dream' });
   activateVault(s, { session_id: 'new', scopes: ['work'] });
-  assert.equal(s.scope, 'work'); assert.equal(s.page, 'home'); assert.equal(s.epoch, 1);
+  assert.equal(s.scope, 'work'); assert.equal(s.page, 'conversations'); assert.equal(s.epoch, 1);
   assert.deepEqual([s.results,s.sources,s.selectedRefs], [[],[],[]]);
   assert.deepEqual([s.selected,s.importPreview,s.dreamPreview], [null,null,null]); assert.equal(s.query, '');
 });

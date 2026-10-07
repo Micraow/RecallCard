@@ -1,11 +1,13 @@
 """不启动浏览器：核对真实原生验收驱动的动作顺序和不确定写入处理。"""
 import importlib.util
+import json
 from http.client import RemoteDisconnected
 from pathlib import Path
 from types import SimpleNamespace
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("native_controls", Path(__file__).with_name("native_smoke.py"))
@@ -19,6 +21,34 @@ class NativeControlsTest(unittest.TestCase):
         driver.address = "http://127.0.0.1:4444"
         driver.session = "synthetic"
         return driver
+
+    def test_workspace_navigation_uses_visible_controls_and_no_product_injection(self):
+        driver = self.driver(); driver.click = Mock(); driver.idle = Mock(); driver.button = Mock()
+        driver.navigate("随身背景")
+        self.assertEqual([call.args[0] for call in driver.click.call_args_list],
+                         ['#navigation [data-workspace="memories"]', '[data-action="background-select"]'])
+        self.assertEqual(driver.idle.call_count, 2)
+        driver.click.reset_mock(); driver.navigate("添加资料")
+        driver.click.assert_called_once_with('#import-button')
+        driver.click.reset_mock(); driver.navigate("整理记忆")
+        driver.click.assert_called_once_with('#navigation [data-workspace="memories"]')
+        driver.button.assert_called_once_with("整理记忆")
+
+    def test_workspace_density_fixture_is_synthetic_and_preserves_roles_and_unknown_times(self):
+        with tempfile.TemporaryDirectory() as directory:
+            smoke = object.__new__(module.NativeSmoke); smoke.temporary = Path(directory)
+            with zipfile.ZipFile(smoke.create_workspace_fixture()) as archive:
+                self.assertEqual(len(archive.namelist()), 53)
+                messages = []
+                for name in archive.namelist():
+                    conversation = json.loads(archive.read(name))
+                    self.assertTrue(conversation['id'].startswith('workspace-density-'))
+                    self.assertIn('工作区验收', conversation['title'])
+                    messages.extend(node['message'] for node in conversation['mapping'].values() if node.get('message'))
+                self.assertEqual(len(messages), 106)
+                self.assertEqual({message['author']['role'] for message in messages}, {'user', 'assistant'})
+                self.assertTrue(any('create_time' not in message for message in messages))
+                self.assertTrue(any(len(message['content']['parts'][0]) > 2500 for message in messages))
 
     def test_direct_webkit_capabilities_match_official_tauri_linux_mapping(self):
         with patch.object(module.WebDriver, "request", return_value={"sessionId": "synthetic"}) as request:

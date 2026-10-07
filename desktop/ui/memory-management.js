@@ -1,4 +1,4 @@
-import { displayDate, displayState, newMemoryState, recordText, shorten } from './model.js';
+import { displayDate, displayState, newBackgroundState, newMemoryState, recordText, shorten } from './model.js';
 
 const evidenceLabels = { user_explicit: '用户明确表达', observed: '观察所得', assistant_suggestion: 'AI 建议，尚非用户事实' };
 const roleLabels = { user: '用户原话', assistant: 'AI 回复', tool: '工具结果', system: '系统消息' };
@@ -6,6 +6,11 @@ const operationLabels = { edit: '修改记忆', forget: '遗忘记忆', restore:
 
 export function memoryLabels(text) {
   return [...new Set(String(text).split('\n').map(label => label.trim()).filter(Boolean))];
+}
+// 成员标记只由随身背景流程维护；普通标签编辑不能新增或删除它。
+export function editableMemoryLabels(labels = []) { return labels.filter(label => label !== 'bootstrap'); }
+export function preservedMemoryLabels(text, labels = []) {
+  return [...memoryLabels(text).filter(label => label !== 'bootstrap'), ...labels.filter(label => label === 'bootstrap')];
 }
 export function canEditMemory(memory, row) {
   return Boolean(memory && row && !row.hidden && ['active', 'tentative'].includes(memory.status));
@@ -17,12 +22,14 @@ export function memoryReviewKey(state) {
 }
 // 变更后立即废弃可能包含旧内容的阅读、交接、整理任务和来源选择。
 export function invalidateMemoryContent(state) {
+  if (state.conversation?.session_ref) state.resumeConversation = { session_ref: state.conversation.session_ref, goal: state.continuationGoal || '', offset: state.conversationOffset || 0 };
   state.results = []; state.resultNote = ''; state.selected = null; state.sources = [];
-  state.selectedRefs = []; state.dreamPreview = null; state.dreamTask = null; state.dreamResultText = '';
+  state.selectedRefs = []; state.dreamPreview = null; state.dreamEvidence = {}; state.dreamTask = null; state.dreamResultText = '';
   state.importPreview = null; state.importSelection = null; state.importSelectedIds = []; state.notePreview = null;
   state.conversations = []; state.conversation = null; state.conversationRows = [];
   state.conversationOffset = 0; state.conversationListOffset = 0; state.conversationListNext = null;
   state.continuation = null; state.continuationGoal = '';
+  state.background = newBackgroundState(); state.continuationOpen = false; state.importBatch = null; state.searchLoaded = false;
   const includeHidden = state.memory.includeHidden;
   state.memory = { ...newMemoryState(), includeHidden };
 }
@@ -56,34 +63,38 @@ export function createMemoryManagement(ui) {
     Object.assign(memory(), { rows: result.memories || [], total: result.total, offset,
       nextOffset: result.next_offset, loaded: true, error: '' });
   }
-  async function load(offset = 0) {
+  async function load(offset = 0, preserve = false) {
     await run('正在读取记忆列表…', async current => {
-      clearSelection(); memory().rows = []; memory().loaded = false; memory().error = '';
-      try { await cancelServerPreviews(); await fetchPage(offset, current); }
-      catch (error) { if (current()) memory().error = String(error?.message || error); throw error; }
+      const selectedId = state.pendingMemoryId || (preserve ? memory().selected?.id : null); state.pendingMemoryId = null;
+      clearSelection(); memory().rows = []; memory().loaded = false; memory().error = ''; render();
+      try {
+        await cancelServerPreviews(); await fetchPage(offset, current);
+        const row = memory().rows.find(item => item.id === selectedId);
+        if (row) { const selected = await invoke('managed_memory', { ...args(), id: row.id }); if (current()) { memory().selected = selected; memory().selectedRow = row; } }
+      } catch (error) { if (current()) { clearSelection(); memory().error = String(error?.message || error); } throw error; }
     });
   }
-  async function open(row) {
+  function open(row) { if (state.busy) return; ui.discardBefore(() => openNow(row)); }
+  async function openNow(row) {
     await run('正在读取完整记忆…', async current => {
-      clearSelection();
+      clearSelection(); render();
       await cancelServerPreviews();
       const selected = await invoke('managed_memory', { ...args(), id: row.id });
       if (!current()) return;
-      memory().selected = selected; memory().selectedRow = row;
+      memory().selected = selected; memory().selectedRow = row; state.mobileDetail = true;
     });
   }
   async function openSource(eventId) {
     await run('正在读取原始出处…', async current => {
-      memory().source = null; memory().sourceId = '';
-      const source = await invoke('managed_memory_source', { ...args(), memoryId: memory().selected.id, eventId });
-      if (current()) { memory().source = source; memory().sourceId = eventId; }
+      memory().source = null; memory().sourceId = ''; render();
+      try { const source = await invoke('managed_memory_source', { ...args(), memoryId: memory().selected.id, eventId }); if (current()) { memory().source = source; memory().sourceId = eventId; } } catch (error) { if (current()) clearSelection(); throw error; }
     });
   }
   function begin(mode) {
     discard(); memory().mode = mode;
     if (mode === 'edit') {
       const selected = memory().selected;
-      memory().draft = { content: selected.content, protected: selected.protected, labels: (selected.labels || []).join('\n') };
+      memory().draft = { content: selected.content, protected: selected.protected, labels: editableMemoryLabels(selected.labels).join('\n') };
     }
     render();
   }
@@ -98,7 +109,7 @@ export function createMemoryManagement(ui) {
       const draft = memory().draft;
       const result = memory().mode === 'edit'
         ? await invoke('review_memory_edit', { ...args(), id: selected.id, revision: selected.revision,
-          edit: { content: draft.content, protected: draft.protected, labels: memoryLabels(draft.labels) } })
+          edit: { content: draft.content, protected: draft.protected, labels: preservedMemoryLabels(draft.labels, selected.labels) } })
         : await invoke('review_memory_visibility', { ...args(), id: selected.id,
           restore: memory().mode === 'restore', reason: memory().reason });
       if (current() && key === memoryReviewKey(state)) {
@@ -143,48 +154,36 @@ export function createMemoryManagement(ui) {
 
   function sourcePane() {
     const selected = memory().selected;
-    const box = $('section', { class: 'memory-sources' }, $('h3', {}, '原始出处'), paragraph('按需读取完整原文，保留原始角色和时间。'));
-    for (const [index, eventId] of (selected.source_refs || []).entries()) {
-      box.append(button(`查看出处 ${index + 1}`, () => openSource(eventId), false, 'small memory-source-link'));
-    }
+    const box = $('details', { class: 'source-details memory-sources', open: Boolean(memory().source) }, $('summary', {}, `原始出处 · ${(selected.source_refs || []).length} 条`));
+    for (const [index, eventId] of (selected.source_refs || []).entries()) box.append(button(`查看出处 ${index + 1}`, () => openSource(eventId), false, 'small memory-source-link'));
     const source = memory().source;
-    if (!source) return box;
-    box.append($('div', { class: 'sample memory-source' },
-      $('div', { class: 'ref' }, source.id), line('消息角色', roleLabels[source.role] || source.role),
-      line('来源平台', source.source?.platform), line('原始时间', displayDate(source.occurred_at)),
-      line('保存时间', displayDate(source.captured_at)), line('原始会话', source.source?.conversation_id),
-      line('原始消息', source.source?.message_id),
-      source.source?.url ? line('出处地址', source.source.url) : null,
-      $('div', { class: 'body-text' }, recordText(source) || '此来源没有文本正文')));
+    if (source) box.append($('article', { class: 'sample memory-source' },
+      $('div', { class: 'result-meta' }, $('strong', {}, source.conversation_title || source.metadata?.conversation_title || source.source?.conversation_title || '原始会话'), $('span', { class: 'tag' }, roleLabels[source.role] || source.role)),
+      $('div', { class: 'muted' }, `${source.platform || source.source?.platform || '来源未知'} · ${displayDate(source.occurred_at)}`),
+      $('div', { class: 'body-text' }, recordText(source) || '此来源没有文本正文'),
+      !memory().selectedRow.hidden ? button('定位到这条消息', () => ui.locateEvent(`event:${source.id}`), false, 'small') : null,
+      ui.technicalDetails(line('引用', source.id), line('原始会话', source.source?.conversation_id), line('原始消息', source.source?.message_id), line('保存时间', displayDate(source.captured_at)), source.source?.url ? line('出处地址', source.source.url) : null)));
     return box;
   }
   function detailsPane() {
     const selected = memory().selected;
-    if (!selected) return $('aside', { class: 'panel memory-detail empty' }, $('h3', {}, '选择一条记忆'), paragraph('查看完整内容、证据性质、时间与原始出处，再决定是否修改。'));
+    if (!selected) return $('aside', { class: 'memory-detail empty' }, $('h3', {}, '选择一条记忆'), paragraph('核对原话与出处，纠正内容或选择每次接续带上的背景。'));
     const row = memory().selectedRow;
-    const box = $('aside', { class: 'panel memory-detail' }, $('h2', {}, '记忆详情'),
-      $('div', { class: 'ref' }, selected.id), $('div', { class: 'body-text memory-full-text' }, selected.content),
-      line('状态', `${row.hidden ? '已隐藏 · ' : ''}${displayState(selected.status)}`),
-      line('证据性质', evidenceLabels[selected.evidence] || selected.evidence), line('保护', selected.protected ? '已保护' : '未保护'),
-      line('版本', selected.revision), line('标签', (selected.labels || []).join('、') || '无'),
-      line('记录时间', displayDate(selected.recorded_at)), line('更新时间', displayDate(selected.updated_at)),
-      line('所述事情的时间', displayDate(selected.observed_at)),
-      selected.time_note ? line('时间说明', selected.time_note) : null,
-      selected.valid_from ? line('有效起始时间', displayDate(selected.valid_from)) : null,
-      selected.valid_to ? line('有效截止时间', displayDate(selected.valid_to)) : null);
-    if (selected.evidence === 'assistant_suggestion') box.append(hint('这条内容来自 AI 建议。修改正文不会把它变成用户已确认的事实。', true));
-    if (row.hidden) box.append(hint(row.can_restore
-      ? '已隐藏内容仅在这个管理页主动查看。可以检查并撤销这条记忆自己的遗忘规则。'
-      : '当前隐藏来自其他记忆或来源的遗忘规则。此处不能撤销那些规则。', true));
-    if (!['active', 'tentative'].includes(selected.status)) box.append(hint('已替代或撤回的记忆不能直接编辑；撤销遗忘规则也不会改变这个状态。'));
-    if (!memory().mode) {
-      box.append($('div', { class: 'button-row' },
-        canEditMemory(selected, row) ? button('修改正文、标签与保护', () => begin('edit'), true) : null,
-        row.can_restore ? button('撤销这条遗忘规则', () => begin('restore'))
-          : button('设置遗忘规则', () => begin('forget'), false, 'danger')));
-    } else box.append(editor());
-    box.append($('hr', { class: 'divider' }), sourcePane());
-    return box;
+    const head = $('div', { class: 'reader-heading' }, ui.detailBack(), $('div', { class: 'reader-title' }, $('h2', {}, '记忆详情'), $('span', { class: 'muted' }, evidenceLabels[selected.evidence] || selected.evidence)));
+    if (!row.hidden && selected.source_refs?.length) head.append(ui.actionButton('带到另一个AI', () => ui.locateEvent(`event:${selected.source_refs[0]}`, true), 'open-continuation', true));
+    const body = $('div', { class: 'reader-scroll', 'data-scroll': 'reader' }, $('div', { class: 'body-text memory-full-text' }, selected.content),
+      $('div', { class: 'memory-status' }, $('span', { class: 'tag' }, `${row.hidden ? '已隐藏 · ' : ''}${displayState(selected.status)}`), $('span', { class: 'muted' }, selected.protected ? '已保护' : '未保护')),
+      sourcePane(),
+      $('div', { class: 'background-membership' }, line('每次接续带上', (selected.labels || []).includes('bootstrap') ? (selected.protected ? '已选择' : '已选择，尚需启用保护') : '未选择'), !row.hidden ? button('设置每次接续带上', () => ui.showBackground(false, selected.id), false, 'small') : null));
+    if (selected.evidence === 'assistant_suggestion') body.append(hint('来自 AI 建议，尚非用户已确认事实。修改正文不会改变证据性质。', true));
+    if (row.hidden) body.append(hint(row.can_restore ? '此内容已隐藏，仅供你主动检查。可以撤销这条记忆自己的遗忘规则。' : '此内容受其他记忆或来源的遗忘规则影响，不能在这里恢复。', true));
+    if (!['active', 'tentative'].includes(selected.status)) body.append(hint('已替代或撤回的记忆不能直接编辑；撤销遗忘也不会改变该状态。'));
+    if (!memory().mode) body.append($('div', { class: 'button-row' }, canEditMemory(selected, row) ? button('修改正文、标签与保护', () => begin('edit')) : null,
+      row.can_restore ? button('撤销这条遗忘规则', () => begin('restore')) : button('设置遗忘规则', () => begin('forget'), false, 'danger')));
+    else body.append(editor());
+    const preview = reviewPane(); if (preview) body.append(preview);
+    body.append(ui.technicalDetails(line('引用', selected.id), line('版本', selected.revision), line('标签', editableMemoryLabels(selected.labels).join('、') || '无'), line('记录时间', displayDate(selected.recorded_at)), line('更新时间', displayDate(selected.updated_at)), line('所述事情的时间', displayDate(selected.observed_at)), selected.time_note ? line('时间说明', selected.time_note) : null, selected.valid_from ? line('有效起始时间', displayDate(selected.valid_from)) : null, selected.valid_to ? line('有效截止时间', displayDate(selected.valid_to)) : null));
+    return $('aside', { class: 'memory-detail reader-pane' }, head, body);
   }
   function editor() {
     const mode = memory().mode;
@@ -203,7 +202,7 @@ export function createMemoryManagement(ui) {
       box.append($('label', { for: 'memory-content' }, '记忆正文'), text,
         $('label', { for: 'memory-labels' }, '记忆标签（每行一个）'), labels,
         $('label', { for: 'memory-protected', class: 'check' }, protect, '保护这条记忆，后续变更需要额外确认'),
-        hint('这里只修改正文、标签与保护设置。证据性质、原始出处、原始时间和事实状态保持原样。'));
+        hint('这里只修改正文、标签与保护设置。是否每次接续带上，请在记忆的背景选择中设置。证据性质、原始出处、原始时间和事实状态保持原样。'));
     } else if (mode === 'forget') {
       const reason = $('textarea', { id: 'memory-forget-reason', rows: 3, maxlength: 4096, 'aria-label': '遗忘原因', placeholder: '说明这次为什么不再使用这些内容' });
       reason.value = memory().reason;
@@ -224,8 +223,8 @@ export function createMemoryManagement(ui) {
     const change = $('div', { class: 'change' }, $('div', { class: 'before' }, `修改前\n${review.before.content}`));
     if (review.after) change.append($('div', { class: 'after' }, `修改后\n${review.after.content}`),
       line('保护设置', `${review.before.protected ? '已保护' : '未保护'} → ${review.after.protected ? '已保护' : '未保护'}`),
-      line('原有标签', (review.before.labels || []).join('、') || '无'),
-      line('修改后标签', (review.after.labels || []).join('、') || '无'));
+      line('原有标签', editableMemoryLabels(review.before.labels).join('、') || '无'),
+      line('修改后标签', editableMemoryLabels(review.after.labels).join('、') || '无'));
     else change.append($('div', { class: 'after' }, review.operation === 'forget'
       ? '执行后：这些内容退出检索、交接和后续整理；保留资料文件'
       : '执行后：撤销这条规则；仍受其他规则影响的内容可能继续隐藏'));
@@ -238,13 +237,14 @@ export function createMemoryManagement(ui) {
     return box;
   }
   function page() {
-    content.append(heading('记忆管理', '查看长期记忆的原话与出处，纠正内容、设置保护，或管理可撤销的遗忘规则。'));
+    content.append($('div', { class: 'workspace-heading' }, $('h1', {}, '记忆'), $('span', { class: 'muted' }, `${memory().total || 0} 条记忆`)));
+    content.append(ui.memoryToolbar());
     const hidden = $('input', { type: 'checkbox', id: 'include-hidden-memories' });
     hidden.checked = memory().includeHidden;
-    hidden.addEventListener('change', () => { memory().includeHidden = hidden.checked; load(0); });
-    content.append($('div', { class: 'toolbar' }, scopeSelect(),
-      $('label', { class: 'check', for: 'include-hidden-memories' }, hidden, '同时显示已隐藏、已替代和已撤回的记忆'),
-      button('刷新记忆列表', () => load(0), false, 'small')));
+    hidden.addEventListener('change', () => { const next = hidden.checked; hidden.checked = memory().includeHidden; ui.discardBefore(() => { memory().includeHidden = next; load(0); }); });
+    content.append($('div', { class: 'toolbar memory-options' },
+      $('label', { class: 'check', for: 'include-hidden-memories' }, hidden, '显示隐藏与失效记忆'),
+      button('刷新记忆列表', () => ui.discardBefore(() => load(0)), false, 'small')));
     if (memory().includeHidden) content.append(hint('此列表包含平时不会提供给 AI 的内容。已隐藏内容只供你在管理页主动检查。', true));
     if (memory().error) { content.append(hint(`记忆列表读取失败：${memory().error}`, true), button('重试读取记忆', () => load(0))); return; }
     if (!memory().loaded) { content.append(paragraph(state.busy ? '正在读取记忆…' : '正在准备记忆列表…')); return; }
@@ -254,19 +254,18 @@ export function createMemoryManagement(ui) {
     }
     content.append($('div', { class: 'section-heading' },
       $('span', {}, `共 ${memory().total} 条 · 当前 ${memory().offset + 1}–${memory().offset + memory().rows.length} 条 · 每页最多 30 条`)));
-    const list = $('section', { class: 'results memory-list', 'aria-label': '记忆列表' });
+    const list = $('section', { class: 'results memory-list list-scroll', 'data-scroll': 'list', 'aria-label': '记忆列表' });
     for (const row of memory().rows) {
-      list.append($('button', { class: `result-card ${memory().selected?.id === row.id ? 'selected' : ''}`, onclick: () => open(row) },
+      list.append($('button', { class: `result-card ${memory().selected?.id === row.id ? 'selected' : ''}`, 'data-memory-id': row.id, 'aria-pressed': String(memory().selected?.id === row.id), onclick: () => open(row) },
         $('div', { class: 'result-meta' }, $('span', { class: 'tag' }, `${row.hidden ? '已隐藏 · ' : ''}${displayState(row.status)}`),
           $('span', { class: 'tag purple' }, row.protected ? '已保护' : '未保护')),
-        paragraph(shorten(row.content, 260)), $('div', { class: 'muted' }, displayDate(row.updated_at)), $('div', { class: 'ref' }, row.id)));
+        paragraph(shorten(row.content, 130)), $('div', { class: 'muted' }, displayDate(row.updated_at))));
     }
     list.append($('div', { class: 'button-row' },
-      memory().offset > 0 ? button('上一页', () => load(Math.max(0, memory().offset - 30))) : null,
-      memory().nextOffset != null ? button('下一页', () => load(memory().nextOffset)) : null));
-    content.append($('div', { class: 'results-layout memory-layout' }, list, detailsPane()));
-    const preview = reviewPane();
-    if (preview) content.append(preview);
+      memory().offset > 0 ? button('上一页', () => ui.discardBefore(() => load(Math.max(0, memory().offset - 30)))) : null,
+      memory().nextOffset != null ? button('下一页', () => ui.discardBefore(() => load(memory().nextOffset))) : null));
+    content.append($('div', { class: `results-layout memory-layout workspace-split ${state.mobileDetail && memory().selected ? 'show-detail' : ''}` }, list, detailsPane()));
+
   }
   return { page, load, discard, clearReview };
 }
