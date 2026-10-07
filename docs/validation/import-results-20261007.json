@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "checked_at_utc": "2026-10-07T22:17:00Z",
+  "base_commit": "110e5b4c7b408c65254551fb642b464b82196251",
+  "scope": "整批导入成果阅读与导入状态查询竞态修复",
+  "local_gate_passed": true,
+  "full_acceptance_passed": false,
+  "checks": {
+    "local_preflight": {
+      "passed": 11,
+      "failed": 0
+    },
+    "local_dom": {
+      "passed": 220,
+      "failed": 0
+    },
+    "javascript_contracts": {
+      "passed": 111,
+      "failed": 0
+    },
+    "native_driver_contracts": {
+      "passed": 41,
+      "failed": 0
+    },
+    "preflight_negative_contracts": {
+      "passed": 31,
+      "failed": 0
+    },
+    "runnable_rust_targets": {
+      "targets": 26,
+      "passed": 379,
+      "failed": 0,
+      "excluded_targets": [
+        "ipc",
+        "ipc_bridges"
+      ]
+    },
+    "import_jobs_rust_subset": {
+      "passed": 16,
+      "failed": 0
+    },
+    "python": {
+      "passed": 105,
+      "failed": 0
+    },
+    "rust_python_embedding_contract": "passed",
+    "core_clippy_all_targets": "passed",
+    "core_rustfmt": "passed",
+    "tauri_rustfmt": "passed"
+  },
+  "not_run": [
+    "真实 Chromium 布局与浏览器交互",
+    "Tauri 宿主编译（环境缺少原生开发依赖）",
+    "Tauri/WebKit 原生窗口、文件选择、系统剪贴板",
+    "IPC 与 IPC bridges（环境禁止 Unix socket）",
+    "本候选安装包与跨平台实机"
+  ],
+  "regressions_reproduced_before_fix": [
+    "110e5b4 原界面：重复导入后的成果列表混入 unrelated 会话",
+    "本轮竞态修复初版：其他实例恢复时，旧本地 control 返回旧完成进度；已收敛内存快路并复验"
+  ],
+  "source_sha256": {
+    "crates/recallcard/src/desktop/imports.rs": "9fcc9df33cd4396e0944c3e17043ca24dc45b29c0f7c4a6647640d140938bcff",
+    "crates/recallcard/src/desktop/records.rs": "4738a900dfee312ff1e3a94a33a5aca811e7ded93966cddf559836cff69a6cd3",
+    "crates/recallcard/tests/desktop_import_jobs.rs": "c2ede307917a6cd7f0af0e05a1277f33565b5ae63048a77037baee87803e4772",
+    "desktop/src-tauri/src/main.rs": "cc661408aeaa02740eee94e429ad699f7fd903fcaf93e41d973677baa890aa74",
+    "desktop/tests/import-tasks.test.mjs": "f6420a191af30ef1dcf2dfdb7b8fdd4ab761d0cbb67b5bf3b70db91e5ae71d48",
+    "desktop/tests/local-dom/import-tasks.test.mjs": "d1e470ed433a2daa28cf37b65ea4b9998a218dd399ace5962bc5e288fe8e4762",
+    "desktop/tests/local-dom/recovery.test.mjs": "b1fb3c462ebb2b77e0fae87c7c5fa0120528e0f8b2bf81a100554b9f904debe1",
+    "desktop/tests/native_smoke.py": "6057de5e2c13c958c77c5beb95c1c593e8b27162c4dd079f8993c58bb82193ba",
+    "desktop/ui/app.js": "184a218ec3ccbdb3fdc8c7b513d5f2847f4f1c8f5b909674a1acecfa8110ad59",
+    "desktop/ui/import-tasks.js": "806c2c440900f895a56db4ea3005cc29f80d0a30d894bc76ffed95f94dedb01e"
+  },
+  "synthetic_fixtures_only": true,
+  "new_workflow_runs_created": false,
+  "native_release_claimed": false
+}

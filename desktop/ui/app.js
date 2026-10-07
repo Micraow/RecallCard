@@ -493,18 +493,24 @@ async function readConversation(item, offset, current) {
 }
 async function loadConversations(offset = 0, preserve = false) {
   offset = Number.isSafeInteger(offset) ? offset : 0;
-  if (state.importBatch) offset = 0;
+  if (state.importBatch && !state.importBatch.jobId) offset = 0;
   await run('正在读取已保存的会话…', async current => {
     if (!preserve) resetReaderView('conversations:');
     const selected = preserve ? state.conversation : null;
     const resume = state.resumeConversation;
     const goal = selected ? state.continuationGoal : resume?.goal || ''; const selectedOffset = selected ? state.conversationOffset : resume?.offset || 0;
     state.conversation = null; state.conversationRows = []; state.continuation = null; render();
-    const result = await invoke('list_conversations', { ...args(), offset });
+    const batchJob = state.importBatch?.jobId;
+    if (batchJob) { state.importBatch.conversations = []; state.importBatch.error = ''; state.conversations = []; render(); }
+    let result;
+    try { result = batchJob ? await importTasks.readResults(batchJob, offset) : await invoke('list_conversations', { ...args(), offset }); }
+    catch (error) { if (current() && batchJob && batchJob === state.importBatch?.jobId) state.importBatch.error = '这次读取未完成，重新读取后再选择会话。'; throw error; }
     if (!current()) return;
     state.conversationListOffset = offset; state.conversationListNext = result.next_offset;
     state.conversationTotal = result.total; state.conversations = result.conversations || []; state.conversationNote = result.note;
-    if (state.importBatch) {
+    if (batchJob) {
+      Object.assign(state.importBatch, { conversations: state.conversations, total: result.total, added: result.status.events_added, duplicates: result.status.events_duplicates, note: result.note, error: '' });
+    } else if (state.importBatch) {
       const refs = new Set(state.importBatch.conversations.map(item => item.session_ref));
       const accessible = [...state.conversations];
       let next = result.next_offset; let previous = offset;
@@ -515,9 +521,10 @@ async function loadConversations(offset = 0, preserve = false) {
       const freshByRef = new Map(accessible.map(item => [item.session_ref, item]));
       state.importBatch.conversations = state.importBatch.conversations.map(item => freshByRef.get(item.session_ref)).filter(Boolean);
     }
-    const active = selected || (resume ? state.conversations.find(item => item.session_ref === resume.session_ref) || { session_ref: resume.session_ref, title: '当前会话', platform: '' } : null) || state.conversations[0];
+    const currentSelected = batchJob ? state.conversations.find(item => item.session_ref === selected?.session_ref) : selected;
+    const active = currentSelected || (!batchJob && resume ? state.conversations.find(item => item.session_ref === resume.session_ref) || { session_ref: resume.session_ref, title: '当前会话', platform: '' } : null) || state.importBatch?.conversations[0] || state.conversations[0];
     if (active) {
-      try { await readConversation(active, selected || resume ? selectedOffset : 0, current); if ((selected || resume) && current()) state.continuationGoal = goal; state.resumeConversation = null; }
+      try { await readConversation(active, currentSelected || (!batchJob && resume) ? selectedOffset : 0, current); if ((currentSelected || (!batchJob && resume)) && current()) state.continuationGoal = goal; state.resumeConversation = null; }
       catch (error) { state.conversation = null; state.conversationRows = []; state.continuationGoal = ''; state.continuationOpen = false; state.resumeConversation = null; throw error; }
     }
   });
@@ -583,14 +590,17 @@ function continuationPane() {
 function conversationPage() {
   content.append($('div', { class: 'workspace-heading' }, $('h1', {}, '会话'), $('span', { class: 'muted' }, `${state.conversationTotal ?? state.conversations.length} 个会话`),
     state.readerReturn ? button('返回之前的阅读', () => { const page = state.readerReturn; state.readerReturn = ''; navigate(page); }, false, 'small') : null,
-    button('刷新已保存会话', () => { state.importBatch = null; loadConversations(0, true); }, false, 'small')));
-  if (state.importBatch) content.append($('div', { class: 'import-batch-summary' }, $('strong', {}, `本批导入 · ${state.importBatch.conversations.length} 个会话`), $('span', {}, `新增 ${state.importBatch.added} 条 · 重复 ${state.importBatch.duplicates} 条`), button('查看全部会话', () => { state.importBatch = null; loadConversations(0, true); }, false, 'small')));
+    button(state.importBatch?.jobId ? '重新读取本批会话' : '刷新已保存会话', () => { if (!state.importBatch?.jobId) state.importBatch = null; loadConversations(state.importBatch?.jobId ? state.conversationListOffset : 0, true); }, false, 'small')));
+  if (state.importBatch) content.append($('div', { class: 'import-batch-summary' }, $('strong', {}, `本批导入 · ${state.importBatch.total ?? state.importBatch.conversations.length} 个会话`), $('span', {}, `新增 ${state.importBatch.added} 条 · 重复 ${state.importBatch.duplicates} 条`), button('查看全部会话', () => { state.importBatch = null; loadConversations(0, true); }, false, 'small')));
+  if (state.importBatch?.jobId) content.append(state.importBatch.error ? hint(state.importBatch.error, true) : $('details', { class: 'coverage-details' }, $('summary', {}, '本批会话范围'), paragraph(state.importBatch.note || '正在核对本批已保存、当前可查看的会话…')));
   const items = state.importBatch?.conversations || state.conversations;
   const list = $('div', { class: 'conversation-list list-scroll', 'data-scroll': 'list', 'aria-label': '会话列表' });
-  if (!items.length) list.append($('div', { class: 'empty' }, $('h2', {}, '还没有保存的会话'), paragraph('导入文件，或从浏览器扩展保存一段对话。'), button('选择对话来源', () => navigate('import'), true)));
+  if (!items.length) list.append(state.importBatch?.jobId
+    ? $('div', { class: 'empty' }, $('h2', {}, state.importBatch.error ? '本批会话尚未读出' : '本页没有可查看的本批会话'), paragraph('已处理数量包含重复记录；被遗忘、替换或当前不可访问的消息不会显示。'), button('返回导入记录', () => navigate('import')))
+    : $('div', { class: 'empty' }, $('h2', {}, '还没有保存的会话'), paragraph('导入文件，或从浏览器扩展保存一段对话。'), button('选择对话来源', () => navigate('import'), true)));
   for (const item of items) list.append($('button', { class: `result-card ${state.conversation?.session_ref === item.session_ref ? 'selected' : ''}`, 'data-conversation-ref': item.session_ref, 'aria-pressed': String(state.conversation?.session_ref === item.session_ref), onclick: () => openConversation(item) },
     $('strong', {}, item.title), $('span', { class: 'muted' }, `${item.platform} · ${item.message_count} 条消息`), $('span', { class: 'muted row-date' }, displayDate(item.captured_at))));
-  if (!state.importBatch) list.append($('div', { class: 'list-pagination' }, state.conversationListOffset ? button('回到第一页', () => loadConversations(0), false, 'small') : null, state.conversationListNext != null ? button('更多会话', () => loadConversations(state.conversationListNext), false, 'small') : null));
+  if (!state.importBatch || state.importBatch.jobId) list.append($('div', { class: 'list-pagination' }, state.conversationListOffset ? button('回到第一页', () => loadConversations(0), false, 'small') : null, state.conversationListNext != null ? button('更多会话', () => loadConversations(state.conversationListNext), false, 'small') : null));
   const header = $('div', { class: 'reader-heading' }, detailBack(), $('div', { class: 'reader-title' }, $('h2', {}, state.conversation?.title || '选择一段会话'), state.conversation ? $('span', { class: 'muted' }, `${state.conversation.platform || '来源未知'} · ${scopeLabel(state.scope)}`) : null));
   const body = $('div', { class: 'reader-scroll', 'data-scroll': 'reader' });
   if (state.conversation) {
@@ -729,6 +739,13 @@ const sharedUI = { state, content, $, button, paragraph, heading, panel, hint, l
 const memoryManagement = createMemoryManagement(sharedUI);
 const background = createBackground(sharedUI);
 const contextSelection = createContextSelection(sharedUI);
-const importTasks = createImportTasks({ ...sharedUI, viewImported: () => { state.importBatch = null; navigate('conversations'); } });
+const importTasks = createImportTasks({ ...sharedUI, viewImported: job => {
+  if (state.importBatch?.jobId !== job.job_id) {
+    state.importBatch = { jobId: job.job_id, conversations: [], added: job.events_added, duplicates: job.events_duplicates };
+    state.conversation = null; state.conversationRows = []; state.continuation = null; state.continuationGoal = ''; state.resumeConversation = null;
+    state.conversationListOffset = 0; state.conversationListNext = null; state.viewport['conversations:'] = {};
+  }
+  navigate('conversations');
+} });
 render();
 restoreWorkspace();

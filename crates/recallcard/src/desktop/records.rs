@@ -2,7 +2,7 @@
 use super::{health_error, DesktopSession, RESPONSE_LIMIT};
 use crate::{
     context::{truncate_utf8, Context, Document},
-    model::{Event, Result},
+    model::{Event, EventInput, Result},
     Vault,
 };
 use serde_json::{json, Value};
@@ -168,6 +168,27 @@ impl WorkspaceRecords {
                 })
             })
             .collect()
+    }
+
+    /// 冻结输入只能用于确认成员关系，标题与数量仍从当前可见正本读取。
+    /// 与 capture_batch 相同，自动补上的 revision_of 不改变导入版本身份。
+    pub(super) fn imported_input_conversations(&self, inputs: &[EventInput]) -> Result<Vec<Value>> {
+        fn version_key(input: &EventInput) -> Result<String> {
+            let mut normalized = input.clone();
+            normalized.revision_of = None;
+            normalized.id()
+        }
+        let versions = inputs
+            .iter()
+            .map(version_key)
+            .collect::<Result<BTreeSet<_>>>()?;
+        let mut references = Vec::new();
+        for (reference, event) in &self.events {
+            if versions.contains(&version_key(&event.data)?) {
+                references.push(reference.clone());
+            }
+        }
+        Ok(self.imported_conversations(&references))
     }
 }
 

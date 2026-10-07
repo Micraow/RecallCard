@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture } from './harness.mjs';
-import { hostile, preview, vault } from './fixtures.mjs';
+import { hostile, preview, vault, conversation } from './fixtures.mjs';
 
 // 这里只模拟已公开的原生响应；导入行为、DOM 和事件来自未改写的应用 ES 模块。
 const batch = {
@@ -19,6 +19,10 @@ const running = {
 const paused = { ...running, state: 'cancelled', events_processed: 2, events_added: 2, can_resume: true, message: '已暂停，之后可以继续' };
 const completed = { ...running, state: 'completed', events_processed: 6, events_added: 5, events_duplicates: 1, message: '全部消息已处理' };
 const pane = ui => ui.one('[aria-label="导入平台历史"]');
+const results = (job = completed, conversations = [conversation], offset = 0, total = conversations.length, next_offset = null) => ({
+  job_id: job.job_id, scope: job.scope, status: job, conversations, offset, total, next_offset,
+  note: '只显示本批已处理且当前可访问的会话，包含重复消息。',
+});
 
 function controlledPolling(t, ui) {
   let sequence = 0;
@@ -311,12 +315,12 @@ test('恢复之后暂停页的旧导入其他文件按钮不能清除正在运�
   assert.equal(polling.count, 1);
 });
 
-test('恢复历史以后旧查看并继续按钮不能把运行任务退回暂停', async t => {
+test('恢复历史以后旧查看这次导入按钮不能把运行任务退回暂停', async t => {
   const { ui, polling } = await ready(t);
-  ui.native.next('list_import_jobs', [paused]); await ui.click('查看未完成的导入');
-  const oldHistory = ui.button('查看并继续');
+  ui.native.next('list_import_jobs', [paused]); await ui.click('查看导入记录');
+  const oldHistory = ui.button('查看这次导入');
   ui.native.next('import_job_status', paused);
-  await ui.click('查看并继续');
+  await ui.click('查看这次导入');
   ui.native.next('resume_import_job', { ...running, events_processed: 4, events_added: 4 });
   await ui.click('继续导入'); await replay(ui, oldHistory);
   assert.match(pane(ui).textContent, /正在导入.*已处理 4 \/ 6 条消息/);
@@ -329,11 +333,11 @@ for (const state of ['interrupted', 'failed', 'cancelled']) {
   test(`历史 ${state} 任务只读取和展示，用户点击继续后才恢复`, async t => {
     const { ui, polling } = await ready(t);
     ui.native.next('list_import_jobs', [{ ...paused, state }]);
-    await ui.click('查看未完成的导入');
+    await ui.click('查看导入记录');
     assert.match(ui.one('.import-history-row').textContent, /2 个文件 · 已处理 2 \/ 6 条/);
     assert.equal(polling.count, 0); ui.noWrites();
     ui.native.next('import_job_status', { ...paused, state });
-    await ui.click('查看并继续');
+    await ui.click('查看这次导入');
     assert.equal(ui.one('progress').value, 2); ui.noWrites();
     assert.deepEqual(ui.native.matching('import_job_status')[0].payload, { sessionId: vault.session_id, scope: 'personal', jobId: running.job_id });
     ui.native.next('resume_import_job', running); await ui.click('继续导入');
@@ -345,8 +349,8 @@ for (const state of ['interrupted', 'failed', 'cancelled']) {
 
 test('查看历史时任务已完成，以重新核实的状态为准且不再显示继续按钮', async t => {
   const { ui, polling } = await ready(t);
-  ui.native.next('list_import_jobs', [paused]); await ui.click('查看未完成的导入');
-  ui.native.next('import_job_status', completed); await ui.click('查看并继续');
+  ui.native.next('list_import_jobs', [paused]); await ui.click('查看导入记录');
+  ui.native.next('import_job_status', completed); await ui.click('查看这次导入');
   assert.match(pane(ui).textContent, /导入完成.*已处理 6 \/ 6 条消息/);
   assert.equal([...pane(ui).querySelectorAll('button')].some(node => node.textContent === '继续导入'), false);
   assert.equal(polling.count, 0); ui.noWrites();
@@ -354,13 +358,13 @@ test('查看历史时任务已完成，以重新核实的状态为准且不再�
 
 test('历史状态重新核实失败不显示可恢复批准，重新读取成功后再继续', async t => {
   const { ui } = await ready(t);
-  ui.native.next('list_import_jobs', [paused]); await ui.click('查看未完成的导入');
-  ui.native.fail('import_job_status', '合成历史状态读取失败'); await ui.click('查看并继续');
+  ui.native.next('list_import_jobs', [paused]); await ui.click('查看导入记录');
+  ui.native.fail('import_job_status', '合成历史状态读取失败'); await ui.click('查看这次导入');
   assert.match(ui.one('#notice').textContent, /合成历史状态读取失败/);
   assert.equal(ui.document.querySelector('progress'), null);
   assert.equal([...pane(ui).querySelectorAll('button')].some(node => node.textContent === '继续导入'), false);
   ui.noWrites();
-  ui.native.next('import_job_status', paused); await ui.click('查看并继续');
+  ui.native.next('import_job_status', paused); await ui.click('查看这次导入');
   assert.equal(ui.one('progress').value, 2);
   ui.button('继续导入'); ui.noWrites();
 });
@@ -368,19 +372,21 @@ test('历史状态重新核实失败不显示可恢复批准，重新读取成�
 test('恢复历史中仍活动的导入只轮询状态，不重复启动或恢复任务', async t => {
   const { ui, polling } = await ready(t);
   ui.native.next('list_import_jobs', [{ ...running, events_processed: 3, events_added: 3 }]);
-  await ui.click('查看未完成的导入');
+  await ui.click('查看导入记录');
   assert.equal(ui.one('progress').value, 3); ui.noWrites();
   ui.native.next('import_job_status', completed); await polling.fire();
   assert.match(pane(ui).textContent, /导入完成/);
   assert.equal(polling.count, 0); ui.noWrites();
 });
 
-test('历史中没有可继续任务时说明状态，不偷偷创建新导入', async t => {
+test('已完成导入仍能从历史打开成果，不偷偷创建新导入', async t => {
   const { ui, polling } = await ready(t);
   ui.native.next('list_import_jobs', [completed]);
-  await ui.click('查看未完成的导入');
-  assert.match(pane(ui).textContent, /没有需要继续的导入/);
-  assert.equal(ui.document.querySelector('.import-history-row'), null);
+  await ui.click('查看导入记录');
+  assert.match(ui.one('.import-history-row').textContent, /已完成.*已处理 6 \/ 6 条/);
+  ui.native.next('import_job_status', completed); await ui.click('查看这次导入');
+  ui.native.next('import_job_conversations', results()); await ui.click('查看本批会话');
+  assert.match(ui.one('.import-batch-summary').textContent, /本批导入.*1 个会话/);
   assert.equal(polling.count, 0); ui.noWrites();
 });
 
@@ -471,23 +477,88 @@ for (const [label, change, sessionId, scope] of [
 test('暂停任务的已保存会话入口重新读取列表和原话，返回后仍可查看任务', async t => {
   const { ui } = await ready(t); await start(ui, paused);
   const reads = ui.native.count('list_conversations');
-  await ui.click('查看已保存会话');
+  ui.native.next('import_job_conversations', results(paused));
+  await ui.click('查看本批会话');
   assert.equal(ui.one('#content h1').textContent, '会话');
-  assert.equal(ui.native.count('list_conversations'), reads + 1);
+  assert.equal(ui.native.count('list_conversations'), reads, '本批入口不得退回全部会话');
   assert.match(ui.one('.conversation-reader').textContent, /决定先核对来源/);
-  assert.equal(ui.native.matching('list_conversations').at(-1).payload.sessionId, vault.session_id);
+  assert.deepEqual(ui.native.matching('import_job_conversations').at(-1).payload, { sessionId: vault.session_id, scope: 'personal', jobId: paused.job_id, offset: 0 });
   await ui.navigate('添加资料');
   assert.match(pane(ui).textContent, /已暂停/); ui.button('继续导入');
   assert.equal(ui.native.count('resume_import_job'), 0);
 });
 
-test('完成后查看已保存会话的读取失败不能残留旧正文', async t => {
+test('完成后查看本批会话的读取失败不能残留旧正文', async t => {
   const { ui } = await ready(t); await start(ui, completed);
-  ui.native.fail('list_conversations', '合成会话列表读取失败');
-  await ui.click('查看已保存会话');
+  ui.native.fail('import_job_conversations', '合成会话列表读取失败');
+  await ui.click('查看本批会话');
   assert.match(ui.one('#notice').textContent, /合成会话列表读取失败/);
   assert.equal(ui.document.querySelector('.conversation-reader .body-text'), null);
+  assert.equal(ui.document.querySelector('.conversation-list .result-card'), null);
+  assert.match(ui.one('#content').textContent, /本批会话尚未读出/);
+  ui.native.next('import_job_conversations', results()); await ui.click('重新读取本批会话');
+  assert.match(ui.one('.conversation-reader').textContent, /决定先核对来源/);
 });
+
+test('重复导入没有新增时仍只打开本批原有会话，不打开最新无关会话', async t => {
+  const { ui } = await ready(t);
+  const repeated = { ...completed, events_added: 0, events_duplicates: 6 };
+  const unrelated = { ...conversation, session_ref: 'unrelated', title: '不属于本批的新会话' };
+  ui.native.data.conversations.unshift(unrelated);
+  await start(ui, repeated);
+  ui.native.next('import_job_conversations', results(repeated)); await ui.click('查看本批会话');
+  assert.deepEqual([...ui.document.querySelectorAll('.conversation-list .result-card')].map(node => node.dataset.conversationRef), [conversation.session_ref]);
+  assert.equal(ui.native.matching('conversation_messages').at(-1).payload.conversationRef, conversation.session_ref);
+  assert.match(ui.one('.import-batch-summary').textContent, /新增 0 条 · 重复 6 条/);
+  assert.doesNotMatch(ui.one('.conversation-list').textContent, /不属于本批/);
+});
+
+for (const job of [paused, { ...paused, state: 'failed' }, { ...paused, state: 'interrupted' }]) {
+  test(`${job.state} 只显示本批可读成果，零项时不回填其他会话`, async t => {
+    const { ui } = await ready(t); await start(ui, job);
+    const readCount = ui.native.count('conversation_messages');
+    ui.native.next('import_job_conversations', results(job, [])); await ui.click('查看本批会话');
+    assert.equal(ui.native.count('conversation_messages'), readCount);
+    assert.equal(ui.document.querySelector('.conversation-list .result-card'), null);
+    assert.equal(ui.document.querySelector('.conversation-reader .body-text'), null);
+    assert.match(ui.one('.conversation-list').textContent, /本页没有可查看的本批会话/);
+    await ui.click('返回导入记录');
+    ui.button('继续导入');
+    assert.equal(ui.native.count('resume_import_job'), 0);
+  });
+}
+
+test('本批分页与返回保存选中会话、目标和列表位置，每次重新核实可访问性', async t => {
+  const { ui } = await ready(t); await start(ui, completed);
+  const rows = Array.from({ length: 53 }, (_, index) => ({ ...conversation, session_ref: `batch-${index}`, title: `本批第 ${index + 1} 个会话` }));
+  ui.native.data.conversations.push(...rows);
+  ui.native.next('import_job_conversations', results(completed, rows.slice(0, 50), 0, 53, 50)); await ui.click('查看本批会话');
+  ui.native.next('import_job_conversations', results(completed, rows.slice(50), 50, 53)); await ui.click('更多会话');
+  ui.one('[data-conversation-ref="batch-52"]').click(); await ui.idle();
+  ui.one('.conversation-list').scrollTop = 143;
+  await ui.click('带到另一个AI'); ui.fill('[aria-label="接下来要做什么"]', '继续本批选中的任务');
+  await ui.navigate('添加资料');
+  ui.native.next('import_job_conversations', results(completed, rows.slice(50), 50, 53)); await ui.click('查看本批会话');
+  assert.equal(ui.native.matching('import_job_conversations').at(-1).payload.offset, 50);
+  assert.equal(ui.native.matching('conversation_messages').at(-1).payload.conversationRef, 'batch-52');
+  assert.equal(ui.one('.conversation-list').scrollTop, 143);
+  await ui.click('带到另一个AI');
+  assert.equal(ui.one('[aria-label="接下来要做什么"]').value, '继续本批选中的任务');
+  ui.native.next('import_job_conversations', results(completed, [], 50, 0)); await ui.click('重新读取本批会话');
+  assert.equal(ui.document.querySelector('.conversation-reader .body-text'), null);
+  assert.equal(ui.document.querySelector('#continuation-panel'), null);
+});
+
+for (const changes of [{ job_id: 'another-job' }, { scope: 'work' }, { offset: 2 }, { next_offset: 0 }, { status: running }]) {
+  test(`本批结果边界不匹配时不得显示或读取：${JSON.stringify(changes)}`, async t => {
+    const { ui } = await ready(t); await start(ui, completed);
+    const readCount = ui.native.count('conversation_messages');
+    ui.native.next('import_job_conversations', { ...results(), ...changes }); await ui.click('查看本批会话');
+    assert.equal(ui.native.count('conversation_messages'), readCount);
+    assert.equal(ui.document.querySelector('.conversation-list .result-card'), null);
+    assert.match(ui.one('#notice').textContent, /无法核实|状态已改变/);
+  });
+}
 
 test('官方导出指南只打开已限定的 DeepSeek 入口，不自动选择文件或启动导入', async t => {
   const { ui } = await ready(t);
@@ -496,4 +567,14 @@ test('官方导出指南只打开已限定的 DeepSeek 入口，不自动选择�
   assert.deepEqual(ui.native.matching('open_deepseek'), [{ command: 'open_deepseek', payload: {} }]);
   assert.match(ui.one('#notice').textContent, /下载后回到这里选择文件/);
   assert.equal(ui.native.count('pick_import_files'), 0); ui.noWrites();
+});
+
+test('全部会话读取失败保留原始错误，不因不存在本批状态遮盖原因', async t => {
+  const ui = await fixture(t); await ui.openVault();
+  ui.native.fail('list_conversations', '合成全部会话读取失败');
+  await ui.click('刷新已保存会话');
+  assert.match(ui.one('#notice').textContent, /合成全部会话读取失败/);
+  assert.doesNotMatch(ui.one('#notice').textContent, /null|undefined|TypeError/);
+  assert.equal(ui.document.querySelector('.import-batch-summary'), null);
+  assert.equal(ui.document.querySelector('.conversation-reader .body-text'), null);
 });

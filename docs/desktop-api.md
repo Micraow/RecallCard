@@ -29,6 +29,7 @@
 | `return_import_selection` | `session_id, selection_id: &str` | 撤销写入预览，保留会话清单 |
 | `preview_import` | `session_id, format: &str, path: &Path, scope: &str` | `ImportPreview` |
 | `confirm_import` | `session_id, preview_id: &str` | 导入结果 JSON |
+| `import_job_conversations` | `session_id, job_id, scope: &str, offset: usize` | 当前可访问的本批会话分页、核实后的任务状态 |
 | `export_dream` | `session_id, scope: &str, source_refs, memory_refs: &[String]` | `DreamJob` |
 | `prepare_dream_task` | `session_id, scope: &str, source_refs, memory_refs: &[String]` | 完整中文任务与来源卡片 JSON |
 | `review_dream` | `session_id: &str, path: &Path, scope: &str` | `DreamPreview` |
@@ -79,3 +80,14 @@
 ## 已验证边界
 
 `cargo test -p recallcard --test desktop --test import` 覆盖纯文本笔记的空白/字节上限、只读脱敏预览、范围固定、一次确认与过期预览；导入正常预览/确认、脱敏与去重、两个导出适配器、范围/抑制、取消/替换预览、文件篡改、相同字节替代文件、Vault 路径替换、迟到会话、Dream 的只读审查/幂等发布、受保护批准、冲突与过期 read-set。文件系统身份防护用于避免误写和常见替换，不宣称是抵御具有同等本机文件权限的恶意并发进程的完整沙箱。
+
+
+## 可恢复整批导入的成果阅读
+
+新工作分支提供 `import_job_conversations`（Tauri 同名命令）；当前尚无对应验收安装包。参数只包含当前资料库会话、任务编号、范围及分页位置，不接受文件路径、前端提供的会话成员或正文。
+
+服务核对任务与资料库身份、范围及冻结快照摘要，拒绝仍在运行或暂停中的任务。只使用持久记录的已处理消息前缀，以与 capture 去重一致的版本身份匹配当前授权投影。标题、消息数来自当前可见 Event 正本，不能把冻结快照当显示来源；被遗忘、替代或失去访问权限的原文不重新出现在成果列表。重复导入即使新增为零也能看到已存在的同版本资料。中断检查点之后的记录不计作已经核实的本批成果。
+
+返回 `job_id`、`scope`、`status`、`conversations`、`total`、`offset`、`next_offset` 和 `note`。每页最多 50 个会话、完整响应最多 32 KiB；列表只标识本批可读成员，打开会话仍通过既有 `conversation_messages` 重新核验当前权限，阅读的是该会话当前可访问的全部原话。不能把完整会话的其他消息都解释为本批新增。
+
+重启后从导入记录进入同一流程，不需要保留原始下载文件。读取不恢复任务、不启动模型、不改动 Event/Memory 或导入 manifest。失败、损坏或范围不符时不回填全部会话，也不显示旧正文。

@@ -260,6 +260,20 @@ async fn list_import_jobs(
 }
 
 #[tauri::command]
+async fn import_job_conversations(
+    state: State<'_, AppState>,
+    session_id: String,
+    job_id: String,
+    scope: String,
+    offset: usize,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.import_job_conversations(&session_id, &job_id, &scope, offset)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn vault_status(
     state: State<'_, AppState>,
     session_id: String,
@@ -936,6 +950,7 @@ fn main() {
             cancel_import_job,
             resume_import_job,
             list_import_jobs,
+            import_job_conversations,
             write_clipboard,
             cancel_previews,
             vault_status,
