@@ -16,6 +16,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: 核对验收传输恢复边界
+        run: python3 -m unittest discover -s desktop/tests -p test_native_driver_transport.py -v
       - name: 核对原构建来源与已通过步骤
         uses: actions/github-script@v7
         with:

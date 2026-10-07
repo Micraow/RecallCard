@@ -10,6 +10,7 @@ dbus-run-session -- xvfb-run -a /usr/bin/python3 desktop/tests/native_smoke.py
 import argparse
 import base64
 import json
+from http.client import RemoteDisconnected
 import os
 from pathlib import Path
 import re
@@ -67,11 +68,20 @@ class WebDriver:
         body = None if data is None else json.dumps(data).encode()
         request = Request(self.address + path, data=body, method=method,
                           headers={"Content-Type": "application/json"})
-        try:
-            with urlopen(request, timeout=timeout) as response:
-                result = json.load(response)
-        except HTTPError as error:
-            raise DriverError(error.read().decode()) from error
+        # 代理到 WebKit 的空闲连接偶尔被关闭；只重试观察/定位和幂等滚动。
+        # 点击、输入、创建会话均不自动重发，避免重复写入。
+        safe = method == "GET" or path.endswith("/element") or (path.endswith("/execute/sync") and data and (data.get("script", "").startswith("return ") or data.get("script", "").startswith("arguments[0].scrollIntoView")))
+        for attempt in range(3 if safe else 1):
+            try:
+                with urlopen(request, timeout=timeout) as response:
+                    result = json.load(response)
+                break
+            except HTTPError as error:
+                raise DriverError(error.read().decode()) from error
+            except (RemoteDisconnected, ConnectionResetError, ConnectionAbortedError):
+                if not safe or attempt == 2:
+                    raise
+                time.sleep(0.15 * (attempt + 1))
         value = result.get("value")
         if isinstance(value, dict) and "error" in value:
             raise DriverError(json.dumps(value, ensure_ascii=False))
@@ -96,7 +106,20 @@ class WebDriver:
         if label == "选择文件并预览" and not self.observe("return document.querySelector('#file-import-details').open"):
             self.click("#file-import-details > summary")
         # 测试中的中文标签没有引号；由浏览器正常派发点击，不调用业务方法。
-        self.click(f"{container}//button[normalize-space(.)='{label}']", "xpath")
+        try:
+            self.click(f"{container}//button[normalize-space(.)='{label}']", "xpath")
+        except (RemoteDisconnected, ConnectionResetError, ConnectionAbortedError):
+            titles = {"选择文件并预览":"选择要导入的对话文件", "打开已有资料库":"打开已有 RecallCard 资料库", "创建新资料库":"选择用于新资料库的空文件夹", "导出本次来源包":"保存整理包", "选择结果并审阅":"选择整理结果文件"}
+            title = titles.get(label)
+            if not title:
+                raise
+            # 不重新点击；只核对不确定请求是否已经产生预期的真实原生窗口。
+            def appeared():
+                result = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", f"^{re.escape(title)}$"], capture_output=True, text=True, timeout=3)
+                return result.returncode == 0 and bool(result.stdout.strip())
+            if not wait_for(appeared, "断连后核对原生窗口", timeout=3):
+                raise
+            print(f"点击回执断开，但已观察到原生窗口：{title}；不重发点击", flush=True)
 
     def type(self, selector, value):
         element = self.find(selector)
