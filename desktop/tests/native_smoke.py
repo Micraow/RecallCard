@@ -260,6 +260,23 @@ class WebDriver:
         self.idle()
         assert self.observe("return Boolean(document.querySelector('#continuation-panel'))")
 
+    def choose_context_references(self, references):
+        assert 1 <= len(references) <= 8 and len(set(references)) == len(references)
+        assert all(re.fullmatch(r"event:[A-Za-z0-9_-]+", reference) for reference in references)
+        choices = self.observe("return [...document.querySelectorAll('.results .context-check input')].map(n=>({ref:n.dataset.selectionReference,checked:n.checked,disabled:n.disabled}))")
+        assert len({row["ref"] for row in choices}) == len(choices)
+        assert set(references) <= {row["ref"] for row in choices}, "目标原话必须存在于当前实际搜索结果"
+        assert not any(row["disabled"] for row in choices), "选择框必须实际可用"
+        # 先移除不需要的勾选，再添加目标，避免暂时触及选择上限。只操作公开控件。
+        changes = [row for row in choices if row["checked"] and row["ref"] not in references]
+        changes += [row for row in choices if not row["checked"] and row["ref"] in references]
+        for row in changes:
+            self.click(f'.context-check input[data-selection-reference="{row["ref"]}"]')
+            self.idle()
+        selected = self.observe("return [...document.querySelectorAll('.results .context-check input:checked')].map(n=>n.dataset.selectionReference)")
+        assert selected == [row["ref"] for row in choices if row["ref"] in references]
+        return selected
+
     def close(self):
         if self.session:
             self.command("DELETE", "")
@@ -283,6 +300,24 @@ class NativeSmoke:
         print(f"通过：{name}", flush=True)
         self.steps.append(name)
         self.capture(f"{len(self.steps):02d}-{name}")
+
+    def reopen_application(self):
+        previous = self.driver
+        observations = list(getattr(previous, "observations", []))
+        previous.close()
+        self.driver = None
+
+        def ready():
+            with urlopen("http://127.0.0.1:4444/status", timeout=2) as response:
+                return json.load(response).get("value", {}).get("ready") is True
+
+        wait_for(ready, "应用关闭后原生驱动可建立新的窗口")
+        # 明确关闭后的新启动只建立一次会话；不因创建回执不确定而重发。
+        self.driver = WebDriver(self.application)
+        self.driver.observations = observations
+        wait_for(lambda: bool(self.driver.text("h1")), "重新启动后真实窗口显示页面")
+        self.driver.idle()
+        return self.driver
 
     def capture(self, name, webview=True):
         # scrot 同时记录原生文件选择窗口；WebDriver 截图记录真实 WebKit 页面。
@@ -1395,6 +1430,7 @@ class NativeSmoke:
         background_evidence = self.exercise_background_selection(edited_memory, server)
         workspace_evidence = self.exercise_workspace_usability()
         deepseek_evidence = self.exercise_deepseek_import()
+        selected_recovery_evidence = self.exercise_selected_context_and_restart(deepseek_evidence)
         doctor = self.cli_command("doctor")
         assert doctor["ok"], doctor
         (self.artifacts / "canonical-evidence.json").write_text(json.dumps({
@@ -1402,6 +1438,7 @@ class NativeSmoke:
             "visibility_rules": visibility_rules, "receipt": receipt, "doctor": doctor, "job": job,
             "background_selection": background_evidence, "workspace_usability": workspace_evidence,
             "deepseek_import": deepseek_evidence,
+            "selected_context_and_restart": selected_recovery_evidence,
             "default_workspace": default_workspace_evidence,
         }, ensure_ascii=False, indent=2))
 
@@ -1587,6 +1624,117 @@ class NativeSmoke:
                 "duplicate_completion": repeated, "duplicate_counts": duplicate_counts,
                 "events": list(events.values()), "handoffs": handoffs,
                 "keyboard_branch_ref": branch_b, "copied_exact_previews": True}
+
+    def exercise_selected_context_and_restart(self, deepseek_evidence):
+        browser = self.driver
+        before_events, before_memories = self.events(), self.canonical_memories()
+        events = self.verify_deepseek_events(before_events)
+        wanted = [f"event:{events[key]['id']}" for key in ["q", "b", "second-q"]]
+        goal = "合并石榴和海棠项目的原话证据，区分未确认建议后继续"
+        browser.navigate("查找与阅读")
+        browser.type("#query", "DeepSeek")
+        browser.button("查找")
+        browser.idle()
+        browser.button("带走这些资料")
+        browser.idle()
+        selected = browser.choose_context_references(wanted)
+        browser.type('#selection-context-panel textarea[aria-label="接下来要做什么"]', goal)
+        browser.button("准备交接内容")
+        browser.idle()
+        browser.click('#selection-context-preview .continuation-text > summary')
+        text = browser.observe('return document.querySelector(\'#selection-context-panel textarea[aria-label="交接内容预览"]\').value')
+        assert text.startswith("recallcard.context/1\n# 选定资料交接\n") and goal in text
+        for key in ["q", "b", "second-q"]:
+            assert DEEPSEEK_TEXTS[key] in text and f"event:{events[key]['id']}" in text
+        for key in ["a", "separate", "second-a"]:
+            assert DEEPSEEK_TEXTS[key] not in text, "未选中的其他回答或会话原话不可混入"
+        for forbidden in [DEEPSEEK_HIDDEN, DEEPSEEK_ATTACHMENT, DEEPSEEK_ATTACHMENT_URL]:
+            assert forbidden not in text
+        pane = browser.text("#selection-context-panel")
+        assert "用户原话" in pane and "AI 回复" in pane and "时间未知" in pane
+        assert browser.observe("return [...document.querySelectorAll('.selected-context-record')].map(n=>n.dataset.contextReference)") == selected
+        browser.button("复制交接内容")
+        browser.idle()
+        assert run("xclip", "-selection", "clipboard", "-o") == text
+        assert self.events() == before_events and self.canonical_memories() == before_memories
+        self.checkpoint("跨会话选定三条原文并逐字复制不混入未选内容")
+
+        inspect = f'.selected-context-record[data-context-reference="{wanted[0]}"] button'
+        browser.click(inspect)
+        browser.idle()
+        assert browser.observe("return !document.querySelector('#selection-context-panel')")
+        browser.button("查看相邻消息")
+        browser.idle()
+        assert browser.observe("return document.querySelector('.located-message').dataset.reference") == wanted[0]
+        browser.button("返回之前的阅读")
+        browser.idle()
+        assert browser.observe("return document.querySelector('#query').value") == "DeepSeek"
+        browser.button("带走这些资料")
+        browser.idle()
+        assert browser.observe("return [...document.querySelectorAll('.context-check input:checked')].map(n=>n.dataset.selectionReference)") == selected
+        assert browser.observe('return document.querySelector(\'#selection-context-panel textarea[aria-label="接下来要做什么"]\').value') == goal
+        browser.command("POST", "/window/rect", {"width": 820, "height": 620})
+        browser.idle()
+        actual_window = browser.command("GET", "/window/rect")
+        actual_viewport = browser.observe("return {width:innerWidth,height:innerHeight}")
+        assert 0 < actual_viewport["width"] <= 822 and 0 < actual_viewport["height"] <= 622, f"缩窗请求没有得到目标大小的实际内容区：window={actual_window}, viewport={actual_viewport}"
+        assert browser.observe("return document.documentElement.scrollWidth <= innerWidth + 2")
+        browser.button("调整所选资料")
+        browser.idle()
+        assert browser.observe("return document.querySelector('.results.list-scroll').getBoundingClientRect().height > 0")
+        browser.button("带走这些资料")
+        browser.idle()
+        browser.button("复制交接内容")
+        browser.idle()
+        assert run("xclip", "-selection", "clipboard", "-o") == text
+        self.checkpoint("核对相邻原话后恢复选择目标并在最小窗口再次复制")
+        # 故意留下两条选择、手写目标和已生成预览后结束应用会话。
+        # 两条与新搜索默认的前三条不同，避免无差别的断言假称验证了清草稿。
+        browser.button("调整所选资料")
+        browser.idle()
+        abandoned_refs = browser.choose_context_references([wanted[0], wanted[2]])
+        browser.button("带走这些资料")
+        browser.idle()
+        assert len(abandoned_refs) == 2
+        assert browser.observe('return document.querySelector(\'#selection-context-panel textarea[aria-label="接下来要做什么"]\').value') == goal
+        assert browser.observe("return Boolean(document.querySelector('#selection-context-preview'))")
+        assert self.events() == before_events and self.canonical_memories() == before_memories
+
+        browser = self.reopen_application()
+        browser.assert_vault_badge(self.vault.name)
+        assert browser.text("#location") == "会话"
+        assert browser.observe("return Boolean(document.querySelector('.conversation-message'))")
+        assert not browser.observe("return Boolean(document.querySelector('#selection-context-panel'))")
+        browser.navigate("查找与阅读")
+        browser.type("#query", "DeepSeek")
+        browser.button("查找")
+        browser.idle()
+        browser.button("带走这些资料")
+        browser.idle()
+        reset_selection = browser.observe("return {all:[...document.querySelectorAll('.context-check input')].map(n=>n.dataset.selectionReference),checked:[...document.querySelectorAll('.context-check input:checked')].map(n=>n.dataset.selectionReference),goal:document.querySelector('#selection-context-panel textarea[aria-label=\"接下来要做什么\"]').value,preview:document.querySelector('#selection-context-panel textarea[aria-label=\"交接内容预览\"]').value}")
+        assert reset_selection["checked"] == reset_selection["all"][:3] and len(reset_selection["checked"]) == 3
+        assert reset_selection["checked"] != abandoned_refs
+        assert reset_selection["goal"] == "DeepSeek" and goal not in reset_selection["preview"]
+        assert self.events() == before_events and self.canonical_memories() == before_memories
+        self.checkpoint("结束会话后重新启动自动恢复资料库且新搜索不恢复旧草稿")
+        browser.navigate("添加资料")
+        browser.button("查看导入记录")
+        browser.idle()
+        browser.click(".import-history-row button")
+        browser.idle()
+        assert browser.text(".import-job h3") == "导入完成"
+        browser.button("查看本批会话")
+        browser.idle()
+        assert "新增 0 条" in browser.text(".import-batch-summary")
+        assert browser.observe("return document.querySelectorAll('.conversation-list .result-card').length") == 2
+        assert self.events() == before_events and self.canonical_memories() == before_memories
+        self.checkpoint("重启后从已完成导入记录找回本批会话且重复导入不新增")
+        return {"selected_refs": selected, "copied_text": text, "return_goal": goal,
+                "requested_window": {"width": 820, "height": 620}, "actual_window": actual_window,
+                "actual_viewport": actual_viewport, "restarted": True,
+                "abandoned_refs": abandoned_refs, "fresh_refs": reset_selection["checked"],
+                "canonical_records_unchanged": True, "batch_conversations": 2,
+                "source_batch_files": deepseek_evidence["files"]}
 
     def close(self):
         if self.driver:

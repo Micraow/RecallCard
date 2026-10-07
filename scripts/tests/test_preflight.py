@@ -165,7 +165,19 @@ class PreflightTest(unittest.TestCase):
         text = text.replace(marker, "")
         text = text.replace("        background_evidence = self.exercise_background_selection", marker + "        background_evidence = self.exercise_background_selection")
         path.write_text(text)
-        with self.assertRaisesRegex(preflight.PreflightError, "最后两个流程"):
+        with self.assertRaisesRegex(preflight.PreflightError, "最后三个流程"):
+            preflight.check_native_order(self.root)
+
+    def test_selected_context_and_restart_cannot_be_omitted_or_repeated(self):
+        path = self.copy("desktop/tests/native_smoke.py")
+        original = path.read_text()
+        marker = "        selected_recovery_evidence = self.exercise_selected_context_and_restart(deepseek_evidence)"
+        self.assertEqual(original.count(marker), 1)
+        path.write_text(original.replace(marker, ""))
+        with self.assertRaisesRegex(preflight.PreflightError, "缺少关键流程"):
+            preflight.check_native_order(self.root)
+        path.write_text(original.replace(marker, marker + "\n" + marker))
+        with self.assertRaisesRegex(preflight.PreflightError, "重复调用流程"):
             preflight.check_native_order(self.root)
 
     def test_default_workspace_must_be_present_and_first(self):
@@ -278,6 +290,27 @@ class PreflightTest(unittest.TestCase):
     def test_actual_runner_summaries_require_a_positive_count(self):
         for runner, output in [("node", "\x1b[32mℹ tests 59\x1b[0m\n"), ("python", "Ran 21 tests in 0.42s\nOK"), ("python", "Ran 1 test in 0.01s\nOK")]:
             self.assertEqual(preflight.tested_output(output, runner), output)
+
+    def test_gui_workflow_declares_native_runtime_tools_before_acceptance(self):
+        workflow = next(data for path, data in preflight.workflows(ROOT) if path.name == "desktop.yml")
+        steps = workflow["jobs"]["linux"]["steps"]
+        native = next(i for i, step in enumerate(steps) if "native_smoke.py" in step.get("run", ""))
+        setup = "\n".join(step.get("run", "") for step in steps[:native])
+        for package in ["webkit2gtk-driver", "xvfb", "xauth", "xdotool", "xclip", "scrot", "openbox", "dbus-x11", "python3-pyatspi"]:
+            self.assertIn(package, setup.split(), f"原生验收前必须明确安装 {package}")
+        self.assertNotIn("cargo install tauri-driver", setup, "原生脚本已直接使用官方 WebKitWebDriver，不再构建旧中间驱动")
+
+    def test_gui_dependency_install_has_bounded_official_apt_options(self):
+        workflow = next(data for path, data in preflight.workflows(ROOT) if path.name == "desktop.yml")
+        step = next(step for step in workflow["jobs"]["linux"]["steps"] if "apt-get" in step.get("run", ""))
+        self.assertGreater(step.get("timeout-minutes", 0), 0)
+        self.assertLessEqual(step["timeout-minutes"], 16)
+        for option in ["Acquire::Retries=2", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30", "--no-install-recommends"]:
+            self.assertIn(option, step["run"])
+        self.assertNotIn("add-apt-repository", step["run"])
+        self.assertNotIn("/etc/apt/", step["run"])
+        for value in ["https://archive.ubuntu.com/ubuntu", "https://security.ubuntu.com/ubuntu", "signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg", "timeout --kill-after=30s 3m", "timeout --kill-after=30s 8m", "for attempt in 1 2", "--error-on=any"]:
+            self.assertIn(value, step["run"])
 
     def test_partial_run_never_claims_full_gate(self):
         out, err = io.StringIO(), io.StringIO()

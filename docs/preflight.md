@@ -77,8 +77,7 @@ tar -xzf /tmp/recallcard-preflight-tools/actionlint.tar.gz -C /tmp/recallcard-pr
    仅按 Linux/bash 语法验证；matrix 中 Windows 的默认 PowerShell、各平台命令
    能否实际运行、权限和外部服务状态都未验证。
 5. 用 Python AST 核对 NativeSmoke.exercise 中关键原生流程都唯一、无条件且
-   直接调用；密度验收 exercise_workspace_usability 必须位于所有 exercise_*
-   流程末尾。每个工作流 job 也只能调用一次完整 native_smoke.py，避免插入重复
+   直接调用；最后三个流程必须依次为大数据密度、多文件 DeepSeek 导入、跨会话交接与重启恢复。每个工作流 job 也只能调用一次完整 native_smoke.py，避免插入重复
    验收后仍误以为通过。
 6. 实际调用 workspaceAssets()，核对它返回的每份资源和 desktop/ui 真实文件
    字节相同、资源表无遗漏或陈旧路径。V8 SourceTextModule 解析并链接所有真实

@@ -309,11 +309,11 @@ def check_native_order(root):
                     and node.func.value.id == "self" and node.func.attr.startswith("exercise_")), key=lambda node: node.lineno)
     counts = Counter(node.func.attr for node in calls)
     expected = {"exercise_default_workspace", "exercise_zip_import", "exercise_memory_management", "exercise_scope_controls",
-                "exercise_background_selection", "exercise_workspace_usability", "exercise_deepseek_import"}
+                "exercise_background_selection", "exercise_workspace_usability", "exercise_deepseek_import", "exercise_selected_context_and_restart"}
     require(expected <= counts.keys(), f"原生入口缺少关键流程：{sorted(expected - counts.keys())}")
     require(calls[0].func.attr == "exercise_default_workspace", "默认本机起步必须是第一个独立验收流程")
     require(all(value == 1 for value in counts.values()), f"原生入口重复调用流程：{dict(counts)}")
-    require([node.func.attr for node in calls[-2:]] == ["exercise_workspace_usability", "exercise_deepseek_import"], "最后两个流程必须依次为大数据密度验收和多文件 DeepSeek 导入")
+    require([node.func.attr for node in calls[-3:]] == ["exercise_workspace_usability", "exercise_deepseek_import", "exercise_selected_context_and_restart"], "最后三个流程必须依次为大数据密度、多文件 DeepSeek 导入和跨会话交接重启恢复")
     # 必须是入口的无条件直接语句，避免藏在条件/循环/内嵌函数里却看似唯一。
     direct = {id(node.value) for node in method.body if isinstance(node, (ast.Expr, ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Call)}
     require(all(id(node) in direct for node in calls), "关键原生流程必须是入口的直接、无条件调用")
