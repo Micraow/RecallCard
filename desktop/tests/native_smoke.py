@@ -27,6 +27,7 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[2]
 ELEMENT = "element-6066-11e4-a52e-4f735466cecf"
+UI_CONTRACTS = json.loads((Path(__file__).with_name("native-ui-contracts.json")).read_text())
 EVENT_TEXT = "合成资料：native-smoke 水星项目的说明使用简洁中文。"
 NOTE_TEXT = "合成首条记录：周末整理书单。"
 MEMORY_TEXT = "合成记忆：native-smoke 琥珀计划先核对证据，再用简洁中文说明。"
@@ -632,7 +633,8 @@ class NativeSmoke:
         browser.button("查找")
         browser.idle()
         assert not browser.observe("return !!document.querySelector('.results .result-card')")
-        assert "暂时没有找到匹配资料" in browser.text("#content")
+        empty = UI_CONTRACTS["empty_search"]
+        assert browser.text(empty["selector"]) == empty["text"]
         self.checkpoint("遗忘后记忆与原始来源实际退出搜索")
 
         browser.navigate("记忆管理")
@@ -1207,12 +1209,21 @@ class NativeSmoke:
         browser.type('#query', '合成任务 17')
         browser.button('查找')
         browser.idle()
-        assert browser.observe("return document.querySelectorAll('.results .result-card').length") == 1
-        assert '用户原话' in browser.text('.results .result-card')
-        assert 'chatgpt-export' in browser.text('.results .result-card')
-        browser.click('.results .result-card')
+        # BM25 可同时返回包含共同词的相关记录；验收目标是确切原话可检索并可追溯，
+        # 不将相关检索错误地当成只返回一个结果的精确等值查询。
+        expected_events = [event for event in self.events()
+                           if event['source']['conversation_id'] == 'workspace-density-17' and event['role'] == 'user']
+        assert len(expected_events) == 1
+        expected_event = expected_events[0]
+        search_reference = f"event:{expected_event['id']}"
+        search_selector = f'.results .result-card[data-reference="{search_reference}"]'
+        assert browser.observe(f"return document.querySelectorAll({json.dumps(search_selector)}).length") == 1
+        assert '用户原话' in browser.text(search_selector)
+        assert 'chatgpt-export' in browser.text(search_selector)
+        browser.click(search_selector)
         browser.idle()
-        search_reference = browser.observe("return document.querySelector('.results .result-card.selected').dataset.reference")
+        assert browser.observe("return document.querySelector('.results .result-card.selected').dataset.reference") == search_reference
+        assert browser.observe("return document.querySelector('.reading-pane .body-text').textContent") == expected_event['content']
         browser.button('查看相邻消息')
         browser.idle()
         assert browser.observe("return document.querySelector('.located-message').dataset.reference") == search_reference
@@ -1228,7 +1239,7 @@ class NativeSmoke:
         browser.click('[data-action="back-to-list"]')
         browser.idle()
         assert browser.observe("return document.querySelector('.results.list-scroll').getBoundingClientRect().height > 0")
-        browser.click('.results .result-card')
+        browser.click(search_selector)
         browser.idle()
         assert browser.observe("return document.querySelector('.reading-pane').getBoundingClientRect().height > 0")
         browser.open_continuation()
