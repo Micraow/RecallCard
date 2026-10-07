@@ -391,3 +391,72 @@ test('恢复后的任务可先查看已保存原文，返回导入页仍需明�
   assert.equal(ui.one('progress').value, 2);
   ui.button('继续导入'); noAutomaticImport(ui);
 });
+
+test('范围设置保存挂起也先读完新范围，保存结束不重新绘制用户已打开的背景页', async t => {
+  const ui = await fixture(t, { restoreResponse: restored });
+  await ui.navigate('随身背景');
+  const release = ui.native.hold('remember_workspace');
+  const reads = ui.native.count('manage_memories');
+  ui.fill('[aria-label="资料范围"]', 'work', 'change'); await ui.idle();
+  assert.equal(ui.native.count('manage_memories'), reads + 1, '界面就绪之前必须已读取新范围，不能等设置保存后才补加载');
+  assert.equal(ui.native.matching('manage_memories').at(-1).payload.scope, 'work');
+  await ui.click('选择背景');
+  const currentPane = ui.one('#content').firstElementChild;
+  const currentReads = ui.native.count('manage_memories');
+  release(null); await ui.idle();
+  assert.equal(ui.native.count('manage_memories'), currentReads, '迟到设置完成不能发起额外列表加载');
+  assert.equal(currentPane.isConnected, true, '迟到设置完成不能替换刚打开的可点击页面节点');
+  assert.equal(ui.one('[data-action="background-select"]').getAttribute('aria-pressed'), 'true');
+  ui.noWrites();
+});
+
+test('范围设置迟到完成后不重新查询用户随后打开的搜索结果', async t => {
+  const ui = await fixture(t, { restoreResponse: restored });
+  const release = ui.native.hold('remember_workspace');
+  ui.fill('[aria-label="资料范围"]', 'work', 'change'); await ui.idle();
+  ui.fill('#query', '随后主动发起的查找'); await ui.click('查找');
+  const reads = ui.native.count('search_records');
+  const currentPane = ui.one('#content').firstElementChild;
+  release(null); await ui.idle();
+  assert.equal(ui.native.count('search_records'), reads, '保存位置不能重放一个新的检索');
+  assert.equal(currentPane.isConnected, true);
+  assert.equal(ui.one('#query').value, '随后主动发起的查找');
+  ui.noWrites();
+});
+
+for (const fails of [false, true]) {
+  test(`范围 A→B→A 的迟到设置${fails ? '失败' : '成功'}不重放读取，仍按顺序保存最后范围`, async t => {
+    const ui = await fixture(t, { restoreResponse: restored });
+    let settle;
+    const pending = new Promise((resolve, reject) => { settle = () => fails ? reject(new Error('合成旧范围保存失败')) : resolve(null); });
+    ui.native.next('remember_workspace', pending);
+    ui.fill('[aria-label="资料范围"]', 'work', 'change'); await ui.idle();
+    ui.fill('[aria-label="资料范围"]', 'personal', 'change'); await ui.idle();
+    const reads = ui.native.count('list_conversations');
+    const currentPane = ui.one('#content').firstElementChild;
+    assert.deepEqual(ui.native.matching('remember_workspace').map(call => call.payload.scope), ['work']);
+    settle(); await ui.idle();
+    assert.deepEqual(ui.native.matching('remember_workspace').map(call => call.payload.scope), ['work', 'personal']);
+    assert.equal(ui.native.count('list_conversations'), reads);
+    assert.equal(currentPane.isConnected, true);
+    assert.equal(ui.one('[aria-label="资料范围"]').value, 'personal');
+    assert.equal(ui.one('#notice').classList.contains('error'), false, '旧范围的失败不能污染新范围');
+    ui.noWrites();
+  });
+}
+
+test('当前范围的设置迟到失败只提示保存位置问题，不替换新搜索或正文', async t => {
+  const ui = await fixture(t, { restoreResponse: restored });
+  let rejectSave;
+  ui.native.next('remember_workspace', new Promise((_, reject) => { rejectSave = reject; }));
+  ui.fill('[aria-label="资料范围"]', 'work', 'change'); await ui.idle();
+  ui.fill('#query', '保存设置期间继续查找'); await ui.click('查找');
+  const reads = ui.native.count('search_records');
+  const currentPane = ui.one('#content').firstElementChild;
+  rejectSave(new Error('合成设置写入失败')); await ui.idle();
+  assert.match(ui.one('#notice').textContent, /暂时无法记住这个位置/);
+  assert.equal(ui.native.count('search_records'), reads);
+  assert.equal(currentPane.isConnected, true);
+  assert.equal(ui.one('#query').value, '保存设置期间继续查找');
+  ui.noWrites();
+});

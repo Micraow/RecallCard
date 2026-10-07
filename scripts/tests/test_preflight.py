@@ -315,7 +315,7 @@ class PreflightTest(unittest.TestCase):
         for value in ["https://archive.ubuntu.com/ubuntu", "https://security.ubuntu.com/ubuntu", "signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg", "timeout --kill-after=30s 3m", "timeout --kill-after=30s 8m", "for attempt in 1 2", "--error-on=any"]:
             self.assertIn(value, step["run"])
 
-    def test_integrated_recheck_branch_starts_exactly_one_nonpackaging_workflow(self):
+    def test_integrated_application_change_starts_exactly_one_fresh_nonpackaging_workflow(self):
         matches = []
         for path, data in preflight.workflows(ROOT):
             triggers = data.get("on", data.get(True, {}))
@@ -326,7 +326,9 @@ class PreflightTest(unittest.TestCase):
                 if fnmatch.fnmatchcase("validate/gui-import-results-20261007", pattern.lstrip("!")):
                     matched = not negative
             if matched: matches.append(path.name)
-        self.assertEqual(matches, ["recheck-integrated.yml"])
+        self.assertEqual(matches, ["desktop.yml"])
+        workflow = next(data for path, data in preflight.workflows(ROOT) if path.name == "recheck-integrated.yml")
+        self.assertEqual(set(workflow.get("on", workflow.get(True, {}))), {"workflow_dispatch"})
 
     def test_integrated_recheck_source_gate_rejects_each_application_change(self):
         workflow = next(data for path, data in preflight.workflows(ROOT) if path.name == "recheck-integrated.yml")

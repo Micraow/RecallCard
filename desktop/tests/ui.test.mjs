@@ -137,7 +137,12 @@ async function fixture(t) {
     return structuredClone(await (queued ? queued() : defaultResponse(command, payload)));
   });
   await page.addInitScript(() => {
-    window.__TAURI__ = { core: { invoke: (command, payload) => window.__syntheticInvoke(command, payload) } };
+    // 只记录合成 IPC 响应何时交回页面，用于确定性等待；不读写应用内部状态。
+    window.__syntheticSettled = {};
+    window.__TAURI__ = { core: { invoke: async (command, payload) => {
+      try { return await window.__syntheticInvoke(command, payload); }
+      finally { window.__syntheticSettled[command] = (window.__syntheticSettled[command] || 0) + 1; }
+    } } };
   });
   await page.route('**/*', async route => {
     const url = new URL(route.request().url());
@@ -855,3 +860,32 @@ test('窄窗口直接点击查看实际背景即可看见正文，无需测试he
   assert(rect && rect.y >= 0 && rect.y < 820);
   assert.equal(native.count('confirm_background_change'), 0);
 });
+
+for (const fails of [false, true]) {
+  test(`真实浏览器范围保存迟到${fails ? '失败' : '成功'}不会重绘已打开的背景页或重放搜索`, async t => {
+    const { page, native } = await fixture(t); await openVault(page);
+    await navigate(page, '记忆'); await button(page, '选择背景'); await idle(page);
+    let settle;
+    native.next('remember_workspace', new Promise((resolve, reject) => { settle = () => fails ? reject(new Error('合成设置保存失败')) : resolve(null); }));
+    const lists = native.count('manage_memories');
+    await page.getByRole('combobox', { name: '资料范围', exact: true }).selectOption('work'); await idle(page);
+    assert.equal(native.count('manage_memories'), lists + 1, '新范围读取不能等待设置落盘后才开始');
+    await button(page, '选择背景'); await idle(page);
+    const header = await page.locator('#content > :first-child').elementHandle();
+    await openSearch(page, '迟到设置期间的新查找');
+    const searchHeader = await page.locator('#content > :first-child').elementHandle();
+    const searches = native.count('search_records');
+    const remembered = native.count('remember_workspace');
+    settle();
+    // 必须先观察合成响应已交回页面，再等应用就绪，避免在释放 Promise 后抢读断言。
+    await page.waitForFunction(expected => window.__syntheticSettled.remember_workspace === expected
+      && document.querySelector('#operation').textContent === '准备就绪', remembered);
+    assert.equal(native.count('search_records'), searches);
+    assert.equal(await searchHeader.evaluate(node => node.isConnected), true);
+    assert.equal(await header.evaluate(node => node.isConnected), false, '主动搜索应正常更换背景页');
+    assert.equal(await page.locator('#query').inputValue(), '迟到设置期间的新查找');
+    if (fails) await page.getByText('资料已打开，但暂时无法记住这个位置。下次仍可手动打开。', { exact: true }).waitFor();
+    await captureBrowserEvidence(page, `scope-late-${fails ? 'failure' : 'success'}`);
+    await assertNoWrite(native);
+  });
+}
