@@ -73,7 +73,22 @@ pub struct Document {
     pub time_note: String,
     pub evidence: String,
     pub labels: Vec<String>,
+    #[serde(default)]
+    pub entities: Vec<String>,
     pub protected: bool,
+}
+
+impl Document {
+    fn valid_at(&self, time: DateTime<Utc>) -> bool {
+        !self.valid_from.is_some_and(|start| start > time)
+            && !self.valid_to.is_some_and(|end| end <= time)
+    }
+
+    fn current_memory_at(&self, time: DateTime<Utc>) -> bool {
+        self.kind == "memory"
+            && matches!(self.state.as_str(), "active" | "tentative")
+            && self.valid_at(time)
+    }
 }
 
 pub struct Context<'a> {
@@ -128,6 +143,7 @@ impl<'a> Context<'a> {
                 },
                 evidence: format!("{:?}/{:?}", event.data.role, event.data.origin),
                 labels: vec![],
+                entities: vec![],
                 protected: false,
             });
         }
@@ -158,6 +174,7 @@ impl<'a> Context<'a> {
                 time_note: memory.data.time_note,
                 evidence: format!("{:?}", memory.data.evidence),
                 labels: memory.data.tags,
+                entities: memory.data.entities,
                 protected: memory.data.protected,
             });
         }
@@ -184,17 +201,17 @@ impl<'a> Context<'a> {
     pub fn bootstrap(&self, args: BootstrapArgs) -> Result<Value> {
         check_budget(args.budget_tokens)?;
         let docs = self.documents()?;
+        let now = Utc::now();
         let mut profile = String::new();
         let mut labels = BTreeSet::new();
         let mut refs = Vec::new();
-        for doc in &docs {
+        for doc in docs.iter().filter(|doc| doc.current_memory_at(now)) {
             for label in &doc.labels {
-                labels.insert(label.clone());
+                if valid_view_label(label) {
+                    labels.insert(format!("view:{label}"));
+                }
             }
-            if doc.kind == "memory"
-                && doc.state == "active"
-                && doc.protected
-                && doc.labels.iter().any(|l| l == "bootstrap")
+            if doc.state == "active" && doc.protected && doc.labels.iter().any(|l| l == "bootstrap")
             {
                 profile.push_str(&format!("- {} [{}]\n", doc.text, doc.reference));
                 refs.push(doc.reference.clone());
@@ -231,6 +248,8 @@ impl<'a> Context<'a> {
         {
             return Err("未知 target/detail".into());
         }
+        // 仅用当前时刻选择有效记录，不将每次变化的 now 写入响应或游标绑定。
+        let effective_time = args.as_of.unwrap_or_else(Utc::now);
         let docs = self
             .documents()?
             .into_iter()
@@ -245,18 +264,14 @@ impl<'a> Context<'a> {
                         return false;
                     }
                 }
-                if let Some(time) = args.as_of {
-                    if d.kind == "event" && d.occurred_at.is_some_and(|t| t > time) {
+                if args.as_of.is_some() {
+                    if d.kind == "event" && d.occurred_at.is_some_and(|t| t > effective_time) {
                         return false;
                     }
-                    if d.kind == "memory"
-                        && (d.valid_from.is_some_and(|t| t > time)
-                            || d.valid_to.is_some_and(|t| t <= time))
-                    {
+                    if d.kind == "memory" && !d.valid_at(effective_time) {
                         return false;
                     }
-                } else if d.kind == "memory" && !matches!(d.state.as_str(), "active" | "tentative")
-                {
+                } else if d.kind == "memory" && !d.current_memory_at(effective_time) {
                     return false;
                 }
                 true
@@ -345,6 +360,41 @@ impl<'a> Context<'a> {
     pub fn sources(&self, args: ReadArgs) -> Result<Value> {
         self.read_internal(args, true)
     }
+    fn label_view(&self, label: &str, time: DateTime<Utc>, budget: usize) -> Result<Value> {
+        // 标签从授权后的正本投影中精确匹配，绝不拼接生成文件或任意本机路径。
+        let records = self
+            .documents()?
+            .into_iter()
+            .filter(|doc| doc.current_memory_at(time) && doc.labels.iter().any(|l| l == label))
+            .map(|doc| {
+                let mut value = serde_json::to_value(doc).map_err(|e| e.to_string())?;
+                value["ref"] = value["reference"].take();
+                value.as_object_mut().unwrap().remove("reference");
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut response = json!({"ref":format!("view:{label}"),"label":label,"reference_data":true,"records":records,"truncated":false,"pending_refs":[]});
+        while json_size(&response)? > budget {
+            response["truncated"] = json!(true);
+            if let Some(record) = response["records"].as_array_mut().unwrap().pop() {
+                response["pending_refs"]
+                    .as_array_mut()
+                    .unwrap()
+                    .insert(0, record["ref"].clone());
+            } else if response["pending_refs"]
+                .as_array_mut()
+                .unwrap()
+                .pop()
+                .is_some()
+            {
+                response["pending_list_truncated"] = json!(true);
+            } else {
+                // 连最小视图元数据也放不下时，由外层把整个 view 记入 pending_refs。
+                break;
+            }
+        }
+        Ok(response)
+    }
     fn read_internal(&self, args: ReadArgs, sources: bool) -> Result<Value> {
         let _read_guard = self.vault.read_guard()?;
         check_budget(args.budget_tokens)?;
@@ -355,15 +405,19 @@ impl<'a> Context<'a> {
         let mut used = 180usize;
         let mut pending = Vec::new();
         let suppressed = self.vault.suppressed_ids()?;
+        let now = Utc::now();
         for reference in &args.refs {
             let (kind, id, revision) = parse_ref(reference)?;
             let value = if kind == "view" {
-                if id != "profile" {
-                    return Err("当前只支持 view:profile".into());
+                if id == "profile" {
+                    let mut value = self.bootstrap(BootstrapArgs {
+                        budget_tokens: args.budget_tokens,
+                    })?;
+                    value["ref"] = json!(reference);
+                    value
+                } else {
+                    self.label_view(id, now, args.budget_tokens.saturating_sub(used))?
                 }
-                self.bootstrap(BootstrapArgs {
-                    budget_tokens: args.budget_tokens,
-                })?
             } else if kind == "event" {
                 let event = self.vault.event(id)?;
                 if !self.access.permits(&event.data.scope) || suppressed.contains(id) {
@@ -399,11 +453,16 @@ impl<'a> Context<'a> {
             used += len;
             results.push(value);
         }
-        let mut response = json!({"results":results,"truncated":!pending.is_empty(),"pending_refs":pending,"hint":"预算不足时分批 read 或使用 search 获取片段"});
+        let nested_truncated = results.iter().any(|item| item["truncated"] == true);
+        let mut response = json!({"results":results,"truncated":!pending.is_empty()||nested_truncated,"pending_refs":pending,"hint":"预算不足时分批 read 或使用 search 获取片段"});
         while json_size(&response)? > args.budget_tokens {
             response["truncated"] = json!(true);
             if !response["results"].as_array().unwrap().is_empty() {
-                response["results"].as_array_mut().unwrap().pop();
+                let removed = response["results"].as_array_mut().unwrap().pop().unwrap();
+                response["pending_refs"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(removed["ref"].clone());
             } else if !response["pending_refs"].as_array().unwrap().is_empty() {
                 response["pending_refs"].as_array_mut().unwrap().pop();
                 response["pending_list_truncated"] = json!(true);
@@ -426,7 +485,7 @@ pub fn parse_ref(reference: &str) -> Result<(&str, &str, Option<u64>)> {
         return Err("无效的 RecallCard 引用".into());
     };
     if kind == "view" {
-        if rest != "profile" {
+        if !valid_view_label(rest) {
             return Err("无效的 View 引用".into());
         }
         return Ok((kind, rest, None));
@@ -447,6 +506,15 @@ pub fn parse_ref(reference: &str) -> Result<(&str, &str, Option<u64>)> {
         _ => return Err("不支持的引用种类".into()),
     }
     Ok((kind, id, revision))
+}
+fn valid_view_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 128
+        && label != "."
+        && !label.contains("..")
+        && label
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 pub fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
@@ -478,7 +546,16 @@ pub fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 fn rank<'a>(docs: &'a [Document], query: &[String], raw: &str) -> Vec<(f64, &'a Document)> {
-    let corpus: Vec<Vec<String>> = docs.iter().map(|d| tokenize(&d.text)).collect();
+    let corpus: Vec<Vec<String>> = docs
+        .iter()
+        .map(|doc| {
+            let mut tokens = tokenize(&doc.text);
+            for field in doc.entities.iter().chain(&doc.labels) {
+                tokens.extend(tokenize(field));
+            }
+            tokens
+        })
+        .collect();
     let avg = corpus.iter().map(|d| d.len()).sum::<usize>() as f64 / (docs.len().max(1) as f64);
     let mut output = Vec::new();
     let terms: BTreeSet<&String> = query.iter().collect();
@@ -500,6 +577,14 @@ fn rank<'a>(docs: &'a [Document], query: &[String], raw: &str) -> Vec<(f64, &'a 
                 idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * tokens.len() as f64 / avg.max(1.0)));
         }
         if doc.text.to_lowercase().contains(&raw) {
+            score += 5.0;
+        }
+        if doc
+            .entities
+            .iter()
+            .chain(&doc.labels)
+            .any(|field| field.to_lowercase() == raw)
+        {
             score += 5.0;
         }
         if score > 0.0 {
@@ -531,7 +616,8 @@ fn json_size(value: &Value) -> Result<usize> {
 
 impl<'a> Context<'a> {
     pub fn embedding_corpus(&self) -> Result<Value> {
-        let documents=self.documents()?.into_iter().filter(|d|d.kind=="memory"&&matches!(d.state.as_str(),"active"|"tentative")).map(|d|json!({"ref":d.reference,"content_hash":hash(d.text.as_bytes()),"text":d.text,"scope":d.scope})).collect::<Vec<_>>();
+        let now = Utc::now();
+        let documents=self.documents()?.into_iter().filter(|d|d.current_memory_at(now)).map(|d|json!({"ref":d.reference,"content_hash":hash(d.text.as_bytes()),"text":d.text,"scope":d.scope})).collect::<Vec<_>>();
         let generation = hash(&serde_json::to_vec(&documents).map_err(|e| e.to_string())?);
         Ok(
             json!({"schema":"recallcard.embedding-corpus/1","generation":generation,"scope":self.access.scopes(),"documents":documents}),

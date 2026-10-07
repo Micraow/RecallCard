@@ -28,19 +28,26 @@
 - Native 共享 executable launcher：固定相邻配置、复制二进制、Unix 包装器与 Windows manifest；不自动注册系统配置
 - 浏览器精确增加 ChatGPT guest 的 `textarea#mobile-composer-prompt`，继续要求唯一可见可写编辑器，不自动发送
 
+## 已实现：召回语义与持续遗忘修复
+
+- 标签与实体进入文本排序，具名 `view:<label>` 从授权正本动态产生，拒绝路径与旧版本引用
+- 默认检索、Bootstrap、View 与 Embedding 导出只用当前有效 Memory，历史查询保留显式 `as_of`
+- CLI 接受工具引用，开放会话/时间/详情/游标查询参数；导入支持有界 stdin
+- 遗忘按 scope + 来源身份摘要继承到现有/未来修订；保留旧规则兼容和显式恢复，不混同独立消息
+- [T01–T12 验收差距 v0.3](acceptance-v0.3.md) 逐条区分实现、自动回归和未实机验证
+
 ## 下一步与未完成范围
 
-1. 具名 View、实体/当前有效时间查询、CLI ref 与查询参数一致性
-2. 独立 daemon 与本机 IPC；当前 MCP/Native 直接调用同一 Rust core
-3. Python worker 监督/自动接入 MCP 混合检索；目前显式导出与调用，不将旧缓存结果自动暴露给模型
-4. 实际 Agent 首次/恢复/compact 后加载，以及扩展安装后的真实网页端到端验证
-5. 大型资料库持久增量索引与性能验证；当前每次读取正本构建文本快照
+1. 独立 daemon 与本机 IPC；当前 MCP/Native 直接调用同一 Rust core
+2. Python worker 监督/自动接入 MCP 混合检索；目前显式导出与调用，不将旧缓存结果自动暴露给模型
+3. 实际 Agent 首次/恢复/compact 后加载，以及扩展安装后的真实网页端到端验证
+4. 大型资料库持久增量索引与性能验证；当前每次读取正本构建文本快照
 
 ## 验证边界
 
-- 2026-10-07 当前 Linux 工作区重新执行：122 项 Rust、105 项 Python（包括 Rust→fake API→Rust review 合同）、52 项 Node 测试全部通过，格式检查与严格 Clippy 通过
+- 2026-10-07 当前 Linux 工作区重新执行：143 项 Rust、105 项 Python（包括 Rust→fake API→Rust review 合同）、52 项 Node 测试全部通过，格式检查与严格 Clippy 通过
 - Rust→Python embedding 导出/哈希/增量缓存/撤权过滤合同独立通过
-- 已修复工作流 runner 上下文、Windows 严格告警、macOS 父目录别名；Windows 原子替换短暂占用修复由远端 Actions 验证，详见 [CI 修复记录](ci.md)
+- 已修复工作流 runner 上下文、Windows 严格告警、macOS 父目录别名；Windows 原子替换短暂占用修复及恢复阶段 d3105ef 已在三平台 Actions 全部通过；本段新改动另跑独立 CI，详见 [CI 修复记录](ci.md)
 - Linux/macOS/Windows CI 的每次结果绑定具体提交；本机通过不等于远端通过，也不等于浏览器安装验收
 - Native 安装链路已做合成进程测试，Windows/macOS 真实浏览器注册与运行尚未验收
 - 没有真实云 API 费用、embedding 效果、记忆准确率或前缀缓存命中数据

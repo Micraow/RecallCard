@@ -87,3 +87,11 @@ recallcard --vault <目录> restore <id>
 ## 6. 注入内容再次导入
 
 Core 会识别自己的 `recallcard.context/1`、`recallcard.dream-job/1`、`recallcard.dream-result/1` 标记，重新捕获时标成 synthetic origin，不把复述当新的独立记忆证据，也不混入默认文本检索。正文仍留在原始事件，可按明确编号审计。含用户附言与上下文的混合消息在首版整条保守排除，避免来源被清洗；不会假装已实现精确块级证据批准。
+
+## 引用与查询参数
+
+CLI 的 `read`/`sources` 同时接受原始编号与工具返回的 `event:evt_...`、`memory:mem_...@版本`；旧版本引用会报错，不偷偷读取新版本。具名 View 要显式绑定范围，例如 `read view:computing --scope personal`。View 是授权 Memory 标签的动态结果，不是本地文件路径。
+
+`search` 可带 `--session-ref`、`--as-of RFC3339时间`、`--detail brief|context`、`--cursor`。默认只召回当前有效记忆；历史查询必须明确给出时间。`import --file -` 支持手动标准输入；与 JSON 输入一样，在解析前限制为 16 MiB。
+
+直接 CLI 面向本机资料库维护者；省略 `read --scope` 仍可按编号读取本机记录。模型客户端应使用启动时绑定范围的 MCP/Native 接口。
