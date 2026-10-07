@@ -2,5 +2,10 @@
   "empty_search": {
     "selector": ".results .empty h3",
     "text": "没有找到匹配资料"
+  },
+  "scope_background": {
+    "scope_selector": "select[aria-label=\"资料范围\"]",
+    "reset_tab": "[data-action=\"memory-all\"]",
+    "background_tab": "[data-action=\"background-select\"]"
   }
 }

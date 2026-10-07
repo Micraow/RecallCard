@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+const nativeContracts = JSON.parse(await readFile(new URL('../native-ui-contracts.json', import.meta.url), 'utf8'));
 import { fixture } from './harness.mjs';
 import { backgroundMemories, backgroundPage, hostile, vault } from './fixtures.mjs';
 
@@ -345,5 +347,25 @@ test('旧候选勾选后被隐藏，查看全文使用背景专用接口且清�
   assert.equal(ui.document.querySelector('.background-list'), null);
   assert.doesNotMatch(ui.one('#content').textContent, /用户明确要求每次附上来源/);
   assert.match(ui.one('#content').textContent, /记忆已隐藏或撤回/);
+  ui.noWrites();
+});
+
+// 原生闭环同一合同：范围切换先清空旧背景，用户重新打开后才显示新范围内容。
+test('原生背景切范围路径：全部记忆重置后明确重开，往返个人内容保持一致', async t => {
+  const ui = await fixture(t); await openBackground(ui);
+  const contract = nativeContracts.scope_background;
+  const personal = ui.one('[aria-label="当前实际随身背景"]').value;
+  for (const scope of ['work', 'personal']) {
+    ui.fill(contract.scope_selector, scope, 'change'); await ui.idle();
+    assert.equal(ui.one(contract.reset_tab).getAttribute('aria-pressed'), 'true');
+    assert.equal(ui.document.querySelector('[aria-label="当前实际随身背景"]'), null);
+    ui.one(contract.background_tab).click(); await ui.idle();
+    const shown = ui.one('[aria-label="当前实际随身背景"]').value;
+    assert.equal(ui.native.matching('read_background').at(-1).payload.scope, scope);
+    if (scope === 'work') {
+      assert.equal(ui.document.querySelector('.background-candidate'), null);
+      assert.doesNotMatch(shown, /已经选择的稳定背景/);
+    } else assert.equal(shown, personal);
+  }
   ui.noWrites();
 });
