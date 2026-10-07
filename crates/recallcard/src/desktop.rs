@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
-    fs::{self, Metadata, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Read,
     path::{Path, PathBuf},
 };
@@ -121,7 +121,11 @@ struct FileIdentity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    volume_serial: u32,
+    #[cfg(windows)]
+    file_index: u64,
+    #[cfg(not(any(unix, windows)))]
     created: std::time::SystemTime,
 }
 
@@ -138,7 +142,7 @@ impl DesktopSession {
         .map_err(|_| {
             "无法打开资料库，请选择有效的 RecallCard Vault；新目录请使用创建".to_owned()
         })?;
-        let identity = file_identity(&fs::metadata(vault.root()).map_err(|_| STALE_SESSION)?)?;
+        let identity = path_identity(vault.root())?;
         let (marker, _) = bounded_file(&vault.root().join("control/schema-version.json"), 4096)?;
         let session_id = token();
         self.selected = Some(SelectedVault {
@@ -469,7 +473,7 @@ impl DesktopSession {
         let root = selected.vault.root();
         reject_symlink(root).map_err(|_| STALE_SESSION)?;
         let metadata = fs::metadata(root).map_err(|_| STALE_SESSION)?;
-        if !metadata.is_dir() || file_identity(&metadata)? != selected.identity {
+        if !metadata.is_dir() || path_identity(root)? != selected.identity {
             return Err(STALE_SESSION.into());
         }
         checked_file(&selected.marker, 4096).map_err(|_| STALE_SESSION)?;
@@ -533,22 +537,103 @@ fn health_error() -> String {
     "资料库校验失败或正在更新，请检查文件完整性、Git 冲突和待恢复的 Dream 事务".into()
 }
 
-fn file_identity(metadata: &Metadata) -> Result<FileIdentity> {
+fn file_identity(file: &File) -> Result<FileIdentity> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata().map_err(|_| STALE_FILE)?;
         Ok(FileIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
         })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+        };
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: File 保持句柄有效，information 是可写且大小正确的完整结构；此调用不接管句柄。
+        let success = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+        if success == 0 || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("无法安全核对所选文件的身份，请选择本地普通文件或目录".into());
+        }
+        // NTFS tunneling 可以保留同名替代文件的创建时间，因此不得用时间当文件标识。
+        Ok(FileIdentity {
+            volume_serial: information.dwVolumeSerialNumber,
+            file_index: (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow),
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Ok(FileIdentity {
-            created: metadata
+            created: file
+                .metadata()
+                .map_err(|_| STALE_FILE)?
                 .created()
                 .map_err(|_| "此文件系统无法提供稳定文件标识，请选择本地资料库")?,
         })
+    }
+}
+
+fn path_identity(path: &Path) -> Result<FileIdentity> {
+    file_identity(&open_local_file(path)?)
+}
+
+fn open_local_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // 检查后若变为 FIFO 或链接，也不能阻塞桌面线程或跟随最终链接。
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        // BACKUP_SEMANTICS 允许读取目录身份；OPEN_REPARSE_POINT 不跟随最终重解析点。
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options
+        .open(path)
+        .map_err(|_| "无法读取所选文件，请检查访问权限".into())
+}
+
+fn reject_selected_file_symlinks(path: &Path) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        reject_symlink(path)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for ancestor in path.ancestors() {
+            if ancestor.as_os_str().is_empty() {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(ancestor).map_err(|_| STALE_FILE)?;
+            if !metadata.is_symlink() {
+                continue;
+            }
+            // macOS 原生选择器和系统临时目录会返回这些系统路径。只允许根部的
+            // 三个确切系统别名及其确切目标，不放开任意父目录或文件符号链接。
+            let expected = match ancestor.to_str() {
+                Some("/var") => "private/var",
+                Some("/tmp") => "private/tmp",
+                Some("/etc") => "private/etc",
+                _ => return Err("不支持符号链接".into()),
+            };
+            let target = fs::read_link(ancestor).map_err(|_| STALE_FILE)?;
+            if target != Path::new(expected) && target != Path::new("/").join(expected) {
+                return Err("系统目录别名目标无效".into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -561,23 +646,13 @@ fn checked_file(expected: &FileSnapshot, limit: usize) -> Result<(FileSnapshot, 
 }
 
 fn bounded_file(path: &Path, limit: usize) -> Result<(FileSnapshot, String)> {
-    reject_symlink(path).map_err(|_| "不支持符号链接，请选择本地普通文件")?;
+    reject_selected_file_symlinks(path).map_err(|_| "不支持符号链接，请选择本地普通文件")?;
     let path = fs::canonicalize(path).map_err(|_| "无法读取所选文件，请重新选择")?;
     let metadata = fs::metadata(&path).map_err(|_| "无法检查所选文件")?;
     if !metadata.is_file() {
         return Err("请选择普通文件，不支持目录或特殊设备".into());
     }
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // 即使检查后被替换为 FIFO 或链接，也不能阻塞桌面线程或跟随最终链接。
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = options
-        .open(&path)
-        .map_err(|_| "无法读取所选文件，请检查访问权限")?;
+    let file = open_local_file(&path)?;
     let before = file.metadata().map_err(|_| "无法检查所选文件")?;
     if !before.is_file() {
         return Err("请选择普通文件，不支持目录或特殊设备".into());
@@ -588,20 +663,19 @@ fn bounded_file(path: &Path, limit: usize) -> Result<(FileSnapshot, String)> {
             limit / 1024 / 1024
         ));
     }
-    let identity = file_identity(&before)?;
+    let identity = file_identity(&file)?;
     let mut bytes = Vec::with_capacity(before.len() as usize);
     (&file)
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "文件读取中断，请重新选择")?;
     let after = file.metadata().map_err(|_| STALE_FILE)?;
-    let current = fs::metadata(&path).map_err(|_| STALE_FILE)?;
     if bytes.len() > limit
         || bytes.len() as u64 != before.len()
         || before.len() != after.len()
         || before.modified().ok() != after.modified().ok()
-        || file_identity(&after)? != identity
-        || file_identity(&current)? != identity
+        || file_identity(&file)? != identity
+        || path_identity(&path)? != identity
     {
         return Err(STALE_FILE.into());
     }

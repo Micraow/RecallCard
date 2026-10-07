@@ -7,7 +7,7 @@
 - 路径只能由原生目录/文件选择器交给 Rust。前端不能传入任意 Vault、导入或 Dream 路径，也没有通用文件、shell、CLI、环境变量、网络或凭据命令
 - 创建、导入确认、导出本地 Dream Job、发布 Dream 结果由用户点击触发；打开失败不会自动创建资料库
 - `select_vault(path, create)` 返回新的随机 `session_id`。所有后续操作都携带它。切换 Vault（包括切换失败）、关闭 Vault 或进程退出会废弃旧会话与预览
-- 服务还核对目录身份和 schema marker，目录在同一路径被替换后，旧命令失效。Unix 使用设备/inode；其他平台使用文件系统创建时间并核对文件内容摘要，仍需平台原生验证
+- 服务还核对目录身份和 schema marker，目录在同一路径被替换后，旧命令失效。Unix 使用设备/inode；Windows 通过 `GetFileInformationByHandle` 读取卷序列号与文件索引，不使用可能被 NTFS 保留的创建时间作为身份
 - 原生文件选择器返回后再验证最初的 `session_id`。界面也应丢弃旧请求的迟到返回，切换范围时清除所选引用和未确认的预览
 - `read`、`sources`、`search`、`browse` 都要求一个明确的 scope，并复用 Context 的抑制和证据可见性检查；没有 `*` 或隐式全部范围
 - 无网络、云端执行器或 API key 配置。返回内容是参考资料，界面用纯文本渲染，不解释 HTML、指令或文件中夹带的命令
@@ -35,7 +35,7 @@
 
 ## 导入预览与确认
 
-仅支持 `manual-jsonl`、`chatgpt-export` 和 `claude-code`。单文件最多 16 MiB、5000 个事件；拒绝无内容导入、符号链接、目录、特殊设备及无效 UTF-8。解析函数与正式导入共用，不通过临时 Vault 做预览。
+仅支持 `manual-jsonl`、`chatgpt-export` 和 `claude-code`。单文件最多 16 MiB、5000 个事件；拒绝无内容导入、文件/任意父目录符号链接、目录、特殊设备及无效 UTF-8。macOS 仅允许根部 `/var`、`/tmp`、`/etc` 指向对应 `/private` 目录的确切系统别名，再核对规范路径与文件身份。解析函数与正式导入共用，不通过临时 Vault 做预览。
 
 `ImportPreview` 返回 `preview_id`、`session_id`、`file_name`、`format`、`scope`、`file_hash`、`byte_count`、`event_count`、`redacted_event_count`、`samples`、`truncated`、`warning`。样本最多 6 条、每条正文最多 1200 字节，经过正式 capture 使用的脱敏函数。秘密检测仍是启发式的，不能承诺原文件没有其他秘密。
 
