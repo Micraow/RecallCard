@@ -10,7 +10,7 @@ const broker = new Broker({
   content: (tabId, message, documentId) => chrome.tabs.sendMessage(tabId, message, documentId ? { documentId, frameId: 0 } : { frameId: 0 }),
   native: (host, request) => new Promise((resolve, reject) => {
     let settled = false;
-    const timer = setTimeout(() => { settled = true; reject(new Error('本机读取超过 15 秒；不会自动重试，请检查本机桥')); }, 15000);
+    const timer = setTimeout(() => { settled = true; reject(new Error('本机操作超过 15 秒，结果未确认；不会自动重试，请检查本机桥')); }, 15000);
     chrome.runtime.sendNativeMessage(host, request, (response) => {
       const error = chrome.runtime.lastError;
       if (settled) return;

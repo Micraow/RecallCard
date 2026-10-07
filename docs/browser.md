@@ -1,6 +1,6 @@
-# 浏览器手动上下文桥
+# 浏览器会话与上下文
 
-当前扩展 0.2.0 还提供 Qwen/Z.ai 实验性手动输入框适配；精确权限、必须重置的会话限制和验证状态见 [手动浏览器适配 v0.3](browser-adapters-v0.3.md)。本文以下安装与人工发送流程仍适用。
+当前扩展 **0.3.0** 支持用户主动读取 ChatGPT / DeepSeek 可见会话，预览后保存、导出或为另一个 AI 准备上下文。完整操作、交换协议与验证边界见 [会话保存与导出](browser-conversations-v0.3.md)。Qwen/Z.ai 仍为实验性草稿适配；本文以下本机安装与高级人工发送流程仍适用。
 
 本页对应 `extension/`，以设计 v0.2 为准。扩展是无第三方运行依赖的 Chrome Manifest V3 实现，使用固定的 `com.recallcard.host` 本机桥，不启动 HTTP 服务，不调用付费 API。
 
@@ -8,7 +8,9 @@
 
 ## 1. 本阶段支持什么
 
-- 在 `https://chatgpt.com/`、`/c/<id>`、`/g/<id>`、`/g/<id>/c/<id>` 打开扩展弹窗
+- ChatGPT / DeepSeek 用户主动可见会话读取、按角色预览与勾选、本机脱敏预览后确认保存，以及离线 JSON / Markdown 导出
+- 为另一个 AI 准备带来源与覆盖说明的上下文，复制后人工发送
+- 在支持的网站打开扩展弹窗，顶部显示当前网站、会话与连接状态
 - 用户点击后准备最小 Bootstrap，预览范围内的资料，再显式追加到可见输入框
 - 用户手动复制模型输出的完整 `recallcard-action` 块，粘贴进扩展后执行只读检索
 - `bootstrap/search/read/sources`；read/sources 支持批量引用
@@ -16,13 +18,11 @@
 - 当前标签页、主框架、浏览器文档、URL、会话 nonce、request_id 校验和重复请求拒绝
 - 手动发送确认；“已准备”和“已插入草稿”不表示模型已经收到
 
-不支持自动读取/保存聊天输出、监听流式回复、隐藏推理、工具输出抓取、官方导出下载自动化、自动发送、无人值守 Web Dream。网页账号记忆和内部压缩不可观察，不假装能够检测。
+不支持后台自动保存、网络流监听、隐藏推理、工具输出抓取、官方导出下载自动化、自动发送或无人值守 Web Dream。网页账号记忆和内部压缩不可观察，不假装能够检测。
 
-### 为什么使用手动复制
+### 用户主动读取与网站规则
 
-2026-10-06 核对的 [OpenAI 使用条款](https://openai.com/policies/terms-of-use/) 限制自动或程序化提取数据与输出。扩展因此不扫描对话 DOM，也不把用户手动点击发送当作自动抓取的许可。此处是保守的工程边界，不是针对所有地区、账号合同的法律结论。使用者仍须遵守适用于自己账号的条款。
-
-对话保存使用用户主动复制或 [ChatGPT 官方数据导出](https://help.openai.com/en/articles/7260999-exporting-your-chatgpt-history-and-data)，再通过本地 CLI 导入。官方页面介绍的导出得到 ZIP；用户解压后仅在其中确实包含 `conversations.json` 时使用对应导入器。导出能力受账号与工作区限制，文件格式也可能改变。不要把原始导出提交到这个代码仓库。
+扩展只在用户点击后读取普通可见文字，不读取私有 API、网络、Cookie、令牌、隐藏推理或未挂载历史。导出标记为可见片段，不声称完整。网站使用条款仍适用；[OpenAI 使用条款](https://openai.com/policies/terms-of-use/) 包含程序化提取限制，本产品范围不是法律许可保证。也可使用 [ChatGPT 官方数据导出](https://help.openai.com/en/articles/7260999-exporting-your-chatgpt-history-and-data)，下载并解压后在确有 `conversations.json` 时通过桌面导入。
 
 ## 2. 构建与扩展加载
 
@@ -211,15 +211,15 @@ nonce 是误触防护和关联字段，模型及网页可以看到，不能代�
 
 首次测试可把文件替换为仓库的合成 fixture `fixtures/manual-web.jsonl`，同时使用其对应的 scope。真实导出和私人资料留在自己的 Vault，不进入代码仓库。
 
-扩展的 Native Messaging 接口始终只有四个读操作；上述写入只由用户在本地明确选择文件后执行。手工材料不能证明对话完整性：没有提供的文件、工具、引用、分支和时间不补造。原始消息 ID 可得时保留，否则使用明确的局部标识并承认身份较弱。
+模型可用的接口仍只有四个只读操作。扩展 popup 另有用户专用 connection/capture_preview/capture_save，保存需固定本机 capture_scope 授权、脱敏预览与单独确认；详见 [会话导出说明](browser-conversations-v0.3.md)。手工材料不能证明对话完整性：没有提供的文件、工具、引用、分支和时间不补造。原始消息 ID 可得时保留，否则使用明确的局部标识并承认身份较弱。
 
 复制含 RecallCard 注入块的用户消息时，必须保留块级来源标记；不能把整个组合文本一概写成新的 `user_input`，不能把同一上下文在不同网页的复述当作新增独立证据。详见 [本地数据格式](usage.md)。
 
 ## 7. 安全和状态说明
 
-- MV3 权限只有 `nativeMessaging`、`storage`，站点范围只有 `https://chatgpt.com/*`
+- MV3 权限为 `nativeMessaging`、`storage`、`downloads`；站点仅精确 ChatGPT、DeepSeek、Qwen、Z.ai HTTPS 主机，没有泛域
 - 页面适配在 Chrome 隔离环境执行；无 MAIN-world 桥、window.postMessage 接口、外部扩展消息接口、web-accessible resources、剪贴板自动读取或网络请求
-- 只有扩展自己的准确 popup URL 可发起读动作；content script 仅绑定当前会话和执行经过检查的输入框操作
+- 只有扩展自己的准确 popup URL 可发起本机与捕获动作；content script 负责会话绑定、用户主导可见读取与经过检查的输入框操作
 - 每次 native 操作前后都校验活跃标签、URL、顶层 documentId、当前绑定；后台重启从 `chrome.storage.session` 恢复去重记录
 - session storage 暂存 nonce、已处理 ID、Bootstrap、最后预览及其原只读请求和结果指纹，不保存到磁盘 Vault、Git 或 storage.local。关闭标签会清理；浏览器重启、禁用、重载或更新扩展也会清空。Chrome 的会话存储不是抗本机恶意软件的安全边界。[Chrome Storage 文档](https://developer.chrome.com/docs/extensions/reference/api/storage)
 - 导航使旧请求失效；能完整识别的旧草稿块会移除。用户改过的内容不强行删除，必须人工检查
@@ -242,7 +242,7 @@ Chrome service worker 可能被停止，因此不能只用内存 Set 去重；�
 | 中断回复 | 粘贴缺少结尾围栏的 JSON | 不发本机请求，不写入输入框 |
 | 错误命令 | 将 action 改成 shell/capture/remember | schema 拒绝 |
 | 跨会话 | 保存旧请求，切换另一对话再粘贴 | nonce/session 校验失败 |
-| 重生成/消息编辑 | 只编辑或重生成网页回复 | 扩展不采集变化；手工复制新块才可能请求 |
+| 重生成/消息编辑 | 在预览后编辑或重生成网页回复 | 旧预览失效；需要重新读取、选择并确认 |
 | 标签切换 | 准备结果后切到另一 ChatGPT 标签 | 不跨标签注入；重新打开时使用另一绑定 |
 | 本机缺失 | 准备预览后移走测试 host 注册文件，再尝试插入 | 核验失败，旧预览清空；没有自动重试或发送 |
 | 遗忘与撤权 | 准备 search/read 预览，在本机抑制来源或撤销 scope，再插入 | 重新读取发现变化或拒绝授权，废弃旧预览，不写草稿 |
@@ -261,6 +261,7 @@ Chrome service worker 可能被停止，因此不能只用内存 Set 去重；�
 - **插入前提示资料已变化：** 旧预览已废弃。重新请求并检查新的资料，不要从其他窗口复制旧缓存；本机断线时同样不会继续使用旧预览
 - **旧 request_id 不可重试：** 这是预留去重行为。确认未得到结果、修复 host 后使用新 ID，或显式重置会话
 - **上下文仍留在旧草稿：** 用户改过的块不会被强删。先人工移除旧内容，再重置扩展。扩展刷新后丢失 DOM 所有权信息时同样需要人工清理
-- **为什么没自动抓到刚才的聊天：** 本阶段只通过明确选定的复制/导出文件捕获，不扫描网页输出
+- **为什么没有旧历史：** 点击读取仅包含当前已加载且可见的普通文字，不自动滚动；缺失历史可使用网站官方导出
+- **本机未连接能否导出：** 可以。JSON / Markdown 下载独立于本机连接；直接入库需在桌面连接设置中独立允许保存
 
 进一步的 IPC、作用域和源码事实源约束见 [安全说明](security.md)；平台行为依照当前 [Chrome 消息文档](https://developer.chrome.com/docs/extensions/develop/concepts/messaging) 和 [Content Scripts 文档](https://developer.chrome.com/docs/extensions/develop/concepts/content-scripts) 复核。

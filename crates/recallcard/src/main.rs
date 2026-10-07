@@ -61,6 +61,9 @@ enum Command {
     },
     /// 生成待人工检查/注册的 Native Messaging 文件
     NativeInstall {
+        /// 明确允许扩展在此范围内保存用户预览确认的可见对话；默认不允许写入
+        #[arg(long)]
+        capture_scope: Option<String>,
         #[arg(long, required = true)]
         scope: Vec<String>,
         #[arg(long)]
@@ -273,16 +276,19 @@ fn run(cli: Cli) -> Result<Value> {
             recallcard::import::import_text(&vault, &format, &text, &scope)
         }
         Command::NativeInstall {
+            capture_scope,
             scope,
             extension_id,
             output_dir,
             ipc_endpoint,
-        } => recallcard::native::prepare_install_with_ipc(
+        } => recallcard::native::prepare_install_from_binary(
             &vault,
             scope,
             &extension_id,
             &output_dir,
             ipc_endpoint,
+            capture_scope,
+            &std::env::current_exe().map_err(|e| e.to_string())?,
         ),
         Command::NativeHost { .. } => Err("Native host 必须使用 framed stdio 模式".into()),
         Command::Dream { action } => match action {

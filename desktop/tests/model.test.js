@@ -19,3 +19,5 @@ test('命令指引对引号和 shell 代换保留原样', () => {
 });
 test('范围选项去重且不会由旧记录注入另一个 Vault', () => assert.deepEqual(scopeOptions({scopes:['work','work']},'work'), ['work','personal']));
 test('缺失与无效日期显式呈现未知', () => { assert.equal(displayDate(undefined), '时间未知'); assert.equal(displayDate('invalid'), '时间未知'); });
+
+test('切换资料库或范围后不保留旧交接正文和客户端配置',()=>{for(const change of [s=>activateVault(s,{session_id:'new',scopes:['work']}),s=>resetScope(s,'work')]){const s=newState();Object.assign(s,{conversations:[{}],conversation:{},conversationRows:[{}],continuation:{text:'private'},clientConfig:'old'});change(s);assert.deepEqual(s.conversations,[]);assert.deepEqual(s.conversationRows,[]);assert.equal(s.continuation,null);assert.equal(s.clientConfig,null);}});

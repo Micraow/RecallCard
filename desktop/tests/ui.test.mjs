@@ -79,6 +79,11 @@ async function fixture(t) {
       case 'read_record': return { results: [{ ref: payload.reference,
         record: payload.reference === eventRef ? event : memory }], truncated: false };
       case 'read_sources': return { results: [{ ref: memoryRef, events: [event] }], truncated: false };
+      case 'list_conversations': return { conversations: [{ session_ref:'synthetic-conversation',title:'从 DeepSeek 继续',platform:'deepseek',message_count:2,captured_at:event.captured_at }] };
+      case 'conversation_messages': return { messages:[{ref:eventRef,role:'user',text:'决定用 Rust，助手的建议还没有确认。',occurred_at:null}],total:1,next_offset:null };
+      case 'prepare_continuation': return {text:'recallcard.context/1\n用户原话：决定用 Rust。',message_count:1,available_messages:1};
+      case 'prepare_client_config': return {mcpServers:{recallcard:{command:'/synthetic/recallcard',args:['mcp','--scope',payload.scope]}}};
+      case 'install_browser_connection': return {registered:true,capture_enabled:payload.allowCapture,note:'请回到扩展检查连接'};
       case 'pick_import': return importPreview;
       case 'confirm_import': return { events_added: 2, events_seen: 2 };
       case 'pick_dream': return dreamPreview;
@@ -125,7 +130,7 @@ async function fixture(t) {
     await route.fulfill({ status: 200, body, contentType });
   });
   await page.goto('https://recallcard.test/index.html');
-  await page.getByRole('heading', { name: '把散落的想法，找回来。' }).waitFor();
+  await page.getByRole('heading', { name: '换一个 AI，也能接着聊。' }).waitFor();
   return { page, native };
 }
 
@@ -450,4 +455,33 @@ test('默认入口直接粘贴文字，预览后确认保存并进入查找，�
   assert.deepEqual(native.matching('confirm_note')[0].payload, { sessionId: vault.session_id, previewId: 'synthetic-note' });
   assert.equal(await page.locator('#location').textContent(), '查找与阅读');
   assert.equal(native.count('confirm_note'), 1); assert.equal(native.count('pick_import'), 0);
+});
+
+test('来源式导入保留选择，会话可预览并为另一个AI准备交接',async t=>{
+  const {page,native}=await fixture(t);await openVault(page);await navigate(page,'添加资料');
+  await page.getByRole('heading',{name:'这次从哪里带入对话？'}).waitFor();
+  await page.getByRole('heading',{name:'浏览器扩展',exact:true}).locator('..').getByRole('button',{name:'选择这类文件'}).click();
+  assert.equal(await page.locator('#import-format').inputValue(),'recallcard-conversation');
+  await clickButton(page,'选择文件并预览');await idle(page);assert.equal(native.matching('pick_import').at(-1).payload.format,'recallcard-conversation');
+  await navigate(page,'会话与接续');await page.getByRole('button',{name:/从 DeepSeek 继续/}).click();await idle(page);
+  assert.match(await page.locator('.conversation-message').textContent(),/时间未知/);
+  await page.getByRole('textbox',{name:'接下来要做什么'}).fill('先实现已经确认的部分');await clickButton(page,'准备交接内容');await idle(page);
+  assert.match(await page.getByRole('textbox',{name:'交接内容预览'}).inputValue(),/recallcard.context\/1/);
+  assert.equal(native.matching('prepare_continuation').at(-1).payload.goal,'先实现已经确认的部分');
+  await assertNoWrite(native);
+});
+test('浏览器写入许可默认关闭，配置不冒充真实连接成功',async t=>{
+  const {page,native}=await fixture(t);await openVault(page);await navigate(page,'连接与状态');
+  assert.equal(await page.locator('#allow-browser-capture').isChecked(),false);
+  await page.getByRole('textbox',{name:'RecallCard扩展ID'}).fill('abcdefghijklmnopabcdefghijklmnop');
+  await clickButton(page,'连接此浏览器');await idle(page);assert.equal(native.matching('install_browser_connection')[0].payload.allowCapture,false);
+  assert.match(await page.locator('#content').textContent(),/请回到扩展检查连接/);
+  await clickButton(page,'生成客户端配置');await idle(page);assert.match(await page.getByRole('textbox',{name:'MCP客户端配置'}).inputValue(),/personal/);
+});
+
+test('交接预览后资料撤回或改变，复制前重新核对并废弃旧正文',async t=>{
+  const {page,native}=await fixture(t);await openVault(page);await navigate(page,'会话与接续');await page.getByRole('button',{name:/从 DeepSeek 继续/}).click();await idle(page);
+  await clickButton(page,'准备交接内容');await idle(page);native.next('prepare_continuation',{text:'权限改变后的新内容',message_count:0,available_messages:0});
+  await clickButton(page,'复制交接内容');await idle(page);assert.match(await page.locator('#notice').textContent(),/资料或权限已改变/);
+  assert.equal(await page.getByRole('textbox',{name:'交接内容预览'}).count(),0);
 });

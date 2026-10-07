@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import '../site-adapters.js';
-const source=(await readFile(new URL('../popup.js',import.meta.url),'utf8')).replace("import './site-adapters.js';",'');
+const source=(await readFile(new URL('../popup.js',import.meta.url),'utf8')).replace(/^import .*;$/gmu,'');
 async function popup(url){
-  const buttons=['bootstrap','reset','execute','insert','remove','delivered'];
-  const nodes=Object.fromEntries([...buttons,'status','binding','preview','privacy','action'].map(id=>[id,{value:'',textContent:'',disabled:false,classList:{toggle(){}},listeners:{},addEventListener(kind,fn){this.listeners[kind]=fn;}}]));
+  const buttons=['bootstrap','reset','execute','insert','remove','delivered','connection','capture','select-all','select-none','export-json','export-markdown','capture-preview','capture-save','cancel-save','prepare-handoff','copy-handoff'];
+  const nodes=Object.fromEntries([...buttons,'status','binding','preview','privacy','action','site','route','connection-state','capture-support','capture-panel','save-panel','messages','handoff','handoff-panel','save-status','capture-summary'].map(id=>[id,{value:'',textContent:'',disabled:false,classList:{toggle(){}},listeners:{},replaceChildren(){},querySelectorAll(){return[];},addEventListener(kind,fn){this.listeners[kind]=fn;}}]));
   const sent=[];let approved=false,state;
   try{const site=globalThis.RecallCardSites.forUrl(url);state={platform:site.id,platform_name:site.name,route:site.route,nonce:'a'.repeat(48),session_ref:site.id+':synthetic',preview:null};}catch{}
   const chrome={tabs:{query:async()=>[{id:1,url}]},runtime:{sendMessage:async message=>{
@@ -33,7 +33,7 @@ for(const [origin,name] of [['https://chat.qwen.ai','Qwen'],['https://chat.z.ai'
   });
 }
 test('popup 拒绝未支持 host 或登录路径，不启用重置或请求本机',async()=>{
-  for(const url of ['https://chat.deepseek.com/','https://chat.qwen.ai/login','https://chat.z.ai/share/demo','https://evil.test/']){
+  for(const url of ['https://chat.deepseek.com/login','https://chat.qwen.ai/login','https://chat.z.ai/share/demo','https://evil.test/']){
     const h=await popup(url);assert.equal(h.nodes.reset.disabled,true);assert.equal(h.nodes.bootstrap.disabled,true);assert.equal(h.sent.length,0);assert.match(h.nodes.status.textContent,/未支持/);
   }
 });

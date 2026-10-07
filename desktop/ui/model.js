@@ -1,5 +1,5 @@
 export const pages = [
-  ['home', '概览', '▦'], ['search', '查找与阅读', '⌕'], ['import', '添加资料', '↥'],
+  ['home', '概览', '▦'], ['conversations', '会话与接续', '⇄'], ['search', '查找与阅读', '⌕'], ['import', '添加资料', '↥'],
   ['dream', '整理记忆', '✧'], ['connect', '连接与状态', '⌘'],
 ];
 export function shorten(value, limit = 90) { const text = String(value ?? ''); return text.length > limit ? `${text.slice(0, limit)}…` : text; }
@@ -10,9 +10,9 @@ export function recordText(item) {
   return item?.content ?? item?.text ?? item?.snippet ?? item?.data?.content ?? '';
 }
 export function recordRef(item) { return item?.ref ?? item?.reference ?? ''; }
-export function newState() { return { vault: null, page: 'home', scope: 'personal', busy: false, query: '', target: 'all', results: [], selected: null, sources: [], importPreview: null, dreamPreview: null, notePreview: null, noteText: '', selectedRefs: [], epoch: 0 }; }
-export function activateVault(state, vault) { state.epoch += 1; state.vault = vault; state.scope = vault.scopes?.[0] || 'personal'; state.results = []; state.selected = null; state.sources = []; state.importPreview = null; state.dreamPreview = null; state.notePreview = null; state.selectedRefs = []; state.query = ''; state.noteText = ''; state.page = 'home'; }
-export function resetScope(state, scope) { state.epoch += 1; state.scope = scope; state.results = []; state.selected = null; state.sources = []; state.importPreview = null; state.dreamPreview = null; state.notePreview = null; state.selectedRefs = []; }
+export function newState() { return { vault: null, page: 'home', scope: 'personal', busy: false, query: '', target: 'all', results: [], selected: null, sources: [], importPreview: null, dreamPreview: null, notePreview: null, noteText: '', selectedRefs: [], conversations: [], conversation: null, conversationRows: [], conversationOffset: 0, continuation: null, continuationGoal: '', epoch: 0 }; }
+export function activateVault(state, vault) { state.epoch += 1; state.vault = vault; state.scope = vault.scopes?.[0] || 'personal'; state.results = []; state.selected = null; state.sources = []; state.importPreview = null; state.dreamPreview = null; state.notePreview = null; state.selectedRefs = []; state.query = ''; state.noteText = ''; state.conversations = []; state.conversation = null; state.conversationRows = []; state.continuation = null; state.continuationGoal = ''; state.clientConfig = null; state.connectionResult = null; state.page = 'home'; }
+export function resetScope(state, scope) { state.epoch += 1; state.scope = scope; state.results = []; state.selected = null; state.sources = []; state.importPreview = null; state.dreamPreview = null; state.notePreview = null; state.selectedRefs = []; state.conversations = []; state.conversation = null; state.conversationRows = []; state.continuation = null; state.continuationGoal = ''; state.clientConfig = null; state.connectionResult = null; }
 export function scopeOptions(vault, selected) { return [...new Set([selected, ...(vault?.scopes || []), 'personal'])].filter(Boolean); }
 export function nativeInstructions(root, scope, extensionId = '替换为扩展ID') {
   const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;

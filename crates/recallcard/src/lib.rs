@@ -18,3 +18,5 @@ pub mod agent_hook;
 pub mod ipc;
 pub mod semantic;
 pub mod sync;
+
+pub mod conversation;

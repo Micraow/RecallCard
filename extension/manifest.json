@@ -1,15 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "RecallCard 手动上下文桥",
-  "version": "0.2.0",
-  "description": "预览本机 RecallCard 上下文，保留草稿，由你手动发送。不会抓取聊天回复。",
+  "name": "RecallCard 会话与上下文",
+  "version": "0.3.0",
+  "description": "主动读取 ChatGPT / DeepSeek 当前可见会话，选择后保存或导出，为另一个 AI 准备上下文。最终发送始终由你完成。",
   "minimum_chrome_version": "116",
   "permissions": [
     "nativeMessaging",
-    "storage"
+    "storage",
+    "downloads"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",
+    "https://chat.deepseek.com/*",
     "https://chat.qwen.ai/*",
     "https://chat.z.ai/*"
   ],
@@ -19,18 +21,21 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "RecallCard 手动上下文桥"
+    "default_title": "RecallCard 会话与上下文"
   },
   "content_scripts": [
     {
       "matches": [
         "https://chatgpt.com/*",
+        "https://chat.deepseek.com/*",
         "https://chat.qwen.ai/*",
         "https://chat.z.ai/*"
       ],
       "js": [
         "site-adapters.js",
         "composer-adapter.js",
+        "conversation-format.js",
+        "conversation-adapters.js",
         "content.js"
       ],
       "run_at": "document_idle",

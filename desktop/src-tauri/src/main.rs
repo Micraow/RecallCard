@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex,
     },
 };
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 type Service = Arc<Mutex<DesktopSession>>;
@@ -128,6 +128,218 @@ async fn read_sources(
     })
     .await
 }
+#[tauri::command]
+async fn list_conversations(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    offset: usize,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.conversations_page(&session_id, &scope, offset)
+    })
+    .await
+}
+#[tauri::command]
+async fn conversation_messages(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    conversation_ref: String,
+    offset: usize,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.conversation_messages(&session_id, &scope, &conversation_ref, offset)
+    })
+    .await
+}
+#[tauri::command]
+async fn prepare_continuation(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    conversation_ref: String,
+    goal: String,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.continuation(&session_id, &scope, &conversation_ref, &goal)
+    })
+    .await
+}
+
+fn packaged_cli(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let executable = std::env::current_exe().map_err(|_| "无法确定程序位置")?;
+    let mut candidates = vec![executable
+        .parent()
+        .ok_or("程序目录无效")?
+        .join(if cfg!(windows) {
+            "recallcard.exe"
+        } else {
+            "recallcard"
+        })];
+    if let Ok(resources) = app.path().resource_dir() {
+        candidates.push(resources.join("说明与许可证/recallcard"));
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .ok_or("当前安装包缺少连接组件，请使用包含 recallcard 的完整运行包或新版安装包".into())
+}
+#[tauri::command]
+async fn prepare_client_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> Result<Value, String> {
+    let bundled = packaged_cli(&app)?;
+    let bytes = std::fs::read(&bundled).map_err(|_| "无法读取随包连接组件")?;
+    let directory = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "无法确定本机应用目录")?
+        .join("client-tools")
+        .join(recallcard::hash(&bytes));
+    for path in directory.ancestors() {
+        if let Ok(metadata) = std::fs::symlink_metadata(path) {
+            if metadata.is_symlink() {
+                return Err("连接组件目录不能包含符号链接".into());
+            }
+        }
+    }
+    std::fs::create_dir_all(&directory).map_err(|_| "无法保存本机连接组件")?;
+    let binary = directory.join(if cfg!(windows) {
+        "recallcard.exe"
+    } else {
+        "recallcard"
+    });
+    if std::fs::symlink_metadata(&binary).is_ok_and(|m| m.is_symlink()) {
+        return Err("连接组件不能为符号链接".into());
+    }
+    let valid_existing = std::fs::read(&binary).is_ok_and(|current| current == bytes);
+    if !valid_existing {
+        let mut file =
+            tempfile::NamedTempFile::new_in(&directory).map_err(|_| "无法暂存连接组件")?;
+        file.write_all(&bytes)
+            .and_then(|_| file.as_file().sync_all())
+            .map_err(|_| "连接组件暂存未完成")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| "无法设置组件执行权限")?;
+        }
+        file.persist(&binary)
+            .map_err(|_| "连接组件发布未完成，请重试")?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::metadata(&binary)
+            .map_err(|_| "无法检查组件权限")?
+            .permissions();
+        if permissions.mode() & 0o100 == 0 {
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| "无法恢复组件执行权限")?;
+        }
+    }
+    execute(state.service.clone(),move|s|{
+        let info=s.status(&session_id)?;
+        recallcard::policy::Access::new(vec![scope.clone()])?;
+        Ok(serde_json::json!({"mcpServers":{"recallcard":{"command":binary,"args":["--vault",info.root,"mcp","--scope",scope]}}}))
+    }).await
+}
+#[tauri::command]
+async fn install_browser_connection(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    extension_id: String,
+    browser: String,
+    allow_capture: bool,
+) -> Result<Option<Value>, String> {
+    recallcard::native::extension_origin(&extension_id)?;
+    let browser_dir = match browser.as_str() {
+        "chromium" => "chromium",
+        "chrome" => "google-chrome",
+        "brave" => "BraveSoftware/Brave-Browser",
+        _ => return Err("请选择 Chromium、Chrome 或 Brave".into()),
+    };
+    if !cfg!(target_os = "linux") {
+        return Err("当前图形化注册先支持 Linux，其他平台仍可使用随包说明".into());
+    }
+    let binary = packaged_cli(&app)?;
+    let config_dir = app
+        .path()
+        .config_dir()
+        .map_err(|_| "无法确定本机配置目录")?;
+    let target = config_dir
+        .join(browser_dir)
+        .join("NativeMessagingHosts/com.recallcard.host.json");
+    let previous = match std::fs::symlink_metadata(&target) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.is_symlink() || metadata.len() > 16 * 1024 {
+                return Err("已有连接文件不是可更新的普通配置，本次停止".into());
+            }
+            let bytes = std::fs::read(&target).map_err(|_| "无法检查已有连接")?;
+            let value: Value =
+                serde_json::from_slice(&bytes).map_err(|_| "已有连接配置损坏，请先修复")?;
+            if value["name"] != "com.recallcard.host" {
+                return Err("已有文件不属于 RecallCard，本次不会覆盖".into());
+            }
+            Some(bytes)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err("无法检查已有浏览器连接".into()),
+    };
+    let replacing = previous.is_some();
+    let data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "无法确定应用数据目录")?;
+    let output = data_dir.join("browser-connections").join(format!(
+        "{}-{}",
+        browser,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "系统时间无效")?
+            .as_nanos()
+    ));
+    let guard = dialog_guard(&state)?;
+    let confirm_path = target.clone();
+    let confirm_scope = scope.clone();
+    let confirm_extension = extension_id.clone();
+    let confirmed=tauri::async_runtime::spawn_blocking(move||{
+        let _guard=guard;
+        app.dialog().message(format!("允许此浏览器扩展连接当前资料库？\n\n扩展 ID：{}\n资料范围：{}\n允许保存预览后的对话：{}\n\n将注册：{}\n{}\n请仅填写你安装的 RecallCard 扩展 ID。",confirm_extension,confirm_scope,if allow_capture{"是"}else{"否"},confirm_path.display(),if replacing{"已有 RecallCard 连接会先备份，再更新到本次资料库和权限。"}else{"新建本机连接，不修改其他扩展。"})).title("连接浏览器扩展").buttons(MessageDialogButtons::OkCancelCustom("允许并连接".into(),"取消".into())).blocking_show()
+    }).await.map_err(|_|"连接确认未完成")?;
+    if !confirmed {
+        return Ok(None);
+    }
+    execute(state.service.clone(),move|s|{
+        let parent=target.parent().ok_or("注册目录无效")?;
+        for path in parent.ancestors(){
+            if let Ok(m)=std::fs::symlink_metadata(path){if m.is_symlink(){return Err("浏览器配置目录包含链接，本次未注册".into());}}
+        }
+        std::fs::create_dir_all(parent).map_err(|_|"无法建立此浏览器的本机连接目录")?;
+        let result=s.prepare_browser_connection(&session_id,&scope,&extension_id,&output,&binary,allow_capture)?;
+        let manifest=std::fs::read(output.join("com.recallcard.host.json")).map_err(|_|"无法读取生成的连接文件")?;
+        let current=std::fs::read(&target).ok();
+        if current!=previous || std::fs::symlink_metadata(&target).is_ok_and(|m|m.is_symlink()) {return Err("确认后原连接发生变化，请重新检查再连接".into());}
+        if let Some(bytes)=previous {
+            let backup=parent.join(format!("com.recallcard.host.{}.backup",&recallcard::hash(&bytes)[..16]));
+            if backup.exists(){if std::fs::symlink_metadata(&backup).map_err(|_|"无法检查备份")?.is_symlink() || std::fs::read(&backup).map_err(|_|"无法读取备份")?!=bytes{return Err("连接备份文件发生冲突，原连接保持不变".into());}}
+            else{let mut file=OpenOptions::new().write(true).create_new(true).open(backup).map_err(|_|"无法备份原连接")?;file.write_all(&bytes).and_then(|_|file.sync_all()).map_err(|_|"原连接备份未完成")?;}
+        }
+        let mut temporary=tempfile::NamedTempFile::new_in(parent).map_err(|_|"无法暂存本机连接")?;
+        temporary.write_all(&manifest).and_then(|_|temporary.as_file().sync_all()).map_err(|_|"连接暂存未完成")?;
+        temporary.persist(&target).map_err(|_|"连接替换失败，原配置备份已保留")?;
+        Ok(Some(serde_json::json!({"registered":true,"registration":target,"capture_enabled":allow_capture,"capture_scope":scope,"files":result,"note":"本机文件已注册；请回到扩展点击检查连接，才能确认浏览器实际连通"})))
+    }).await
+}
+
 #[tauri::command]
 async fn preview_note(
     state: State<'_, AppState>,
@@ -286,6 +498,11 @@ fn main() {
             cancel_previews,
             vault_status,
             browse_records,
+            list_conversations,
+            conversation_messages,
+            prepare_continuation,
+            prepare_client_config,
+            install_browser_connection,
             search_records,
             read_record,
             read_sources,
