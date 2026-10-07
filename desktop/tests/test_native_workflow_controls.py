@@ -34,6 +34,25 @@ class NativeControlsTest(unittest.TestCase):
         driver.click.assert_called_once_with('#navigation [data-workspace="memories"]')
         driver.button.assert_called_once_with("整理记忆")
 
+    def test_vault_badge_checks_visible_dom_and_records_rendered_text_difference(self):
+        driver = self.driver(); driver.observe = Mock(return_value={'text': '合成资料库', 'visible': True})
+        driver.text = Mock(return_value='')
+        driver.assert_vault_badge('合成资料库')
+        self.assertEqual(driver.observations[0]['webdriver_rendered_text'], '')
+        self.assertEqual(driver.observations[0]['dom'], {'text': '合成资料库', 'visible': True})
+        self.assertTrue(driver.observe.call_args.args[0].startswith('return '))
+
+    def test_vault_badge_does_not_accept_invisible_or_wrong_content(self):
+        def immediate(check, description, **kwargs):
+            if not check():
+                raise AssertionError(description)
+        for sample in [{'text': '错误资料库', 'visible': True}, {'text': '合成资料库', 'visible': False}]:
+            driver = self.driver(); driver.observe = Mock(return_value=sample); driver.text = Mock()
+            with patch.object(module, 'wait_for', side_effect=immediate):
+                with self.assertRaisesRegex(AssertionError, '资料库标识不符'):
+                    driver.assert_vault_badge('合成资料库')
+            driver.text.assert_not_called()
+
     def test_workspace_density_fixture_is_synthetic_and_preserves_roles_and_unknown_times(self):
         with tempfile.TemporaryDirectory() as directory:
             smoke = object.__new__(module.NativeSmoke); smoke.temporary = Path(directory)

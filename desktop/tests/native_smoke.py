@@ -106,6 +106,25 @@ class WebDriver:
     def text(self, selector):
         return self.command("GET", f"/element/{self.find(selector)}/text")
 
+    def assert_vault_badge(self, expected):
+        # WebDriver 的 rendered text 可能受单行省略布局影响；同时留下原值，
+        # 以实际 DOM 文字和屏幕内可见矩形核对异步恢复后的资料库标识。
+        latest = {}
+        def observed():
+            sample = self.observe("return (()=>{const n=document.querySelector('#vault-badge');if(!n)return {text:null,visible:false};const r=n.getBoundingClientRect();const s=getComputedStyle(n);return {text:n.textContent,visible:r.width>0&&r.height>0&&r.top>=0&&r.bottom<=innerHeight&&s.display!=='none'&&s.visibility!=='hidden'};})()")
+            latest.update(sample)
+            return sample['text'] == expected and sample['visible']
+        try:
+            wait_for(observed, "可见资料库标识恢复")
+        except AssertionError as error:
+            raise AssertionError(f"资料库标识不符：expected={expected!r}, observed={latest!r}") from error
+        record = {"check": "vault_badge", "expected": expected, "dom": latest,
+                  "webdriver_rendered_text": self.text('#vault-badge')}
+        if not hasattr(self, 'observations'):
+            self.observations = []
+        self.observations.append(record)
+        print("标识核验：" + json.dumps(record, ensure_ascii=False), flush=True)
+
     def click(self, selector, using="css selector"):
         element = wait_for(lambda: self.find(selector, using), f"找到按钮 {selector}")
         # 只把目标滚动到窗口中央；仍由真实 WebDriver 派发点击，不调用业务后端。
@@ -929,15 +948,15 @@ class NativeSmoke:
 
         browser.button("打开已有资料库")
         self.dialog("打开已有 RecallCard 资料库")
-        assert browser.text("#vault-badge") == "尚未打开资料库"
+        browser.assert_vault_badge("尚未打开资料库")
         browser.button("创建新资料库")
         self.dialog("选择用于新资料库的空文件夹", self.vault, create=True)
         assert (self.vault / "control/schema-version.json").is_file()
-        assert browser.text("#vault-badge") == self.vault.name
+        browser.assert_vault_badge(self.vault.name)
         browser.click("#switch-vault")
         browser.button("打开已有资料库", "//dialog[@id='modal']")
         self.dialog("打开已有 RecallCard 资料库")
-        assert browser.text("#vault-badge") == self.vault.name
+        browser.assert_vault_badge(self.vault.name)
         self.checkpoint("原生资料库创建选择与取消")
 
         browser.navigate("添加资料")
@@ -1279,6 +1298,7 @@ def main():
         finally:
             (smoke.artifacts / "summary.json").write_text(json.dumps({
                 "success": success, "passed_steps": smoke.steps,
+                "driver_observations": getattr(smoke.driver, 'observations', []),
                 "application": str(smoke.application), "synthetic_data_only": True,
             }, ensure_ascii=False, indent=2))
             smoke.close()
