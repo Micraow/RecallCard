@@ -47,11 +47,22 @@ def main():
         paths = {p for pattern in ('LICENSE*','LICENCE*','COPYING*','NOTICE*') for p in directory.glob(pattern) if p.is_file()}
         if package.get('license_file'):
             paths.add(directory/package['license_file'])
+        override = ROOT/'desktop/third-party-licenses'/f"{package['name']}-{package['version']}"
+        if not paths and override.is_dir():
+            paths = {p for p in override.glob('LICENSE*') if p.is_file()}
+        if not paths:
+            raise ValueError(f"依赖缺少许可证正文：{package['name']}")
         for path in sorted(paths):
-            if not path.resolve().is_relative_to(directory.resolve()):
+            if not (path.resolve().is_relative_to(directory.resolve()) or path.resolve().is_relative_to(override.resolve())):
                 raise ValueError('许可证路径超出依赖目录')
             files[f"third-party-licenses/{package['name']}-{package['version']}/{path.name}"] = (path.read_bytes(), False)
-        notices.append({'name':package['name'],'version':package['version'],'license':package.get('license'),'included_files':[p.name for p in sorted(paths)]})
+        # MPL 文件的对应源码原样随包提供，不把其文件许可扩展到其他项目文件。
+        if package.get('license') == 'MPL-2.0':
+            for source in directory.rglob('*'):
+                if source.is_file():
+                    files[f"third-party-source/{package['name']}-{package['version']}/{source.relative_to(directory).as_posix()}"] = (source.read_bytes(), False)
+        notices.append({'name':package['name'],'version':package['version'],'license':package.get('license'),'repository':package.get('repository'),'source_archive':f"https://crates.io/api/v1/crates/{package['name']}/{package['version']}/download",'included_files':[p.name for p in sorted(paths)]})
+    files['third-party-licenses/补充来源说明.md'] = ((ROOT/'desktop/third-party-licenses/README.md').read_bytes(), False)
     files['third-party-licenses/index.json'] = (json.dumps(notices,ensure_ascii=False,indent=2).encode(),False)
     info = {'application':'RecallCard Desktop 0.1.0','commit':args.commit,'target':'linux-x86_64','profile':'dev (debug=0, unoptimized)','gui_sha256':digest(files['recallcard-desktop'][0]),'cli_sha256':digest(files['recallcard'][0]),'requires':['Git','GLIBC >= 2.39','GTK 3','WebKitGTK 4.1'],'note':'系统运行库由系统包管理器提供；本包不包含任何用户资料、凭据、浏览器状态或可选API配置。'}
     files['build-info.json'] = (json.dumps(info,ensure_ascii=False,indent=2).encode(),False)
