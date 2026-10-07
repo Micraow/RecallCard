@@ -131,6 +131,7 @@ impl DesktopSession {
         edit: MemoryEdit,
     ) -> Result<MemoryReview> {
         self.pending_memory = None;
+        self.pending_background = None;
         check_scope(scope)?;
         let vault = self.vault(session_id)?;
         let _guard = vault.read_guard()?;
@@ -185,6 +186,7 @@ impl DesktopSession {
         reason: &str,
     ) -> Result<MemoryReview> {
         self.pending_memory = None;
+        self.pending_background = None;
         check_scope(scope)?;
         let vault = self.vault(session_id)?;
         let _guard = vault.read_guard()?;
@@ -282,7 +284,7 @@ impl DesktopSession {
     }
 }
 
-fn scoped_memory(vault: &Vault, scope: &str, id: &str) -> Result<Memory> {
+pub(super) fn scoped_memory(vault: &Vault, scope: &str, id: &str) -> Result<Memory> {
     crate::model::validate_id(id, "mem_")?;
     let memory = vault.memory(id)?;
     if memory.data.scope != scope {
@@ -313,7 +315,7 @@ fn own_rule(vault: &Vault, id: &str) -> Result<Option<Suppression>> {
     }
     Ok(Some(rule))
 }
-fn memory_snapshot(vault: &Vault, scope: &str) -> Result<String> {
+pub(super) fn memory_snapshot(vault: &Vault, scope: &str) -> Result<String> {
     let mut records = Vec::new();
     let mut ids = BTreeSet::new();
     for memory in vault

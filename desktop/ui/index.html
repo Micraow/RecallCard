@@ -10,13 +10,13 @@
 <body>
   <div class="app-shell">
     <aside class="sidebar">
-      <a class="brand" href="#home" aria-label="RecallCard 首页"><span class="brand-icon" aria-hidden="true">R</span><span>RecallCard<small>个人资料库</small></span></a>
-      <div class="nav-caption">我的资料库</div>
+      <a class="brand" href="#conversations" aria-label="RecallCard 会话"><span class="brand-icon" aria-hidden="true">R</span><span>RecallCard<small>个人资料库</small></span></a>
+      <div class="nav-caption">工作区</div>
       <nav aria-label="主导航" id="navigation"></nav>
-      <div class="sidebar-bottom"><span class="privacy-dot"></span>资料文件夹<p>在所选位置保存和整理资料</p><span class="version">桌面版 0.3</span></div>
+      <div class="sidebar-bottom"><button id="connect-button" class="sidebar-utility" type="button">连接与设置</button><span class="privacy-dot"></span>资料保存在本机<span class="version">桌面版 0.4</span></div>
     </aside>
     <div class="workspace">
-      <header class="topbar"><div id="location">欢迎使用</div><div class="topbar-actions"><span id="vault-badge" class="badge">尚未打开资料库</span><button id="switch-vault" class="button small quiet">打开资料库</button></div></header>
+      <header class="topbar"><form id="global-search" class="global-search" role="search"><input id="query" type="search" aria-label="搜索关键词" placeholder="搜索原话、决定或记忆…"><button class="button small" type="submit">查找</button></form><div id="global-scope"></div><button id="import-button" class="button primary" type="button">导入会话</button></header><div class="workspace-context"><span id="location">会话</span><div class="topbar-actions"><span id="vault-badge">尚未打开资料库</span><button id="switch-vault" class="button small quiet">打开资料库</button></div></div>
       <main id="content" tabindex="-1"></main>
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
       <footer><span id="operation">准备就绪</span><span>资料保存在本机</span></footer>

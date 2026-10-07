@@ -32,6 +32,10 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npx playwright install --with-deps chromium
+      - name: 无网络界面模块验证
+        run: |
+          npm --prefix desktop/tests/local-dom ci --ignore-scripts --no-audit --no-fund
+          npm --prefix desktop/tests/local-dom test
       - name: 界面与状态验证
         run: |
           node --test extension/tests/*.test.js desktop/tests/*.test.js desktop/tests/*.test.mjs

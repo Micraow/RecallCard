@@ -3,7 +3,10 @@
 //! 宿主应把整个服务放在互斥锁内，每条命令持锁到结束；切换 Vault 会废弃所有旧会话
 //! 和审查令牌。预览只读；确认命令只接受保存在本机内存中的预览编号，不接受替代路径
 //! 或替代内容。错误不转发解析器、操作系统或 Git 输出中的文件正文、秘密和路径。
+mod background;
 mod memory;
+mod records;
+pub use background::{BackgroundCandidate, BackgroundPage, BackgroundReview};
 pub use memory::{MemoryEdit, MemoryReview};
 
 use crate::{
@@ -122,6 +125,7 @@ pub struct DesktopSession {
     pending_dream: Option<PendingDream>,
     pending_note: Option<PendingNote>,
     pending_memory: Option<memory::PendingMemory>,
+    pending_background: Option<background::PendingBackground>,
 }
 
 pub type SessionService = DesktopSession;
@@ -223,6 +227,7 @@ impl DesktopSession {
         self.pending_dream = None;
         self.pending_note = None;
         self.pending_memory = None;
+        self.pending_background = None;
     }
 
     pub fn status(&self, session_id: &str) -> Result<VaultInfo> {
@@ -259,7 +264,10 @@ impl DesktopSession {
         if query.trim().is_empty() || query.len() > 4096 {
             return Err("请输入 1–4096 字节的检索词".into());
         }
-        self.context(session_id, scope)?
+        let vault = self.vault(session_id)?;
+        let _guard = vault.read_guard().map_err(|_| health_error())?;
+        let context = self.context(session_id, scope)?;
+        let response = context
             .search(SearchArgs {
                 query: query.into(),
                 target: target.into(),
@@ -270,15 +278,18 @@ impl DesktopSession {
                 budget_tokens: RESPONSE_LIMIT,
                 cursor: None,
             })
-            .map_err(|_| "检索失败，请刷新资料库并检查所选范围".into())
+            .map_err(|_| "检索失败，请刷新资料库并检查所选范围".to_owned())?;
+        records::WorkspaceRecords::load(vault, &context)?.enrich_list(response)
     }
 
     /// 首屏展示也经过 Context 的权限/抑制过滤，不直接返回 Vault 文件列表。
     pub fn browse(&self, session_id: &str, scope: &str, target: &str) -> Result<Value> {
         validate_target(target)?;
+        let vault = self.vault(session_id)?;
+        let _guard = vault.read_guard().map_err(|_| health_error())?;
+        let context = self.context(session_id, scope)?;
         let now = Utc::now();
-        let mut docs = self
-            .context(session_id, scope)?
+        let mut docs = context
             .documents()
             .map_err(|_| "无法读取资料列表，请刷新资料库".to_owned())?;
         docs.retain(|d| {
@@ -319,21 +330,29 @@ impl DesktopSession {
             response["results"].as_array_mut().unwrap().pop();
             response["truncated"] = json!(true);
         }
-        Ok(response)
+        records::WorkspaceRecords::load(vault, &context)?.enrich_list(response)
     }
 
     pub fn read(&self, session_id: &str, scope: &str, reference: &str) -> Result<Value> {
         let args = read_args(reference)?;
-        self.context(session_id, scope)?
+        let vault = self.vault(session_id)?;
+        let _guard = vault.read_guard().map_err(|_| health_error())?;
+        let context = self.context(session_id, scope)?;
+        let response = context
             .read(args)
-            .map_err(|_| "记录不可访问、已变化或已被抑制，请重新检索".into())
+            .map_err(|_| "记录不可访问、已变化或已被抑制，请重新检索".to_owned())?;
+        records::WorkspaceRecords::load(vault, &context)?.enrich_read(response)
     }
 
     pub fn sources(&self, session_id: &str, scope: &str, reference: &str) -> Result<Value> {
         let args = read_args(reference)?;
-        self.context(session_id, scope)?
+        let vault = self.vault(session_id)?;
+        let _guard = vault.read_guard().map_err(|_| health_error())?;
+        let context = self.context(session_id, scope)?;
+        let response = context
             .sources(args)
-            .map_err(|_| "来源不可访问、已变化或已被抑制，请重新检索".into())
+            .map_err(|_| "来源不可访问、已变化或已被抑制，请重新检索".to_owned())?;
+        records::WorkspaceRecords::load(vault, &context)?.enrich_read(response)
     }
 
     /// 第一条记录无需文件或 JSON：预览完整脱敏内容，但不向 Vault 写入。
@@ -346,6 +365,7 @@ impl DesktopSession {
         self.vault(session_id)?;
         self.pending_note = None;
         self.pending_memory = None;
+        self.pending_background = None;
         check_scope(scope)?;
         if content.trim().is_empty() {
             return Err("请输入或粘贴一段想保存的内容".into());
@@ -396,6 +416,7 @@ impl DesktopSession {
             .map_err(|_| "笔记保存未完成，请检查资料库后重试".to_owned())?;
         self.pending_note = None;
         self.pending_memory = None;
+        self.pending_background = None;
         Ok(json!({"ref": format!("event:{}", event.id), "event": event}))
     }
 
@@ -637,7 +658,13 @@ impl DesktopSession {
                 refs.push(format!("event:{}", vault.capture(event)?.id));
             }
             let after = vault.events()?.len();
-            Ok::<_, String>(json!({"ok":true, "events_added":after.saturating_sub(before), "events_seen":refs.len(), "refs":refs, "coverage":parsed.coverage}))
+            let events_added = after.saturating_sub(before);
+            let _guard = vault.read_guard()?;
+            let context = self.context(session_id, &pending.scope)?;
+            let records = records::WorkspaceRecords::load(vault, &context)?;
+            let conversations = records.imported_conversations(&refs);
+            let conversation_refs = conversations.iter().map(|c| c["session_ref"].clone()).collect::<Vec<_>>();
+            Ok::<_, String>(json!({"ok":true, "events_added":events_added, "events_seen":refs.len(), "events_duplicates":refs.len().saturating_sub(events_added), "refs":refs, "coverage":parsed.coverage, "conversation_refs":conversation_refs, "conversations":conversations}))
         })().map_err(|_| "导入未完成，请检查资料库后重新预览；已写入的事件可安全去重".to_owned())?;
         // 成功后保留只读清单以便继续下一批，写入令牌已消费。
         Ok(result)
@@ -819,6 +846,7 @@ impl DesktopSession {
         self.pending_dream = None;
         self.pending_note = None;
         self.pending_memory = None;
+        self.pending_background = None;
         Ok(())
     }
 
@@ -865,11 +893,7 @@ impl DesktopSession {
                 continue;
             }
             let key = event.data.session_key();
-            let title = event.data.metadata["conversation_title"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| truncate_utf8(s, 180))
-                .unwrap_or_else(|| truncate_utf8(&event.data.text(), 120));
+            let title = records::conversation_title(&event);
             let group = groups.entry(key.clone()).or_insert_with(|| json!({"session_ref":key,"title":title,
                 "platform":event.data.source.platform,"source_url":event.data.source.url,"message_count":0,"captured_at":event.captured_at,"coverage":"partial"}));
             group["message_count"] = json!(group["message_count"].as_u64().unwrap_or(0) + 1);
@@ -930,8 +954,10 @@ impl DesktopSession {
             rows.push(row);
         }
         let next = offset + rows.len();
+        let header = &events[0];
         Ok(
-            json!({"messages":rows,"total":events.len(),"next_offset":if next<events.len(){Some(next)}else{None},"offset":offset,"coverage":"仅已捕获且可访问的消息","order_known":order_known}),
+            json!({"messages":rows,"total":events.len(),"next_offset":if next<events.len(){Some(next)}else{None},"offset":offset,"coverage":"仅已捕获且可访问的消息","order_known":order_known,
+                "title":records::conversation_title(header),"platform":truncate_utf8(&header.data.source.platform,80),"session_ref":header.data.session_key()}),
         )
     }
 
@@ -963,9 +989,7 @@ impl DesktopSession {
         if events.is_empty() {
             return Err("请先选择已保存的对话".into());
         }
-        let bootstrap = context.bootstrap(BootstrapArgs {
-            budget_tokens: 2500,
-        })?;
+        let bootstrap = context.bootstrap(BootstrapArgs::default())?;
         let mut selected = Vec::new();
         let mut used = 0;
         for event in events.iter().rev().take(40) {
@@ -1006,7 +1030,7 @@ impl DesktopSession {
             text=format!("recallcard.context/1\n顺序提示：这些片段没有完整的可核实先后关系，不要把保存顺序当成事件发生顺序。\n{text}");
         }
         Ok(
-            json!({"text":text,"message_count":count,"available_messages":events.len(),"order_known":order_known,"truncated":count<events.len(),"scope":scope,"session_ref":conversation_ref}),
+            json!({"text":text,"message_count":count,"available_messages":events.len(),"order_known":order_known,"truncated":count<events.len() || bootstrap["truncated"].as_bool().unwrap_or(false),"background":bootstrap,"scope":scope,"session_ref":conversation_ref}),
         )
     }
 

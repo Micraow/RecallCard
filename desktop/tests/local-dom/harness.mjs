@@ -8,7 +8,7 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 import { syntheticBridge } from './fixtures.mjs';
 
 const uiDirectory = new URL('../../ui/', import.meta.url);
-const allowedModules = new Set(['app.js', 'model.js', 'memory-management.js']
+const allowedModules = new Set(['app.js', 'model.js', 'memory-management.js', 'background.js']
   .map(name => new URL(name, uiDirectory).href));
 
 // 每个用例加载真正的 index.html 与未改写的 ES 模块，彼此独立的 Window / 模块状态。
@@ -81,10 +81,18 @@ export async function fixture(t) {
   async function click(name, root = document) {
     const node = button(name, root);
     assert.equal(node.disabled, false, `按钮「${name}」必须可用`);
+    for (let ancestor = node.parentElement; ancestor; ancestor = ancestor.parentElement) if (ancestor.tagName === 'DETAILS' && !ancestor.open) ancestor.querySelector(':scope > summary').click();
     node.click();
     await idle();
   }
   async function navigate(name) {
+    if (name === '添加资料') { one('#import-button').click(); await idle(); return; }
+    if (name === '连接与状态') { one('#connect-button').click(); await idle(); return; }
+    if (name === '随身背景') { await navigate('记忆'); await click('选择背景'); return; }
+    if (name === '整理记忆') { await navigate('记忆'); await click('整理记忆'); return; }
+    if (name === '查找与阅读') { one('#global-search').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await idle(); return; }
+    name = ({ '概览': '会话', '会话与接续': '会话', '记忆管理': '记忆' })[name] || name;
+
     // 导航按钮包含 aria-hidden 图标；用实际文字节点而不是自建可访问性算法定位。
     const buttons = [...one('#navigation').querySelectorAll('button')]
       .filter(node => [...node.childNodes].some(child => child.nodeType === 3 && child.textContent === name));
@@ -105,7 +113,7 @@ export async function fixture(t) {
     if (node.checked !== checked) node.click();
   }
   function noWrites() {
-    for (const command of ['confirm_import', 'confirm_note', 'apply_dream', 'confirm_memory_change']) {
+    for (const command of ['confirm_import', 'confirm_note', 'apply_dream', 'confirm_memory_change', 'confirm_background_change']) {
       assert.equal(native.count(command), 0, `明确的最终确认前不得调用 ${command}`);
     }
   }

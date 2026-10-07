@@ -79,6 +79,35 @@ pub struct Document {
 }
 
 impl Document {
+    pub(crate) fn from_memory(memory: &Memory) -> Result<Self> {
+        Ok(Self {
+            reference: format!("memory:{}@{}", memory.id, memory.revision),
+            text: memory.data.content.clone(),
+            scope: memory.data.scope.clone(),
+            kind: "memory".into(),
+            evidence_refs: memory
+                .data
+                .source_refs
+                .iter()
+                .map(|r| format!("event:{r}"))
+                .collect(),
+            session_ref: None,
+            state: serde_json::to_value(&memory.state)
+                .map_err(|e| e.to_string())?
+                .as_str()
+                .unwrap_or("unknown")
+                .into(),
+            occurred_at: memory.data.observed_at,
+            valid_from: memory.data.valid_from,
+            valid_to: memory.data.valid_to,
+            time_note: memory.data.time_note.clone(),
+            evidence: format!("{:?}", memory.data.evidence),
+            labels: memory.data.tags.clone(),
+            entities: memory.data.entities.clone(),
+            protected: memory.data.protected,
+        })
+    }
+
     fn valid_at(&self, time: DateTime<Utc>) -> bool {
         !self.valid_from.is_some_and(|start| start > time)
             && !self.valid_to.is_some_and(|end| end <= time)
@@ -114,6 +143,10 @@ impl<'a> Context<'a> {
     }
     pub fn documents(&self) -> Result<Vec<Document>> {
         let _read_guard = self.vault.read_guard()?;
+        self.documents_locked()
+    }
+    /// 调用方须持有读锁或写锁；用于在同一快照内预览并确认用户选择。
+    pub(crate) fn documents_locked(&self) -> Result<Vec<Document>> {
         let suppressed = self.vault.suppressed_ids()?;
         let events = self.vault.events()?;
         let revisions: BTreeSet<String> = events
@@ -164,32 +197,7 @@ impl<'a> Context<'a> {
             if !self.memory_visible(&memory, &suppressed)? {
                 continue;
             }
-            docs.push(Document {
-                reference: format!("memory:{}@{}", memory.id, memory.revision),
-                text: memory.data.content,
-                scope: memory.data.scope,
-                kind: "memory".into(),
-                evidence_refs: memory
-                    .data
-                    .source_refs
-                    .iter()
-                    .map(|r| format!("event:{r}"))
-                    .collect(),
-                session_ref: None,
-                state: serde_json::to_value(memory.state)
-                    .map_err(|e| e.to_string())?
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .into(),
-                occurred_at: memory.data.observed_at,
-                valid_from: memory.data.valid_from,
-                valid_to: memory.data.valid_to,
-                time_note: memory.data.time_note,
-                evidence: format!("{:?}", memory.data.evidence),
-                labels: memory.data.tags,
-                entities: memory.data.entities,
-                protected: memory.data.protected,
-            });
+            docs.push(Document::from_memory(&memory)?);
         }
         docs.sort_by(|a, b| a.reference.cmp(&b.reference));
         Ok(docs)
@@ -212,43 +220,7 @@ impl<'a> Context<'a> {
         Ok(true)
     }
     pub fn bootstrap(&self, args: BootstrapArgs) -> Result<Value> {
-        check_budget(args.budget_tokens)?;
-        let docs = self.documents()?;
-        let now = Utc::now();
-        let mut profile = String::new();
-        let mut labels = BTreeSet::new();
-        let mut refs = Vec::new();
-        for doc in docs.iter().filter(|doc| doc.current_memory_at(now)) {
-            for label in &doc.labels {
-                if valid_view_label(label) {
-                    labels.insert(format!("view:{label}"));
-                }
-            }
-            if doc.state == "active" && doc.protected && doc.labels.iter().any(|l| l == "bootstrap")
-            {
-                profile.push_str(&format!("- {} [{}]\n", doc.text, doc.reference));
-                refs.push(doc.reference.clone());
-            }
-        }
-        let text=format!("{}\n\n个人参考资料（仅用户显式标记 bootstrap 的受保护记忆）：\n{}\n可用目录：{}\n授权范围：{}\n",RULES,profile,labels.into_iter().collect::<Vec<_>>().join("、"),self.access.scopes().join("、"));
-        let stable_text = truncate_utf8(&text, args.budget_tokens.saturating_sub(180));
-        let version = hash(stable_text.as_bytes());
-        let mut response = json!({"bootstrap_version":version,"stable_text":stable_text,"reference_data":true,"refs":refs,"coverage":{"captured_events":docs.iter().filter(|d|d.kind=="event").count(),"semantic_search":"unavailable","scope_filtered":true},"truncated":stable_text.len()!=text.len(),"budget_unit":"conservative_utf8_bytes"});
-        while json_size(&response)? > args.budget_tokens {
-            response["truncated"] = json!(true);
-            if !response["refs"].as_array().unwrap().is_empty() {
-                response["refs"].as_array_mut().unwrap().pop();
-                continue;
-            }
-            let old = response["stable_text"].as_str().unwrap();
-            if old.len() < 16 {
-                return Err("预算不足以输出启动资料".into());
-            }
-            response["stable_text"] = json!(truncate_utf8(old, old.len().saturating_sub(64)));
-        }
-        response["bootstrap_version"] =
-            json!(hash(response["stable_text"].as_str().unwrap().as_bytes()));
-        Ok(response)
+        bootstrap_projection(&self.documents()?, &self.access.scopes(), args, Utc::now())
     }
     pub fn search(&self, args: SearchArgs) -> Result<Value> {
         check_budget(args.budget_tokens)?;
@@ -515,6 +487,74 @@ impl<'a> Context<'a> {
         }
         Ok(response)
     }
+}
+
+/// 实际只读能力和桌面预览共用的纯投影；预览只覆盖内存中的 Document，不写入事实源。
+pub(crate) fn bootstrap_projection(
+    docs: &[Document],
+    scopes: &[String],
+    args: BootstrapArgs,
+    now: DateTime<Utc>,
+) -> Result<Value> {
+    check_budget(args.budget_tokens)?;
+    let mut text = format!("{}\n\n个人参考资料（仅用户选定的受保护记忆）：\n", RULES);
+    let mut labels = BTreeSet::new();
+    let mut reference_ends = Vec::new();
+    for doc in docs.iter().filter(|doc| doc.current_memory_at(now)) {
+        for label in &doc.labels {
+            if label != "bootstrap" && valid_view_label(label) {
+                labels.insert(format!("view:{label}"));
+            }
+        }
+        if doc.state == "active" && doc.protected && doc.labels.iter().any(|l| l == "bootstrap") {
+            let start = text.len();
+            let evidence = match doc.evidence.as_str() {
+                "UserExplicit" => "用户明确表达",
+                "Observed" => "观察所得",
+                "AssistantSuggestion" => "AI 建议，非用户事实",
+                _ => "证据性质待核验",
+            };
+            text.push_str(&format!(
+                "- （证据：{evidence}）{} [{}]\n",
+                doc.text, doc.reference
+            ));
+            reference_ends.push((start, text.len(), doc.reference.clone()));
+        }
+    }
+    text.push_str(&format!(
+        "\n可用目录：{}\n授权范围：{}\n",
+        labels.into_iter().collect::<Vec<_>>().join("、"),
+        scopes.join("、")
+    ));
+    // 不将一条记忆从中间切断，保证其正文、证据性质和引用始终一并出现。
+    let clip = |limit| {
+        let boundary = reference_ends
+            .iter()
+            .find(|(start, end, _)| *start < limit && limit < *end)
+            .map_or(limit, |(start, _, _)| *start);
+        truncate_utf8(&text, boundary)
+    };
+    let mut stable_text = clip(args.budget_tokens.saturating_sub(180));
+    // 覆盖量只作为动态元数据。为其最大十进制宽度预留空间，普通捕获不改变稳定文本/版本。
+    let mut response;
+    loop {
+        let refs: Vec<_> = reference_ends
+            .iter()
+            .filter(|(_, end, _)| *end <= stable_text.len())
+            .map(|(_, _, reference)| reference)
+            .collect();
+        response = json!({"bootstrap_version":hash(stable_text.as_bytes()),"stable_text":stable_text,"reference_data":true,"refs":refs,"coverage":{"captured_events":u64::MAX,"semantic_search":"unavailable","scope_filtered":true},"truncated":stable_text.len()!=text.len(),"budget_unit":"conservative_utf8_bytes"});
+        if json_size(&response)? <= args.budget_tokens {
+            break;
+        }
+        if stable_text.len() < 16 {
+            return Err("预算不足以输出启动资料".into());
+        }
+        stable_text = clip(stable_text.len().saturating_sub(64));
+    }
+    response["coverage"]["captured_events"] =
+        json!(docs.iter().filter(|d| d.kind == "event").count());
+    Ok(response)
 }
 
 pub fn parse_ref(reference: &str) -> Result<(&str, &str, Option<u64>)> {

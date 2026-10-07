@@ -226,7 +226,7 @@ export class Broker {
         return publicState(state);
       }
       if (state.preview?.delivery === 'draft') fail('请先移除当前草稿中的上下文，或确认它已手动发送');
-      const request = message.kind === 'execute' ? parseAction(message.text, state) : validateAction({ protocol: PROTOCOL, request_id: `b_${newNonce()}`, nonce: state.nonce, session_ref: state.session_ref, action: 'bootstrap', arguments: { budget_tokens: 1800 } }, state);
+      const request = message.kind === 'execute' ? parseAction(message.text, state) : validateAction({ protocol: PROTOCOL, request_id: `b_${newNonce()}`, nonce: state.nonce, session_ref: state.session_ref, action: 'bootstrap', arguments: {} }, state);
       if (request.action === 'bootstrap' && state.bootstrap) fail('本会话已有固定 Bootstrap；请用准备 Bootstrap 查看，更新需显式重置会话');
       const checked = await this.readNative(tabId, message, state, request);
       const fingerprint = await resultFingerprint(request.action, checked.result);

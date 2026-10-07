@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "RecallCard 会话与上下文",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "主动读取 ChatGPT / DeepSeek 当前可见会话，选择后保存或导出，为另一个 AI 准备上下文。最终发送始终由你完成。",
   "minimum_chrome_version": "116",
   "permissions": [
