@@ -266,9 +266,12 @@ test('最新任务已完成时不把较早暂停任务拉回首页，用户仍�
   assert.deepEqual(ui.shownDialogs, []);
   noAutomaticImport(ui);
   await ui.navigate('添加资料');
-  ui.native.next('list_import_jobs', jobs); await ui.click('查看未完成的导入');
-  assert.equal(ui.one('.import-history-row').textContent.includes('已处理 2 / 6 条'), true);
-  ui.native.next('import_job_status', interrupted); await ui.click('查看并继续');
+  ui.native.next('list_import_jobs', jobs); await ui.click('查看导入记录');
+  const history = [...ui.document.querySelectorAll('.import-history-row')];
+  assert.equal(history.length, 2);
+  const unfinished = history.find(node => node.textContent.includes('已处理 2 / 6 条'));
+  assert.ok(unfinished);
+  ui.native.next('import_job_status', interrupted); await ui.click('查看这次导入', unfinished);
   assert.equal(ui.one('progress').value, 2);
   ui.button('继续导入'); noAutomaticImport(ui);
 });
@@ -380,7 +383,8 @@ for (const target of ['范围', '资料库']) {
 
 test('恢复后的任务可先查看已保存原文，返回导入页仍需明确继续', async t => {
   const ui = await fixture(t, { restoreResponse: restored, importJobs: [interrupted] });
-  await ui.click('查看已保存会话');
+  ui.native.next('import_job_conversations', { job_id: interrupted.job_id, scope: 'personal', status: interrupted, conversations: [conversation], offset: 0, total: 1, next_offset: null });
+  await ui.click('查看本批会话');
   assert.equal(ui.one('#content h1').textContent, '会话');
   assert.match(ui.one('.conversation-reader').textContent, /决定先核对来源/);
   await ui.navigate('添加资料');

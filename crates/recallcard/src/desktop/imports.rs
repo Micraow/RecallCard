@@ -14,6 +14,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::{
     cell::RefCell,
     collections::BTreeSet,
@@ -283,23 +284,36 @@ impl DesktopSession {
     ) -> Result<ImportJobStatus> {
         let vault = self.vault(session_id)?;
         check_scope(scope)?;
-        let (manifest, directory) = load_manifest(vault, job_id, scope)?;
+        if !valid_token(job_id) {
+            return Err("导入任务编号无效".into());
+        }
+        let directory = jobs_dir(vault)?.join(job_id);
+        if let Some(_idle) = idle_job_lease(&directory.join("run.lock"))? {
+            let (manifest, directory) = load_manifest(vault, job_id, scope)?;
+            return observed_status_with_lease(manifest.status, &directory, false);
+        }
         if let Some(control) = self
             .active_import_job
             .as_ref()
             .filter(|c| c.job_id == job_id && c.scope == scope)
         {
             if let Ok(status) = control.status.lock() {
+                // 写入者持有 lease 时，使用本进程已验证任务的实时状态，避免读取正在
+                // 原子替换的 manifest。最终落盘未释放 lease 前仍显示处理中。
                 if matches!(
                     status.state,
                     ImportJobState::Running | ImportJobState::Cancelling
-                ) && lease_busy(&directory.join("run.lock"))?
-                {
-                    return Ok(status.clone());
+                ) {
+                    return observed_status_with_lease(status.clone(), &directory, true);
                 }
+                // 旧 control 结束后，同一 job 可能由另一实例继续；不能用它的旧进度
+                // 覆盖新写入者的检查点，须走下面的磁盘核验。
             }
         }
-        observed_status(manifest.status, &directory)
+        let (manifest, directory) = load_manifest(vault, job_id, scope)?;
+        // lease 查询时确认仍有写入者；即使它刚结束，也只多显示一轮处理中，
+        // 不能用较早读到的 running 检查点推断“已中断”。下一次从闲置读锁核实。
+        observed_status_with_lease(manifest.status, &directory, true)
     }
 
     /// 列表只含当前资料库、当前 scope 的本机任务概要，不返回消息正文或源路径。
@@ -327,6 +341,76 @@ impl DesktopSession {
                 .then(a.job_id.cmp(&b.job_id))
         });
         Ok(jobs)
+    }
+
+    /// 只读查看本批已核实处理、仍可访问的会话。恢复后也不依赖原始导出文件。
+    /// 中断检查点之外的输入不冒充已完成结果；不把同会话的其他版本纳入批次。
+    pub fn import_job_conversations(
+        &self,
+        session_id: &str,
+        job_id: &str,
+        scope: &str,
+        offset: usize,
+    ) -> Result<Value> {
+        if offset > import_bundle::MAX_IMPORT_EVENTS {
+            return Err("本批会话分页参数无效".into());
+        }
+        let vault = self.vault(session_id)?;
+        if !valid_token(job_id) {
+            return Err("导入任务编号无效".into());
+        }
+        let directory = jobs_dir(vault)?.join(job_id);
+        let _idle =
+            idle_job_lease(&directory.join("run.lock"))?.ok_or("请先暂停导入，再查看本批会话")?;
+        let (manifest, directory) = load_manifest(vault, job_id, scope)?;
+        let status = observed_status_with_lease(manifest.status, &directory, false)?;
+        if matches!(
+            status.state,
+            ImportJobState::Running | ImportJobState::Cancelling
+        ) {
+            return Err("请先暂停导入，再查看本批会话".into());
+        }
+        let (_, bytes) = bounded_bytes(&directory.join("snapshot.json"), SNAPSHOT_LIMIT)
+            .map_err(|_| JOB_ERROR)?;
+        if hash(&bytes) != manifest.snapshot_hash {
+            return Err("导入记录无法核实，请在全部会话中查找已保存资料".into());
+        }
+        let events: Vec<EventInput> = serde_json::from_slice(&bytes).map_err(|_| JOB_ERROR)?;
+        drop(bytes);
+        if events.len() != status.events_total
+            || events
+                .iter()
+                .any(|e| e.scope != scope || e.validate().is_err())
+        {
+            return Err(JOB_ERROR.into());
+        }
+        let _guard = vault.read_guard()?;
+        let context = self.context(session_id, scope)?;
+        let records = super::records::WorkspaceRecords::load(vault, &context)?;
+        let conversations =
+            records.imported_input_conversations(&events[..status.events_processed])?;
+        let total = conversations.len();
+        let mut rows = Vec::new();
+        let mut bytes_used = 2048;
+        for row in conversations.into_iter().skip(offset).take(50) {
+            let size = serde_json::to_vec(&row).map_err(|_| JOB_ERROR)?.len();
+            if bytes_used + size > super::RESPONSE_LIMIT {
+                if rows.is_empty() {
+                    return Err("本批会话信息过长，请在全部会话中查找已保存资料".into());
+                }
+                break;
+            }
+            bytes_used += size;
+            rows.push(row);
+        }
+        let next = offset + rows.len();
+        let response = json!({"job_id":job_id,"scope":scope,"status":status,"conversations":rows,
+            "total":total,"offset":offset,"next_offset":if next < total { Some(next) } else { None },
+            "note":"这里只显示本批已核实处理、当前可访问的会话，包含重复消息。打开后可阅读该会话当前可访问的全部原话。异常退出前未记下进度的部分暂不计入本批。"});
+        if serde_json::to_vec(&response).map_err(|_| JOB_ERROR)?.len() > super::RESPONSE_LIMIT {
+            return Err("本批会话信息过长，请在全部会话中查找已保存资料".into());
+        }
+        Ok(response)
     }
 
     pub fn cancel_import_job(
@@ -489,8 +573,18 @@ fn load_manifest(vault: &Vault, job_id: &str, scope: &str) -> Result<(JobManifes
         return Err("导入任务编号无效".into());
     }
     let directory = jobs_dir(vault)?.join(job_id);
-    let (_, bytes) =
-        bounded_bytes(&directory.join("manifest.json"), MANIFEST_LIMIT).map_err(|_| JOB_ERROR)?;
+    let path = directory.join("manifest.json");
+    let (_, bytes) = bounded_bytes(&path, MANIFEST_LIMIT)
+        .or_else(|error| {
+            // 其他进程读取活动任务时，原子换入新检查点可能使旧 inode 核验失效。
+            // 仅对明确的文件变化重读一次；仍执行相同大小、身份、范围与绑定核验。
+            if error == super::STALE_FILE {
+                bounded_bytes(&path, MANIFEST_LIMIT)
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|_| JOB_ERROR)?;
     let manifest: JobManifest = serde_json::from_slice(&bytes).map_err(|_| JOB_ERROR)?;
     if manifest.version != 1
         || manifest.binding.root != vault.root()
@@ -556,8 +650,25 @@ fn lease_busy(path: &Path) -> Result<bool> {
     }
 }
 
-fn observed_status(mut status: ImportJobStatus, directory: &Path) -> Result<ImportJobStatus> {
+fn idle_job_lease(path: &Path) -> Result<Option<Lease>> {
+    let file = lock_file(path)?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(Some(Lease(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(_) => Err(JOB_ERROR.into()),
+    }
+}
+
+fn observed_status(status: ImportJobStatus, directory: &Path) -> Result<ImportJobStatus> {
     let active = lease_busy(&directory.join("run.lock"))?;
+    observed_status_with_lease(status, directory, active)
+}
+
+fn observed_status_with_lease(
+    mut status: ImportJobStatus,
+    directory: &Path,
+    active: bool,
+) -> Result<ImportJobStatus> {
     if active
         && !matches!(
             status.state,

@@ -1531,8 +1531,11 @@ class NativeSmoke:
         assert self.events() == after, "多文件重复导入不得改变任何 canonical Event"
         duplicate_counts = self.import_job_counts()
         assert duplicate_counts == {"导出文件": "2", "会话": "2", "新增记录": "0", "已存在记录": "6"}, duplicate_counts
-        browser.button("查看已保存会话")
+        browser.button("查看本批会话")
         browser.idle()
+        assert "本批导入" in browser.text(".import-batch-summary")
+        assert "新增 0 条" in browser.text(".import-batch-summary")
+        assert browser.observe("return document.querySelectorAll('.conversation-list .result-card').length") == 2, "重复导入后只展示本批两个会话"
         browser.click(f"//button[contains(@class,'result-card')][.//strong[text()='{DEEPSEEK_TITLE}']]", "xpath")
         browser.idle()
         rows = browser.observe("return [...document.querySelectorAll('.conversation-message')].map(n=>({ref:n.dataset.reference,text:n.querySelector('.body-text').textContent,role:n.querySelector('.message-role').textContent}))")

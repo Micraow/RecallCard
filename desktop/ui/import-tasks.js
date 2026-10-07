@@ -54,6 +54,17 @@ export function createImportTasks(ui) {
     if (running || resume) { accept(running || resume); return true; }
     return false;
   }
+  async function readResults(jobId, offset) {
+    const result = await invoke('import_job_conversations', { ...args(), jobId, offset });
+    if (!result || result.job_id !== jobId || result.scope !== state.scope || result.offset !== offset
+      || !Number.isSafeInteger(result.total) || result.total < 0 || !Array.isArray(result.conversations)
+      || result.conversations.length > 50 || result.conversations.some(item => typeof item?.session_ref !== 'string' || !item.session_ref || typeof item.title !== 'string')
+      || new Set(result.conversations.map(item => item.session_ref)).size !== result.conversations.length
+      || (result.next_offset != null && (!Number.isSafeInteger(result.next_offset) || result.next_offset !== offset + result.conversations.length || result.next_offset <= offset || result.next_offset >= result.total))) throw new Error('本批会话暂时无法核实，请重新读取');
+    const status = validStatus(result.status);
+    if (status.job_id !== jobId || active(status)) throw new Error('本批导入状态已改变，请先回到导入记录检查');
+    return result;
+  }
   async function history() {
     await run('正在查找之前的导入…', async current => {
       const values = await invoke('list_import_jobs', args());
@@ -122,7 +133,7 @@ export function createImportTasks(ui) {
       if (job.state === 'running') controls.append(button('暂停导入', event => update('cancel_import_job', job, event.currentTarget)));
       if (job.can_resume && !active(job)) controls.append(button('继续导入', event => update('resume_import_job', job, event.currentTarget), true));
       if (value.error) controls.append(button('重新读取进度', event => update('import_job_status', job, event.currentTarget)));
-      if (!active(job)) controls.append(button('查看已保存会话', () => ui.viewImported(), job.state === 'completed'), button('导入其他文件', event => { if (state.busy || !event.currentTarget.isConnected || data() !== value || active(value.current) || value.current?.job_id !== job.job_id) return; revision += 1; clearTimer(); value.current = null; render(); }));
+      if (!active(job)) controls.append(button('查看本批会话', event => { if (state.busy || !event.currentTarget.isConnected || data() !== value || active(value.current) || value.current?.job_id !== job.job_id) return; ui.viewImported(job); }, job.state === 'completed'), button('导入其他文件', event => { if (state.busy || !event.currentTarget.isConnected || data() !== value || active(value.current) || value.current?.job_id !== job.job_id) return; revision += 1; clearTimer(); value.current = null; render(); }));
       box.append(controls);
       if (active(job)) box.append(paragraph('可以随时暂停。已写入的内容保留，之后从进度处继续；暂停后即可查看资料。'));
       box.append($('details', {}, $('summary', {}, '查看数量'), line('导出文件', job.files_total), line('会话', job.conversations_total), line('新增记录', job.events_added), line('已存在记录', job.events_duplicates)));
@@ -148,10 +159,10 @@ export function createImportTasks(ui) {
       button('打开 DeepSeek', () => run('正在打开浏览器…', async () => { await invoke('open_deepseek', {}); showNotice('在 DeepSeek 中完成官方导出，下载后回到这里选择文件'); })),
       paragraph('登录、网站生成时间和浏览器下载由 DeepSeek 与浏览器处理。这里只导入对话，账号信息与附件原件不会作为记忆保存。'));
     box.append(guide);
-    box.append(button('查看未完成的导入', history, false, 'small'));
-    if (value.loaded && !value.history.some(item => item.can_resume || active(item))) box.append(paragraph('没有需要继续的导入。'));
-    for (const previous of value.history.filter(item => item.can_resume && !active(item))) box.append($('div', { class: 'import-history-row' }, paragraph(`${previous.created_at ? new Date(previous.created_at).toLocaleString() + ' · ' : ''}${previous.files_total} 个文件 · 已处理 ${previous.events_processed} / ${previous.events_total} 条`), button('查看并继续', event => { if (state.busy || !event.currentTarget.isConnected || data() !== value || active(value.current) || !value.history.includes(previous)) return; revision += 1; clearTimer(); return run('正在读取导入任务…', async current => { const fresh = await invoke('import_job_status', { ...args(), jobId: previous.job_id }); if (current()) accept(fresh, previous.job_id); }); }, false, 'small')));
+    box.append(button('查看导入记录', history, false, 'small'));
+    if (value.loaded && !value.history.length) box.append(paragraph('还没有导入记录。'));
+    for (const previous of value.history.filter(item => !active(item))) box.append($('div', { class: 'import-history-row' }, paragraph(`${previous.created_at ? new Date(previous.created_at).toLocaleString() + ' · ' : ''}${previous.state === 'completed' ? '已完成' : '尚未完成'} · ${previous.files_total} 个文件 · 已处理 ${previous.events_processed} / ${previous.events_total} 条`), button('查看这次导入', event => { if (state.busy || !event.currentTarget.isConnected || data() !== value || active(value.current) || !value.history.includes(previous)) return; revision += 1; clearTimer(); return run('正在读取导入任务…', async current => { const fresh = await invoke('import_job_status', { ...args(), jobId: previous.job_id }); if (current()) accept(fresh, previous.job_id); }); }, false, 'small')));
     return box;
   }
-  return { pane, history, restore, active: () => active(data().current), clearPreview: () => { if (state.importJobs) state.importJobs.preview = null; }, clearTimer };
+  return { pane, history, restore, readResults, active: () => active(data().current), clearPreview: () => { if (state.importJobs) state.importJobs.preview = null; }, clearTimer };
 }
