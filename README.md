@@ -21,6 +21,10 @@ RecallCard 是本地优先、文件原生的个人上下文层。Rust 主程序�
 
 这是开发中的分阶段实现，不代表整份设计已完成。独立 daemon/IPC 与可选 MCP 语义后端已通过三平台自动回归；真实宿主生命周期与登录态网页验收仍在继续，见[实施进度](docs/progress.md)。核心离线功能不需要 Python、API key 或向量数据库。
 
+## 桌面窗口
+
+新增 [Tauri 中文桌面版](docs/desktop-v0.1.md)：创建/打开资料库、导入预览、搜索阅读、出处查看、Dream 手动审阅与发布。Linux 原生工程已构建；跨平台服务层和窗口交互仍按提交分别验收。运行与构建说明见该文档。
+
 ## 快速开始
 
 拿到 Linux 开发包后，按 [Linux 首次使用 v0.3](docs/quickstart-linux-v0.3.md) 直接运行；核心不需要 Rust/Python/Node，先用包内合成资料完成离线检索。

@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "仅本地主窗口使用受限桌面命令；不开放文件系统、进程或远程页面权限",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
