@@ -219,11 +219,12 @@ test('取消导入预览同时废弃原生待确认操作，往返页面不恢�
   const { page, native } = await fixture(t);
   await openVault(page);
   await previewImport(page);
+  const cancellationCount = native.count('cancel_previews');
   await clickButton(page, '取消这次导入');
   await idle(page);
-  assert.deepEqual(native.matching('cancel_previews'), [
-    { command: 'cancel_previews', payload: { sessionId: vault.session_id } },
-  ]);
+  assert.equal(native.count('cancel_previews'), cancellationCount + 1);
+  assert.deepEqual(native.matching('cancel_previews').at(-1),
+    { command: 'cancel_previews', payload: { sessionId: vault.session_id } });
   await navigate(page, '概览');
   await navigate(page, '导入资料');
   assert.equal(await page.getByRole('heading', { name: '确认导入', exact: true }).count(), 0);
@@ -286,9 +287,11 @@ test('取消 Dream 审阅废弃原生预览，冲突或已发布结果不能再�
   const { page, native } = await fixture(t);
   await openVault(page);
   await previewDream(page);
+  const cancellationCount = native.count('cancel_previews');
   await clickButton(page, '取消审阅');
   await idle(page);
-  assert.equal(native.count('cancel_previews'), 1);
+  assert.equal(native.count('cancel_previews'), cancellationCount + 1);
+  assert.deepEqual(native.matching('cancel_previews').at(-1).payload, { sessionId: vault.session_id });
   assert.equal(await page.locator('.changes').count(), 0);
   await navigate(page, '概览');
   await navigate(page, '整理记忆');
