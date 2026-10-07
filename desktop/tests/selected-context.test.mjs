@@ -70,9 +70,9 @@ for (const [width, height] of [[1180, 820], [820, 620]]) {
     await reachable(page.getByRole('button', { name: '复制交接内容', exact: true }));
     await captureBrowserEvidence(page, `selected-context-preview-${width}`);
     await button(page, '调整所选资料'); await idle(page);
-    const first = page.getByRole('checkbox', { name: '带上资料：合成第1个会话', exact: true });
+    const first = page.getByRole('checkbox', { name: `带上资料：第 1 条，用户原话，合成第1个会话，${rows[0].text}`, exact: true });
     await reachable(first); await first.uncheck();
-    const fourth = page.getByRole('checkbox', { name: '带上资料：合成第4个会话', exact: true });
+    const fourth = page.getByRole('checkbox', { name: `带上资料：第 4 条，AI 回复，合成第4个会话，${rows[3].text}`, exact: true });
     await reachable(fourth); await fourth.check();
     await button(page, '带走这些资料'); await idle(page);
     assert.deepEqual(calls.filter(call => call.command === 'prepare_selected_context').at(-1).payload.references, rows.slice(1, 4).map(row => row.ref));

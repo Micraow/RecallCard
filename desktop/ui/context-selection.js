@@ -75,7 +75,9 @@ export function createContextSelection(ui) {
   function checkbox(row) {
     if (!data().open) return null;
     const reference = recordRef(row); if (!refValid(reference)) return null;
-    const input = $('input', { type: 'checkbox', 'aria-label': `带上资料：${title(row)}`, 'data-selection-reference': reference });
+    const position = data().candidates.findIndex(candidate => recordRef(candidate) === reference) + 1;
+    const description = [`第 ${position} 条`, reference.startsWith('memory:') ? '整理记忆' : role(row.role), shorten(title(row), 60), shorten(recordText(row), 60)].filter(Boolean).join('，');
+    const input = $('input', { type: 'checkbox', 'aria-label': `带上资料：${description}`, 'data-selection-reference': reference });
     input.checked = data().references.includes(reference);
     input.addEventListener('change', () => toggle(reference, input.checked, input));
     return $('label', { class: 'context-check' }, input, $('span', { class: 'sr-only' }, '带上这条资料'));
