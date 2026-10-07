@@ -71,6 +71,24 @@ jobs:
           path: desktop/release-artifacts/
           if-no-files-found: error
           retention-days: 30
+      - name: 单独保存便携桌面程序
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-runtime-linux-x86_64-${{ github.sha }}
+          path: |
+            desktop/release-artifacts/*.zip
+            desktop/release-artifacts/*SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: 单独保存 Debian 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-deb-linux-x86_64-${{ github.sha }}
+          path: |
+            desktop/release-artifacts/*.deb
+            desktop/release-artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
       - name: 保存失败诊断所需的已编译程序
         if: failure()
         uses: actions/upload-artifact@v4

@@ -67,7 +67,7 @@ async function fixture(t) {
   const defaultResponse = (command, payload) => {
     switch (command) {
       case 'choose_vault': case 'vault_status': return vault;
-      case 'cancel_previews': return null;
+      case 'cancel_previews': case 'write_clipboard': return null;
       case 'preview_note': return { preview_id: 'synthetic-note', session_id: vault.session_id, scope: payload.scope, content: payload.content, redacted: false };
       case 'confirm_note': return { ref: eventRef, event };
       case 'browse_records': case 'search_records': return {
