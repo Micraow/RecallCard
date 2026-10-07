@@ -12,9 +12,9 @@
 
 ## 下载与打开
 
-- Linux 安装包：[GitHub Actions 构建入口](https://github.com/Micraow/RecallCard/actions/workflows/package-desktop.yml)。选择成功构建的 Linux 产物；Arch 优先使用 AppImage，Ubuntu 可使用 deb
+- Linux 安装包：[下载已验收的 0.1.0 安装包](https://github.com/Micraow/RecallCard/actions/runs/37579114793/artifacts/11463936600)（登录 GitHub 后下载 ZIP）；Arch 优先使用 AppImage，Ubuntu 可使用 deb
 - 已拿到运行 ZIP：解压后运行 `recallcard-desktop` 或 `运行桌面版.sh`
-- [桌面版简明说明](docs/desktop-v0.1.md) · [遇到问题](docs/desktop-v0.1.md#当前边界)
+- [三步使用指南](docs/desktop-quickstart-v0.1.md) · [遇到问题](docs/desktop-v0.1.md#当前边界)
 
 安装包工作流会保留带版本和提交号的文件及校验清单。首版优先 Linux；其他平台的核心测试不代表桌面安装包已经实机验收。
 
