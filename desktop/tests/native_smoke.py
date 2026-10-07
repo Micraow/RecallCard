@@ -440,6 +440,28 @@ class NativeSmoke:
             entry = self.native_location_entry(title)
             return entry and entry.queryText().getText(0, -1) == expected
 
+        def pasted_location():
+            entry = self.native_location_entry(title)
+            return entry and entry.queryText().getText(0, -1).startswith(expected)
+
+        wait_for(pasted_location, "原生位置输入接收到完整合成目录")
+        self.capture(f"dialog-{self.dialog_count:02d}-pasted-location", webview=False)
+        # GTK 会把两个文件的共同前缀作为选中尾部补到目录后面。
+        # 只删除明确位于完整目录之后且完全选中的尾部；不修正其他文字差异。
+        entry = self.native_location_entry(title)
+        assert entry is not None, "目录粘贴后位置框失去焦点"
+        text = entry.queryText()
+        observed = text.getText(0, -1)
+        if observed != expected:
+            assert observed.startswith(expected) and len(observed) > len(expected), "目录输入与预期不符，不能猜测修正"
+            assert text.getNSelections() == 1 and tuple(text.getSelection(0)) == (len(expected), len(observed)), "差异不是完整选中的补全尾部，停止输入"
+            assert run("xdotool", "getactivewindow").strip() == window, "删除补全前多选窗口失去焦点"
+            (self.artifacts / f"dialog-{self.dialog_count:02d}-completion.json").write_text(json.dumps({"expected_directory": expected, "observed": observed, "selected_range": [len(expected), len(observed)]}, ensure_ascii=False))
+            current = self.native_location_entry(title)
+            assert current is not None, "删除补全前位置框失去焦点"
+            current_text = current.queryText()
+            assert current_text.getText(0, -1) == observed and current_text.getNSelections() == 1 and tuple(current_text.getSelection(0)) == (len(expected), len(observed)), "补全文字或选区已经变化，停止输入"
+            run("xdotool", "key", "--clearmodifiers", "BackSpace")
         wait_for(exact_location, "原生位置输入逐字保留完整合成目录")
         self.capture(f"dialog-{self.dialog_count:02d}-location", webview=False)
         self.describe_dialog(title, "location")
