@@ -64,7 +64,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: recallcard-native-gui-linux
+          name: recallcard-native-gui-linux-${{ github.sha }}
           path: ${{ runner.temp }}/recallcard-native-smoke-artifacts/
           if-no-files-found: ignore
           retention-days: 14
@@ -92,3 +92,13 @@ jobs:
       - run: npx playwright install --with-deps chromium
         working-directory: extension
       - run: node --test desktop/tests/*.test.js desktop/tests/*.test.mjs
+        env:
+          RECALLCARD_BROWSER_ARTIFACTS: ${{ runner.temp }}/recallcard-gui-browser
+      - name: 保存 Chromium 窗口与布局证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recallcard-gui-browser-${{ github.sha }}
+          path: ${{ runner.temp }}/recallcard-gui-browser/
+          if-no-files-found: ignore
+          retention-days: 14
