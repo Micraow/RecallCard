@@ -1,0 +1,98 @@
+name: 复用成品的桌面原生验收
+on:
+  workflow_dispatch:
+  push:
+    branches: ['validate/native-capture-*']
+concurrency:
+  group: native-recheck-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native:
+    name: 已构建程序 / 原生操作重验
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: 核对原构建来源与已通过步骤
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {data: run} = await github.rest.actions.getWorkflowRun({...context.repo, run_id:37586053893});
+            if(run.head_sha !== 'b4496e87a88051f9267de1583cf1907e234d7f5f') throw new Error('构建提交不符');
+            const {data} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:37586053893});
+            for(const name of ['界面与状态验证','浏览器保存与桌面跨端合同','构建正式桌面程序','构建配套 CLI 与依赖清单','打包 AppImage 与 deb']){
+              if(!data.jobs.some(job=>job.steps.some(step=>step.name===name&&step.conclusion==='success'))) throw new Error('前置检查未通过：'+name);
+            }
+      - uses: actions/download-artifact@v4
+        with:
+          name: RecallCard-diagnostic-binaries-b4496e87a88051f9267de1583cf1907e234d7f5f
+          run-id: '37586053893'
+          github-token: ${{ github.token }}
+          path: compiled
+      - uses: actions/download-artifact@v4
+        with:
+          name: RecallCard-native-acceptance-b4496e87a88051f9267de1583cf1907e234d7f5f
+          run-id: '37586053893'
+          github-token: ${{ github.token }}
+          path: previous-diagnostics
+      - name: 读取上次诊断并核验原程序摘要
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,pathlib,zipfile
+          root=pathlib.Path('compiled')
+          for name in ['tauri-driver.log','summary.json']:
+              path=pathlib.Path('previous-diagnostics')/name
+              if path.exists(): print(name+'\n'+path.read_text(errors='replace')[-16000:])
+          archives=list((root/'release-artifacts').glob('RecallCard-Desktop-*.zip'))
+          if len(archives)!=1: raise SystemExit('运行包不唯一')
+          with zipfile.ZipFile(archives[0]) as z:
+              info=json.loads(z.read('build-info.json'))
+              if info['commit']!='b4496e87a88051f9267de1583cf1907e234d7f5f':raise SystemExit('包内提交不符')
+              for name,key in [('recallcard-desktop','gui_sha256'),('recallcard','cli_sha256')]:
+                  file=root/'src-tauri/target/release'/name
+                  if hashlib.sha256(file.read_bytes()).hexdigest()!=info[key]:raise SystemExit('程序摘要不符')
+                  file.chmod(0o755)
+          PY
+      - name: 安装标准原生验收依赖
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libgtk-3-0 webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 安装官方原生 WebDriver
+        run: cargo install tauri-driver --version 2.1.0 --locked
+      - name: 重验真实原生操作闭环
+        timeout-minutes: 8
+        env:
+          LANG: C.UTF-8
+          GDK_BACKEND: x11
+        run: dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" /usr/bin/python3 desktop/tests/native_smoke.py --application compiled/src-tauri/target/release/recallcard-desktop --cli compiled/src-tauri/target/release/recallcard --artifacts "$RUNNER_TEMP/recallcard-native-recheck"
+      - name: 保存通过原生验收的完整安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-Desktop-0.2-linux-b4496e8
+          path: compiled/release-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+      - name: 保存独立运行 ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-Desktop-0.2-runtime-b4496e8
+          path: compiled/release-artifacts/*.zip
+          if-no-files-found: error
+          retention-days: 30
+      - name: 保存独立 deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-Desktop-0.2-deb-b4496e8
+          path: compiled/release-artifacts/*.deb
+          if-no-files-found: error
+          retention-days: 30
+      - name: 保存本轮原生截图与诊断
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-native-recheck-${{ github.sha }}
+          path: ${{ runner.temp }}/recallcard-native-recheck/
+          if-no-files-found: error
+          retention-days: 14

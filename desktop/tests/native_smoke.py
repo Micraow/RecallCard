@@ -88,6 +88,8 @@ class WebDriver:
 
     def click(self, selector, using="css selector"):
         element = wait_for(lambda: self.find(selector, using), f"找到按钮 {selector}")
+        # 只把目标滚动到窗口中央；仍由真实 WebDriver 派发点击，不调用业务后端。
+        self.command("POST", "/execute/sync", {"script": "arguments[0].scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});", "args": [{ELEMENT: element}]})
         self.command("POST", f"/element/{element}/click", {})
 
     def button(self, label, container=""):
@@ -461,7 +463,11 @@ class NativeSmoke:
         client_config = json.loads(browser.observe("return document.querySelector('textarea[aria-label=\"MCP客户端配置\"]').value"))
         server = client_config["mcpServers"]["recallcard"]
         assert Path(server["command"]).is_file()
-        mcp_request = json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"query":"离线会话","budget_tokens":8000}}}) + "\n"
+        mcp_request = "\n".join(json.dumps(message) for message in [
+            {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"RecallCard原生验收","version":"0.2"}}},
+            {"jsonrpc":"2.0","method":"notifications/initialized"},
+            {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"query":"离线会话","budget_tokens":8000}}},
+        ]) + "\n"
         mcp = subprocess.run([server["command"], *server["args"]], input=mcp_request, capture_output=True, text=True, check=True, timeout=15)
         assert "离线会话" in mcp.stdout and "event:" in mcp.stdout
         self.checkpoint("GUI生成的持久MCP组件读取刚保存会话")
