@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "checked_at_utc": "2026-10-07T23:02:24.156737+00:00",
+  "application_commit": "03f4b635862b38394abd319d4d76a532e1d90959",
+  "application_tree": "2a3ebcec5c84e0146f541cc932a1b4d2b1e1c02a",
+  "application_source_changed": false,
+  "local_gate_passed": true,
+  "actual_recheck_passed": false,
+  "checks": {
+    "preflight": 11,
+    "dom": 220,
+    "javascript_contracts": 111,
+    "native_driver_contracts": 47,
+    "preflight_contracts": 37,
+    "independent_review": "passed"
+  },
+  "prior_actual_run": {
+    "id": 37698444647,
+    "chromium_passed": 68,
+    "chromium_failed": 3,
+    "native_passed_checkpoints": 1,
+    "tauri_clippy": "passed",
+    "tauri_build": "passed",
+    "cli_build": "passed"
+  },
+  "reuse": {
+    "run_id": 37698444647,
+    "job_id": 113055829696,
+    "artifact_id": 11517105753,
+    "zip_sha256": "26d2ea3e775f33360dd8a71a4c4ea50c2c7851c68a0fb65af13715e0e8354500",
+    "gui_sha256": "f76e923fdbee19ee16f28ad50fc260b2a08fdc52e7cbedd5c630ab5887d242fb",
+    "cli_sha256": "8e58de814c9e47309aa61e800686d799389971005671fd6fb643026397c17a78",
+    "downloaded_and_independently_hashed": true,
+    "source_equality_required_in_ci": true
+  },
+  "source_sha256": {
+    ".github/workflows/desktop.yml": "f96ee0b77a3b2544271a5ab23329c846e1df8517f07d1266e640858cd1d669b1",
+    "desktop/tests/import-archive.test.mjs": "31238c21cefb77140c0c3b878c0378a9a4fe43111b483a47795385c11c2e97c4",
+    "desktop/tests/native_smoke.py": "a124647bc2951bd2052dc7e25c2d427f2ea5e1d6807211221cd8420e0c991e8a",
+    "desktop/tests/test_native_driver_transport.py": "84530324c110d3c1e567ae1d5e4075c7b6927dd7a2abd8a5f78239f77af0f42b",
+    "desktop/tests/ui.test.mjs": "01295a42a1879e045ca56dfccf1d951099a6d27d204f5118bfea7e4d863fd381",
+    "scripts/tests/test_preflight.py": "f57b77cf796bff421991099cd16399da51b9bc87501e1a015c2992f9584c542b",
+    ".github/workflows/recheck-integrated.yml": "b107e14f69ade3e11ff58d825a1e7302bf7df455a610019f32308e712a991925"
+  },
+  "not_run": [
+    "修复后的真实Chromium",
+    "修复后的37步真实原生复验",
+    "新安装包"
+  ],
+  "only_push_workflow_for_validation_branch": "recheck-integrated.yml"
+}

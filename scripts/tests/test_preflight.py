@@ -7,6 +7,9 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import fnmatch
+import shlex
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -311,6 +314,62 @@ class PreflightTest(unittest.TestCase):
         self.assertNotIn("/etc/apt/", step["run"])
         for value in ["https://archive.ubuntu.com/ubuntu", "https://security.ubuntu.com/ubuntu", "signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg", "timeout --kill-after=30s 3m", "timeout --kill-after=30s 8m", "for attempt in 1 2", "--error-on=any"]:
             self.assertIn(value, step["run"])
+
+    def test_integrated_recheck_branch_starts_exactly_one_nonpackaging_workflow(self):
+        matches = []
+        for path, data in preflight.workflows(ROOT):
+            triggers = data.get("on", data.get(True, {}))
+            push = triggers.get("push", {}) if isinstance(triggers, dict) else {}
+            matched = False
+            for pattern in push.get("branches", []) if isinstance(push, dict) else []:
+                negative = pattern.startswith("!")
+                if fnmatch.fnmatchcase("validate/gui-import-results-20261007", pattern.lstrip("!")):
+                    matched = not negative
+            if matched: matches.append(path.name)
+        self.assertEqual(matches, ["recheck-integrated.yml"])
+
+    def test_integrated_recheck_source_gate_rejects_each_application_change(self):
+        workflow = next(data for path, data in preflight.workflows(ROOT) if path.name == "recheck-integrated.yml")
+        step = next(step for step in workflow["jobs"]["native"]["steps"] if step.get("name") == "核对应用源码与原构建完全一致")
+        command = shlex.split(step["run"])
+        self.assertEqual(command, ["git", "diff", "--exit-code", "03f4b635862b38394abd319d4d76a532e1d90959", "--", "crates", "Cargo.toml", "Cargo.lock", "desktop/ui", "desktop/src-tauri"])
+        repository = self.root / "git-fixture"; repository.mkdir()
+        files = ["crates/synthetic.rs", "Cargo.toml", "Cargo.lock", "desktop/ui/app.js", "desktop/src-tauri/src/main.rs"]
+        for name in files:
+            path = repository / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text("synthetic baseline\n")
+        def git(*args):
+            return subprocess.check_output(["git", "-c", "user.name=合成验收", "-c", "user.email=synthetic@example.invalid", *args], cwd=repository, stderr=subprocess.DEVNULL).decode().strip()
+        git("init", "-q"); git("add", "."); git("commit", "-qm", "合成基线")
+        command[3] = git("rev-parse", "HEAD")
+        test = repository / "desktop/tests/synthetic.py"; test.parent.mkdir(); test.write_text("synthetic test only\n")
+        git("add", "."); git("commit", "-qm", "仅改合成测试")
+        def gate():
+            return subprocess.run(command, cwd=repository, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode
+        self.assertEqual(gate(), 0, "仅改验收脚本允许复用")
+        for name in files:
+            with self.subTest(path=name):
+                (repository / name).write_text("changed application source\n")
+                self.assertNotEqual(gate(), 0, "应用变更必须阻止旧程序复用")
+                git("restore", "--", name)
+
+    def test_integrated_recheck_provenance_and_hash_gates_cannot_be_skipped(self):
+        workflow = next(data for path, data in preflight.workflows(ROOT) if path.name == "recheck-integrated.yml")
+        self.assertEqual(workflow["permissions"], {"contents": "read", "actions": "read"})
+        steps = workflow["jobs"]["native"]["steps"]
+        scripts = "\n".join(step.get("with", {}).get("script", "") for step in steps)
+        for value in ["37698444647", "113055829696", "11517105753", "03f4b635862b38394abd319d4d76a532e1d90959", "artifact.expired", "artifact.digest", "step.conclusion === 'success'"]:
+            self.assertIn(value, scripts)
+        runs = "\n".join(step.get("run", "") for step in steps)
+        for digest in ["f76e923fdbee19ee16f28ad50fc260b2a08fdc52e7cbedd5c630ab5887d242fb", "8e58de814c9e47309aa61e800686d799389971005671fd6fb643026397c17a78"]:
+            self.assertIn(digest, runs)
+        self.assertIn("sha256sum --check --strict", runs)
+        self.assertNotIn("cargo build", runs)
+        self.assertNotIn("cargo install", runs)
+        self.assertTrue(all(not step.get("continue-on-error") for step in steps))
+        source = next(i for i, step in enumerate(steps) if "git diff --exit-code" in step.get("run", ""))
+        hashes = next(i for i, step in enumerate(steps) if "sha256sum --check" in step.get("run", ""))
+        native = next(i for i, step in enumerate(steps) if "native_smoke.py" in step.get("run", ""))
+        self.assertLess(source, hashes); self.assertLess(hashes, native)
 
     def test_partial_run_never_claims_full_gate(self):
         out, err = io.StringIO(), io.StringIO()

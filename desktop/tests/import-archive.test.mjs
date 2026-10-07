@@ -1,7 +1,7 @@
 // 合成备份的真实 Chromium DOM；原生命令由边界 fixture 响应，Rust 边界另有集成测试。
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { captureBrowserEvidence, workspaceAssets, idle, button, navigate, openImport } from './workspace-browser-helpers.mjs';
+import { captureBrowserEvidence, workspaceAssets, idle, button, navigate, openImport, expandDetails } from './workspace-browser-helpers.mjs';
 import { chromium } from '../../extension/node_modules/playwright/index.mjs';
 const vault = {session_id:'synthetic',root:'/synthetic/vault',display_name:'合成资料库',scopes:['personal'],event_count:0,memory_count:0,health:{ok:true}};
 const selection = {selection_id:'synthetic-archive',session_id:vault.session_id,file_name:'synthetic.zip',scope:'personal',file_hash:'synthetic-hash',byte_count:1024,
@@ -19,7 +19,7 @@ before(async()=>{
 });
 after(async()=>{await browser?.close();});
 async function fixture(t, chosen=selection){
-  const page=await browser.newPage({locale:'zh-CN',timezoneId:'UTC'});page.setDefaultTimeout(100000);
+  const page=await browser.newPage({locale:'zh-CN',timezoneId:'UTC'});page.setDefaultTimeout(5000);
   const calls=[];const errors=[];let failure=null;let imported=false;page.on('pageerror',e=>errors.push(e.message));
   t.after(async()=>{if(!t.passed||errors.length)await captureBrowserEvidence(page,`import-failure-${t.name}`);await page.close();assert.deepEqual(errors,[]);});
   await page.exposeFunction('__invoke',async(command,payload)=>{
@@ -114,6 +114,7 @@ test('返回会话选择撤销旧预览；取消后往返页面不恢复清单',
 test('原文件改变导致预览失败时没有确认写入按钮，改格式同时清除旧清单',async t=>{
   const {page,count,fail}=await fixture(t);await chooseFirst(page);fail('preview_import_selection','文件已改变或被替换，请重新选择文件并审查');await button(page,'预览所选会话');await idle(page);
   assert.match(await page.locator('#notice').textContent(),/文件已改变/);assert.equal(await page.getByRole('heading',{name:'确认导入',exact:true}).count(),0);assert.equal(count('confirm_import'),0);
+  await expandDetails(page, '#file-import-details');
   await page.locator('#import-format').selectOption('manual-jsonl');await idle(page);assert.equal(await page.locator('.archive-selection').count(),0);
 });
 
