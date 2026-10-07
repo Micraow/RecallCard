@@ -354,3 +354,175 @@ test('跨会话选文：结果含独立选择框时，上下键仍沿整个列�
   assert.deepEqual(checked(ui), [0, 1, 2]);
   assert.equal(prepareCalls(ui).length, 1); assert.equal(copyCount(ui), 0); ui.noWrites();
 });
+
+test('跨会话选文：核对原文及相邻消息再返回，保留手选引用和手写目标并重读', async t => {
+  const ui = await open(t); await carry(ui);
+  choose(ui, 1, false); choose(ui, 4);
+  const typedGoal = '先核对几次讨论的分歧，再按我的选择继续';
+  ui.fill('[aria-label="接下来要做什么"]', typedGoal); await ui.click('准备交接内容');
+  const oldCopy = ui.button('复制交接内容', pane(ui));
+  await ui.click('核对原文与出处', ui.one('[data-context-reference="event:evt_selected_0"]'));
+  ui.native.next('event_location', { conversation_ref: ui.native.data.conversations[0].session_ref, offset: 0 });
+  await ui.click('查看相邻消息'); await ui.click('返回之前的阅读');
+  assert.equal(ui.document.querySelector('[aria-label="交接内容预览"]'), null);
+  replay(ui, oldCopy); await ui.idle(); assert.equal(copyCount(ui), 0);
+  await carry(ui);
+  assert.deepEqual(prepareCalls(ui).at(-1).payload.references, [0, 2, 4].map(index => selectedContextRecords[index].ref));
+  assert.equal(prepareCalls(ui).at(-1).payload.goal, typedGoal);
+  assert.deepEqual(checked(ui), [0, 2, 4]);
+  ui.noWrites();
+});
+
+test('跨会话选文：核对后返回只恢复当前可见的同版本引用，不替补其他资料', async t => {
+  const ui = await open(t); await carry(ui);
+  choose(ui, 1, false); choose(ui, 4);
+  ui.fill('[aria-label="接下来要做什么"]', '保留我的目标，只用仍可核对的资料'); await ui.click('准备交接内容');
+  await ui.click('核对原文与出处', ui.one('[data-context-reference="event:evt_selected_0"]'));
+  ui.native.next('event_location', { conversation_ref: ui.native.data.conversations[0].session_ref, offset: 0 });
+  await ui.click('查看相邻消息');
+  ui.native.data.hiddenRefs = [selectedContextRecords[2].ref, selectedContextRecords[4].ref];
+  await ui.click('返回之前的阅读'); await carry(ui);
+  assert.deepEqual(prepareCalls(ui).at(-1).payload.references, [selectedContextRecords[0].ref]);
+  assert.equal(prepareCalls(ui).at(-1).payload.goal, '保留我的目标，只用仍可核对的资料');
+  assert.equal(pane(ui).querySelectorAll('.selected-context-record').length, 1);
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});
+
+test('跨会话选文：新查询失败立即撤去旧列表，重试成功后才可带走新资料', async t => {
+  const ui = await open(t); await carry(ui); await ui.click('返回搜索结果');
+  let rejectSearch;
+  ui.native.next('search_records', new Promise((resolve, reject) => { rejectSearch = reject; }));
+  ui.fill('#query', '另一次查找'); ui.button('查找').click();
+  assert.equal(ui.document.querySelectorAll('.results .result-card').length, 0);
+  rejectSearch(new Error('合成查询读取失败')); await ui.idle();
+  assert.equal(ui.document.querySelectorAll('.results .result-card').length, 0);
+  assert.equal([...ui.document.querySelectorAll('button')].some(node => node.textContent === '带走这些资料'), false);
+  assert.match(ui.one('.results').textContent, /查找未完成|查找没有完成/);
+  assert.doesNotMatch(ui.one('.results').textContent, /没有找到匹配资料/);
+  ui.native.data.searchResults = structuredClone(selectedSearchResults.slice(5));
+  await ui.click('重试查找'); await carry(ui);
+  assert.equal(prepareCalls(ui).at(-1).payload.goal, '另一次查找');
+  assert.deepEqual(prepareCalls(ui).at(-1).payload.references, selectedContextRecords.slice(5, 8).map(record => record.ref));
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});
+
+test('跨会话选文：出处失败不显示无来源结论，重读成功后才展示记忆和确切出处数', async t => {
+  const ui = await open(t); await carry(ui);
+  ui.native.fail('read_sources', '合成出处读取失败');
+  await ui.click('核对原文与出处', ui.one('[data-context-reference="memory:mem_selected@4"]'));
+  assert.match(ui.one('#notice').textContent, /合成出处读取失败/);
+  assert.equal(ui.document.querySelector('.source-details summary'), null);
+  assert.equal(ui.document.querySelector('.reading-pane .body-text'), null);
+  const memoryButton = ui.one('.results [data-reference="memory:mem_selected@4"]');
+  memoryButton.click(); await ui.idle();
+  assert.equal(ui.one('.source-details summary').textContent, '原始出处 · 0 条');
+  assert.ok(ui.one('.reading-pane .body-text').textContent.includes(selectedContextRecords[2].text));
+  assert.equal(ui.native.count('read_sources'), 2);
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});
+
+test('跨会话选文：勾选、取消和触及八条上限后保留原选择框的键盘焦点', async t => {
+  const ui = await open(t); await carry(ui); await ui.click('调整所选资料');
+  assert.equal(ui.document.activeElement, checks(ui)[0]);
+  checks(ui)[0].click();
+  assert.equal(ui.document.activeElement, checks(ui)[0]);
+  assert.equal(checks(ui)[0].checked, false);
+  checks(ui)[0].click();
+  assert.equal(ui.document.activeElement, checks(ui)[0]);
+  assert.equal(checks(ui)[0].checked, true);
+  for (let index = 3; index < 8; index++) choose(ui, index);
+  checks(ui)[8].focus(); checks(ui)[8].click();
+  assert.equal(ui.document.activeElement, checks(ui)[8]);
+  assert.equal(checks(ui)[8].checked, false);
+  assert.deepEqual(checked(ui), [0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});
+
+test('跨会话选文：返回时原选择全部失效，保留目标但不自动改选其他结果', async t => {
+  const ui = await open(t); await carry(ui);
+  ui.fill('[aria-label="接下来要做什么"]', '不要替我换成其他资料'); await ui.click('准备交接内容');
+  await ui.click('核对原文与出处', ui.one('[data-context-reference="event:evt_selected_0"]'));
+  ui.native.next('event_location', { conversation_ref: ui.native.data.conversations[0].session_ref, offset: 0 });
+  await ui.click('查看相邻消息');
+  ui.native.data.hiddenRefs = selectedContextRecords.slice(0, 3).map(record => record.ref);
+  await ui.click('返回之前的阅读');
+  const before = prepareCalls(ui).length; await carry(ui);
+  assert.equal(ui.one('[aria-label="接下来要做什么"]').value, '不要替我换成其他资料');
+  assert.deepEqual(checked(ui), []);
+  assert.equal(ui.button('准备交接内容').disabled, true);
+  noPreview(ui); assert.equal(prepareCalls(ui).length, before);
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});
+
+test('跨会话选文：原文仅返回片段且未读出处时，明确待读取并可重读', async t => {
+  const ui = await open(t);
+  ui.native.next('read_record', { results: [], truncated: true, pending_refs: [selectedContextRecords[2].ref] });
+  ui.one('.results [data-reference="memory:mem_selected@4"]').click(); await ui.idle();
+  assert.equal(ui.native.count('read_sources'), 0);
+  assert.equal(ui.document.querySelector('.source-details summary'), null);
+  assert.match(ui.one('.reading-pane').textContent, /出处尚未读取/);
+  await ui.click('重新读取资料与出处');
+  assert.equal(ui.native.count('read_sources'), 1);
+  assert.equal(ui.one('.source-details summary').textContent, '原始出处 · 0 条');
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});
+
+test('跨会话选文：出处响应因预算不完整且暂未容纳来源，不冒称零条出处', async t => {
+  const ui = await open(t);
+  ui.native.next('read_sources', { results: [], truncated: true });
+  ui.one('.results [data-reference="memory:mem_selected@4"]').click(); await ui.idle();
+  assert.equal(ui.one('.source-details summary').textContent, '原始出处尚未读出');
+  assert.match(ui.one('.source-details').textContent, /不是完整的来源数量/);
+  assert.doesNotMatch(ui.one('.source-details').textContent, /0 条/);
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});
+
+async function inspectAdjacentAndLeave(ui) {
+  await ui.click('核对原文与出处', ui.one('[data-context-reference="event:evt_selected_0"]'));
+  ui.native.next('event_location', { conversation_ref: ui.native.data.conversations[0].session_ref, offset: 0 });
+  await ui.click('查看相邻消息');
+}
+
+test('跨会话选文：返回时相同记忆升级版本，不把未审阅的新版本偷换进选择', async t => {
+  const ui = await open(t); await carry(ui);
+  ui.fill('[aria-label="接下来要做什么"]', '先核对我看过的版本'); await ui.click('准备交接内容');
+  await inspectAdjacentAndLeave(ui);
+  ui.native.data.searchResults[2].ref = 'memory:mem_selected@5';
+  ui.native.data.selectedContextRecords[2].ref = 'memory:mem_selected@5';
+  await ui.click('返回之前的阅读'); await carry(ui);
+  assert.deepEqual(prepareCalls(ui).at(-1).payload.references, selectedContextRecords.slice(0, 2).map(record => record.ref));
+  assert.equal(prepareCalls(ui).at(-1).payload.goal, '先核对我看过的版本');
+  assert.equal(checks(ui)[2].checked, false);
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});
+
+test('跨会话选文：返回查找失败后重试保留用户草稿，不恢复旧预览与旧复制控件', async t => {
+  const ui = await open(t); await carry(ui);
+  choose(ui, 1, false); choose(ui, 4);
+  ui.fill('[aria-label="接下来要做什么"]', '返回后继续这个手写目标'); await ui.click('准备交接内容');
+  const oldCopy = ui.button('复制交接内容', pane(ui));
+  await inspectAdjacentAndLeave(ui);
+  ui.native.fail('search_records', '合成返回读取失败'); await ui.click('返回之前的阅读');
+  assert.equal(ui.document.querySelector('[aria-label="交接内容预览"]'), null);
+  assert.equal(ui.document.querySelectorAll('.results .result-card').length, 0);
+  replay(ui, oldCopy); await ui.idle(); assert.equal(copyCount(ui), 0);
+  await ui.click('重试查找'); await carry(ui);
+  assert.equal(prepareCalls(ui).at(-1).payload.goal, '返回后继续这个手写目标');
+  assert.deepEqual(prepareCalls(ui).at(-1).payload.references, [0, 2, 4].map(index => selectedContextRecords[index].ref));
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});
+
+test('跨会话选文：原始出处仍在读取时不先展示记忆，完成后正文和出处一起出现', async t => {
+  const ui = await open(t); await carry(ui);
+  const release = ui.native.hold('read_sources');
+  ui.button('核对原文与出处', ui.one('[data-context-reference="memory:mem_selected@4"]')).click();
+  await setImmediate();
+  assert.equal(ui.document.querySelector('.reading-pane .body-text'), null);
+  assert.equal(ui.document.querySelector('#selection-context-preview'), null);
+  release({ results: [{ events: [{ ref: 'event:evt_selected_0', role: 'user', content: '已核对来源', conversation_title: '来源会话' }] }], truncated: false });
+  await ui.idle();
+  assert.equal(ui.one('.source-details > summary').textContent, '原始出处 · 1 条');
+  assert.ok(ui.one('.reading-pane > .reader-scroll > .body-text').textContent.includes(selectedContextRecords[2].text));
+  assert.match(ui.one('.source-details').textContent, /已核对来源/);
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});

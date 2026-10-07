@@ -241,24 +241,32 @@ async function readRecordValue(item, current) {
   const result = await invoke('read_record', { ...args(), reference });
   if (!current()) return;
   const first = result.results?.[0];
-  if (!first) { if (result.truncated || result.pending_refs?.length) { state.selected = { ...item, truncated: true }; state.sources = []; showNotice('记录较长，先显示部分内容。完整原文保存在资料库文件中'); return; } throw new Error('这条资料已不可见，请重新查找'); }
-  state.selected = { ...item, ...first, text_truncated: false, truncated: Boolean(result.truncated || first.truncated), ref: reference };
-  state.sources = [];
+  if (!first) { if (result.truncated || result.pending_refs?.length) { state.selected = { ...item, truncated: true, sources_loaded: false }; state.sources = []; showNotice('记录较长，先显示部分内容。完整原文保存在资料库文件中'); return; } throw new Error('这条资料已不可见，请重新查找'); }
+  let records = [], sourcesTruncated = false;
   if (reference.startsWith('memory:')) {
     const sources = await invoke('read_sources', { ...args(), reference });
-    if (current()) { state.sources = sources.results || []; if (sources.truncated) showNotice('出处较长，完整内容保存在资料库文件中'); }
+    if (!current()) return;
+    records = sources.results || []; sourcesTruncated = Boolean(sources.truncated);
+    if (sources.truncated) showNotice('出处较长，完整内容保存在资料库文件中');
   }
+  state.selected = { ...item, ...first, text_truncated: false, truncated: Boolean(result.truncated || first.truncated), ref: reference, sources_loaded: true, sources_truncated: sourcesTruncated };
+  state.sources = records;
 }
 async function loadRecords(preserve = false) {
   await run('正在查找本地资料…', async current => {
     const selected = preserve ? state.selected : null;
-    if (!preserve) { resetReaderView('search:'); state.viewport['search:'].list = 0; }
-    state.selected = null; state.sources = []; state.continuation = null; contextSelection.clear(); render();
+    if (!preserve) { resetReaderView('search:'); state.viewport['search:'].list = 0; contextSelection.clear(); }
+    else contextSelection.invalidate();
+    state.selected = null; state.sources = []; state.continuation = null;
+    state.results = []; state.searchLoaded = false; state.searchError = false; state.resultNote = '正在查找本地资料…'; render();
     const query = state.query.trim();
-    const result = await invoke(query ? 'search_records' : 'browse_records', { ...args(), target: state.target, ...(query ? { query } : {}) });
+    let result;
+    try { result = await invoke(query ? 'search_records' : 'browse_records', { ...args(), target: state.target, ...(query ? { query } : {}) }); }
+    catch (error) { if (current()) { state.searchError = true; state.resultNote = '查找未完成'; } throw error; }
     if (!current()) return;
     state.results = result.results || []; state.searchLoaded = true; state.resultQuery = query;
     state.resultNote = result.truncated ? '结果较多，请缩小关键词范围' : `${state.results.length} 条可见资料`;
+    if (preserve) contextSelection.refreshResults();
     const freshSelected = selected && state.results.find(item => recordRef(item) === recordRef(selected));
     if (freshSelected) await readRecordValue(freshSelected, current);
   });
@@ -294,9 +302,16 @@ function readingPane() {
   if (item.text_truncated || item.truncated) body.append(hint('这里只显示部分内容，完整原文保存在资料库中。'));
   if (!isMemory) body.append(button('查看相邻消息', () => locateEvent(reference), false, 'small'));
   else {
-    const sources = $('details', { class: 'source-details' }, $('summary', {}, `原始出处 · ${state.sources.reduce((n, source) => n + (source.events || source.sources || source.records || [source]).length, 0)} 条`));
-    for (const source of state.sources) for (const event of source.events || source.sources || source.records || [source]) sources.append(sourceRecord(event));
-    body.append(sources, button('管理这条记忆', () => { state.pendingMemoryId = data.id || reference.slice(7).split('@')[0]; state.memoryFilter = 'all'; navigate('memories'); }, false, 'small'));
+    if (item.sources_loaded === false) body.append(hint('这条记忆的出处尚未读取，不能据此判断有无出处。'), button('重新读取资料与出处', () => readRecord(item), false, 'small'));
+    else {
+      const sourceCount = state.sources.reduce((n, source) => n + (source.events || source.sources || source.records || [source]).length, 0);
+      const sourceLabel = item.sources_truncated && !sourceCount ? '原始出处尚未读出' : `${item.sources_truncated ? '已读原始出处' : '原始出处'} · ${sourceCount} 条`;
+      const sources = $('details', { class: 'source-details' }, $('summary', {}, sourceLabel));
+      if (item.sources_truncated) sources.append(hint('部分出处尚未读出，这不是完整的来源数量。'));
+      for (const source of state.sources) for (const event of source.events || source.sources || source.records || [source]) sources.append(sourceRecord(event));
+      body.append(sources);
+    }
+    body.append(button('管理这条记忆', () => { state.pendingMemoryId = data.id || reference.slice(7).split('@')[0]; state.memoryFilter = 'all'; navigate('memories'); }, false, 'small'));
   }
   const chosen = state.selectedRefs.includes(reference);
   body.append($('details', { class: 'organize-details' }, $('summary', {}, '用于整理记忆'), button(chosen ? '已选择 · 点击移除' : '选择这条资料', () => changeDreamSources(chosen ? state.selectedRefs.filter(r => r !== reference) : [...state.selectedRefs, reference]), false, 'small'), state.selectedRefs.length ? button(`前往整理（${state.selectedRefs.length} 条）`, () => navigate('dream'), false, 'small') : null), technicalDetails(line('引用', reference), line('记录时间', displayDate(data.recorded_at || data.captured_at)), line('状态', displayState(data.status || data.state || item.state))));
@@ -307,7 +322,9 @@ function searchPage() {
   target.value = state.target; target.addEventListener('change', () => { state.target = target.value; loadRecords(); });
   content.append($('div', { class: 'workspace-heading' }, $('h1', {}, '搜索结果'), $('span', { class: 'muted' }, state.resultNote || '在当前范围内查找'), target, state.results.length ? button('带走这些资料', () => contextSelection.open(), true) : null, button('返回工作区', () => navigate(state.workspace), false, 'small')));
   const results = $('div', { class: 'results list-scroll', 'data-scroll': 'list', 'aria-label': '搜索结果' });
-  if (!state.results.length) results.append($('div', { class: 'empty' }, $('h3', {}, state.query ? '没有找到匹配资料' : '还没有可见资料'), paragraph('试试更短的原话，或检查顶部资料范围。')));
+  if (!state.results.length) results.append(state.searchError
+    ? $('div', { class: 'empty' }, $('h3', {}, '这次查找未完成'), paragraph('旧结果已移除。请重试，或修改上方查询。'), button('重试查找', () => loadRecords(Boolean(state.contextSelection)), true))
+    : $('div', { class: 'empty' }, $('h3', {}, state.query ? '没有找到匹配资料' : '还没有可见资料'), paragraph('试试更短的原话，或检查顶部资料范围。')));
   for (const item of state.results) {
     const ref = recordRef(item); const isMemory = ref.startsWith('memory:');
     const source = item.source_summary?.sources?.[0];
