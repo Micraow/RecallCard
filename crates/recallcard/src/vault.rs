@@ -479,7 +479,7 @@ impl Vault {
         self.write_bytes(path, &bytes)
     }
     pub(crate) fn write_bytes(&self, path: &Path, bytes: &[u8]) -> Result<()> {
-        self.staged(path, bytes)?.persist(path).map_err(err)?;
+        persist_replace(self.staged(path, bytes)?, path)?;
         sync_parent(path)
     }
     fn staged(&self, path: &Path, bytes: &[u8]) -> Result<NamedTempFile> {
@@ -493,6 +493,32 @@ impl Vault {
         temp.as_file().sync_all().map_err(err)?;
         Ok(temp)
     }
+}
+
+#[cfg(not(windows))]
+fn persist_replace(temp: NamedTempFile, path: &Path) -> Result<()> {
+    temp.persist(path).map_err(err)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn persist_replace(mut temp: NamedTempFile, path: &Path) -> Result<()> {
+    // Windows 上短暂占用或尚未关闭的删除共享句柄可能阻止替换。
+    // 始终重试同一份已同步的临时文件，不删除旧记录，不放宽 ACL。
+    for attempt in 0..=32 {
+        match temp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(failure)
+                if attempt < 32 && matches!(failure.error.raw_os_error(), Some(5 | 32 | 33)) =>
+            {
+                temp = failure.file;
+                std::thread::sleep(std::time::Duration::from_millis(1 << attempt.min(5)));
+                reject_symlink(path)?;
+            }
+            Err(failure) => return Err(err(failure)),
+        }
+    }
+    unreachable!("最后一次替换必定返回成功或错误")
 }
 
 pub fn render_memory(memory: &Memory) -> Result<String> {
