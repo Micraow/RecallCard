@@ -352,7 +352,7 @@ test('导入文件名、正文、Dream 诊断与变更中的恶意标记保持�
     samples: [{ role: 'user', content: hostile }] });
   await previewImport(page);
   assert.equal(await page.locator('.file-name').textContent(), hostile);
-  assert.equal(await page.locator('.sample p').textContent(), hostile);
+  assert.equal(await page.locator('.sample p:last-child').textContent(), hostile);
   native.next('pick_dream', { ...dreamPreview, file_name: hostile, review: {
     ...dreamPreview.review, diagnostics: [hostile],
     changes: [{ operation: 'update', before: { ...memory, content: hostile }, after: { ...memory, content: hostile } }],
