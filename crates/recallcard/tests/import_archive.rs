@@ -326,7 +326,7 @@ fn many_messages(id: &str, count: usize) -> Value {
 }
 
 #[test]
-fn large_backups_can_be_inspected_then_selected_in_batches_without_truncation() {
+fn large_backups_can_be_inspected_and_imported_without_artificial_splits() {
     let bytes = archive(&[(
         "all.json",
         json!([many_messages("one", MAX_BATCH_EVENTS), conversation("two")])
@@ -339,8 +339,8 @@ fn large_backups_can_be_inspected_then_selected_in_batches_without_truncation() 
         summary.conversation_summaries[0].event_count,
         MAX_BATCH_EVENTS
     );
-    let err = parse_archive(&bytes, "personal").unwrap_err();
-    assert!(err.contains("5002") && err.contains("没有写入"));
+    let whole = parse_archive(&bytes, "personal").unwrap();
+    assert_eq!(whole.events.len(), MAX_BATCH_EVENTS + 2);
     let selected =
         parse_archive_selected(&bytes, "personal", &BTreeSet::from(["one".into()])).unwrap();
     assert_eq!(selected.events.len(), MAX_BATCH_EVENTS);

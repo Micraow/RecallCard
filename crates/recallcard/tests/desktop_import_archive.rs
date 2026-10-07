@@ -212,7 +212,7 @@ fn replacing_archive_with_identical_bytes_invalidates_each_stage() {
 }
 
 #[test]
-fn empty_unknown_and_over_limit_selection_never_write_and_batching_remains_available() {
+fn empty_unknown_selections_never_write_and_large_official_selection_is_supported() {
     let (dir, mut session, info) = setup();
     let path = dir.path().join("large.zip");
     fs::write(
@@ -236,14 +236,13 @@ fn empty_unknown_and_over_limit_selection_never_write_and_batching_remains_avail
             &["missing".into()]
         )
         .is_err());
-    assert!(session
+    assert_eq!(session
         .preview_import_selection(
             &info.session_id,
             &selection.selection_id,
             &["one".into(), "two".into()]
         )
-        .unwrap_err()
-        .contains("5000"));
+        .unwrap().event_count, 5002);
     assert_eq!(
         preview(&mut session, &info, &selection, &["one"]).event_count,
         2501

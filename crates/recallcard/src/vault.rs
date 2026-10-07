@@ -123,45 +123,128 @@ impl Vault {
         }
         Ok(())
     }
-    pub fn capture(&self, mut input: EventInput) -> Result<Event> {
-        crate::capture::redact_event(&mut input)?;
+    pub fn capture(&self, input: EventInput) -> Result<Event> {
+        self.capture_batch(vec![input])?
+            .pop()
+            .ok_or_else(|| "事件未写入".into())
+    }
+
+    /// 整批先脱敏、校验并规划修订，再共享写锁和去重索引追加。
+    /// 文件系统失败可能留下已持久化的前缀；重试相同来源版本安全去重。
+    pub fn capture_batch(&self, inputs: Vec<EventInput>) -> Result<Vec<Event>> {
+        self.capture_batch_with_progress(inputs, || true, |_, _, _| Ok(()))
+    }
+
+    pub fn capture_batch_with_progress<C, F>(
+        &self,
+        inputs: Vec<EventInput>,
+        should_continue: C,
+        progress: F,
+    ) -> Result<Vec<Event>>
+    where
+        C: FnMut() -> bool,
+        F: FnMut(usize, &Event, bool) -> Result<()>,
+    {
+        self.capture_batch_with_callbacks(inputs, should_continue, |_| Ok(()), progress)
+    }
+
+    /// on_existing 在写锁内收到已有正本，供任务保存初始去重基线。
+    /// progress 在每条事件持久化后收到（已处理数量、事件、本次是否新增）。
+    /// 回调不可重新取得 Vault 锁；取消只停止后续写入，绝不撤回已写 Event。
+    pub fn capture_batch_with_callbacks<C, I, F>(
+        &self,
+        mut inputs: Vec<EventInput>,
+        mut should_continue: C,
+        on_existing: I,
+        mut progress: F,
+    ) -> Result<Vec<Event>>
+    where
+        C: FnMut() -> bool,
+        I: FnOnce(&[Event]) -> Result<()>,
+        F: FnMut(usize, &Event, bool) -> Result<()>,
+    {
+        use std::collections::{BTreeMap, BTreeSet};
+        for input in &mut inputs {
+            crate::capture::redact_event(input)?;
+        }
+        if !should_continue() {
+            return Ok(Vec::new());
+        }
         let _lock = self.lock()?;
-        let events = self.events()?;
-        // 对照去掉自动 revision_of 的输入，重复观察同一修订不会再追加。
-        for event in &events {
-            let mut existing = event.data.clone();
-            existing.revision_of = input.revision_of.clone();
-            if existing == input {
-                return Ok(event.clone());
+        let mut events = self.events()?;
+        on_existing(&events)?;
+        let existing_count = events.len();
+        let mut versions = BTreeMap::new();
+        let mut latest = BTreeMap::new();
+        let mut known_ids = BTreeSet::new();
+        // 与旧版 capture 一致：忽略自动 revision_of 比较输入，重复任何旧版本也不回滚。
+        fn version_key(input: &EventInput) -> Result<String> {
+            let mut normalized = input.clone();
+            normalized.revision_of = None;
+            normalized.id()
+        }
+        for (index, event) in events.iter().enumerate() {
+            versions.entry(version_key(&event.data)?).or_insert(index);
+            latest.insert(event.data.source_key(), index);
+            known_ids.insert(event.id.clone());
+        }
+        let mut plan = Vec::with_capacity(inputs.len());
+        for mut input in inputs {
+            let version = version_key(&input)?;
+            if let Some(index) = versions.get(&version).copied() {
+                plan.push((index, false));
+                continue;
             }
+            let source = input.source_key();
+            if input.revision_of.is_none() {
+                input.revision_of = latest.get(&source).map(|index| events[*index].id.clone());
+            }
+            if input
+                .revision_of
+                .as_ref()
+                .is_some_and(|id| !known_ids.contains(id))
+            {
+                return Err("找不到所引用的原始事件；整批尚未写入".into());
+            }
+            let event = Event {
+                schema_version: SCHEMA_VERSION,
+                id: input.id()?,
+                captured_at: Utc::now(),
+                data: input,
+            };
+            let index = events.len();
+            known_ids.insert(event.id.clone());
+            versions.insert(version, index);
+            if latest.get(&source).is_none_or(|old| {
+                (events[*old].captured_at, &events[*old].id) <= (event.captured_at, &event.id)
+            }) {
+                latest.insert(source, index);
+            }
+            events.push(event);
+            plan.push((index, true));
         }
-        if input.revision_of.is_none() {
-            input.revision_of = events
-                .iter()
-                .filter(|e| e.data.source_key() == input.source_key())
-                .max_by_key(|e| e.captured_at)
-                .map(|e| e.id.clone());
+        let mut result = Vec::with_capacity(plan.len());
+        for (index, added) in plan {
+            if !should_continue() {
+                break;
+            }
+            let event = &events[index];
+            if added {
+                debug_assert!(index >= existing_count);
+                let path = self.event_path(event);
+                reject_symlink(path.parent().ok_or("事件路径无父目录")?)?;
+                fs::create_dir_all(path.parent().ok_or("事件路径无父目录")?).map_err(err)?;
+                let mut bytes = serde_json::to_vec(event).map_err(err)?;
+                bytes.push(b'\n');
+                self.staged(&path, &bytes)?
+                    .persist_noclobber(&path)
+                    .map_err(err)?;
+                sync_parent(&path)?;
+            }
+            result.push(event.clone());
+            progress(result.len(), event, added)?;
         }
-        if let Some(previous) = &input.revision_of {
-            self.event(previous)?;
-        }
-        let id = input.id()?;
-        let event = Event {
-            schema_version: SCHEMA_VERSION,
-            id,
-            captured_at: Utc::now(),
-            data: input,
-        };
-        let path = self.event_path(&event);
-        reject_symlink(path.parent().ok_or("事件路径无父目录")?)?;
-        fs::create_dir_all(path.parent().ok_or("事件路径无父目录")?).map_err(err)?;
-        let mut bytes = serde_json::to_vec(&event).map_err(err)?;
-        bytes.push(b'\n');
-        self.staged(&path, &bytes)?
-            .persist_noclobber(&path)
-            .map_err(err)?;
-        sync_parent(&path)?;
-        Ok(event)
+        Ok(result)
     }
     fn event_path(&self, event: &Event) -> PathBuf {
         let time = event.data.occurred_at.unwrap_or(event.captured_at);

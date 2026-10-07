@@ -7,13 +7,14 @@ use std::collections::BTreeSet;
 pub fn import_text(vault: &Vault, format: &str, text: &str, scope: &str) -> Result<Value> {
     let inputs = parse_text(format, text, scope)?;
     let before = vault.events()?.len();
-    let mut ids = Vec::new();
-    for input in inputs {
-        ids.push(vault.capture(input)?.id);
-    }
+    let ids = vault
+        .capture_batch(inputs)?
+        .into_iter()
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
     let after = vault.events()?.len();
     Ok(
-        json!({"ok":true,"events_added":after.saturating_sub(before),"events_seen":ids.len(),"refs":ids.iter().map(|i|format!("event:{i}")).collect::<Vec<_>>(),"coverage":{"messages":"partial","tools":if format=="claude-code"{"partial"}else{"unsupported"},"files":"unsupported","citations":"partial","branches":if format=="chatgpt-export"{"selected_current_branch"}else{"partial"},"hidden_reasoning":"not_collected"},"note":"仅导入显式提供的文件；导入中断可安全重复运行，已写原始事件不回滚"}),
+        json!({"ok":true,"events_added":after.saturating_sub(before),"events_seen":ids.len(),"refs":ids.iter().map(|i|format!("event:{i}")).collect::<Vec<_>>(),"coverage":{"messages":"partial","tools":if format=="claude-code"{"partial"}else{"unsupported"},"files":"unsupported","citations":"partial","branches":if format=="chatgpt-export"{"selected_current_branch"}else if format=="deepseek-export"{"all_exported_nodes_not_linear"}else{"partial"},"hidden_reasoning":"not_collected"},"note":"仅导入显式提供的文件；导入中断可安全重复运行，已写原始事件不回滚"}),
     )
 }
 
@@ -31,16 +32,16 @@ pub(crate) fn parse_text(format: &str, text: &str, scope: &str) -> Result<Vec<Ev
                 .map(|l| serde_json::from_str::<EventInput>(l).map_err(|e| e.to_string()))
                 .collect::<Result<Vec<_>>>()?,
             "claude-code" => claude_code(text, scope)?,
-            "chatgpt-export" => chatgpt_export(text, scope)?,
+            "chatgpt-export" | "deepseek-export" => crate::import_bundle::parse_import_bytes(format, text.as_bytes(), scope)?.events,
             "recallcard-conversation" => {
                 crate::conversation::Conversation::parse(text)?.events(scope)?
             }
             _ => return Err(
-                "支持的格式：recallcard-conversation、manual-jsonl、claude-code、chatgpt-export"
+                "支持的格式：recallcard-conversation、manual-jsonl、claude-code、chatgpt-export、deepseek-export"
                     .into(),
             ),
         };
-    if inputs.len() > 5000 {
+    if inputs.len() > 5000 && !matches!(format, "deepseek-export" | "chatgpt-export") {
         return Err(
             "单批最多导入 5000 个事件；请在备份预览中选择较少会话，或将过长会话分批导出".into(),
         );
@@ -178,25 +179,6 @@ fn claude_code(text: &str, scope: &str) -> Result<Vec<EventInput>> {
     }
     Ok(out)
 }
-fn chatgpt_export(text: &str, scope: &str) -> Result<Vec<EventInput>> {
-    let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let conversations: Vec<&Value> = match &value {
-        Value::Array(items) => items.iter().collect(),
-        Value::Object(_) => vec![&value],
-        _ => return Err("ChatGPT 导出必须是 conversation 对象或数组".into()),
-    };
-    let mut events = Vec::new();
-    let mut seen = BTreeSet::new();
-    for conv in conversations {
-        for event in parse_chatgpt_conversation(conv, scope)?.events {
-            if seen.insert(event.id()?) {
-                events.push(event);
-            }
-        }
-    }
-    Ok(events)
-}
-
 /// 只包括当前分支；不会把丢失的时间替换成导入时间。
 #[derive(Debug, Default, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct ChatgptCoverage {
