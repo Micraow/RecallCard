@@ -2,17 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../composer-adapter.js';
 class Element {
-  constructor(tag='TEXTAREA') {this.tagName=tag;this.value='';this.children=[];this._text='';this.isConnected=true;this.events=[];this.style={};this.classList={contains:(x)=>x==='ProseMirror'};this.isContentEditable=tag==='DIV';}
+  constructor(tag='TEXTAREA',id='') {this.tagName=tag;this.id=id;this.value='';this.children=[];this._text='';this.isConnected=true;this.visible=true;this.disabled=false;this.readOnly=false;this.attributes={};this.events=[];this.style={};this.classList={contains:(x)=>x==='ProseMirror'};this.isContentEditable=tag==='DIV';}
   get textContent(){return this._text+this.children.map(x=>x.textContent).join('');}
   set textContent(v){this._text=v;this.children=[];}
-  getClientRects(){return[{}];} getAttribute(){return null;}
+  getClientRects(){return this.visible?[{}]:[];} getAttribute(name){return this.attributes[name]??null;}
   append(node){node.parentNode=this;this.children.push(node);}
   remove(){const p=this.parentNode;p.children=p.children.filter(x=>x!==this);this.parentNode=null;this.isConnected=false;}
   dispatchEvent(event){this.events.push(event.type);}
 }
-function setup(tag='TEXTAREA'){
-  const node=new Element(tag);
-  const doc={querySelectorAll:()=>[node],createElement:()=>new Element('P'),defaultView:{InputEvent:class{constructor(type){this.type=type;}}}};
+function setup(tag='TEXTAREA',id='prompt-textarea'){
+  const node=new Element(tag,id);
+  const doc={nodes:[node],querySelectorAll(selector){
+    // 仅模拟这里使用的明确 id/type 选择器，不能让 fixture 忽略 selector。
+    const selectors=selector.split(',').map(part=>part.trim().match(/^(?:([a-z]+))?#([a-z0-9_-]+)$/iu));
+    assert.ok(selectors.every(Boolean),'fixture 不支持此 selector');
+    return this.nodes.filter(element=>selectors.some(([,tag,identifier])=>element.id===identifier&&(!tag||element.tagName===tag.toUpperCase())));
+  },createElement:()=>new Element('P'),defaultView:{InputEvent:class{constructor(type){this.type=type;}}}};
   return {node,doc,adapter:new globalThis.RecallCardComposerAdapter(doc)};
 }
 const capsule={id:'r_demo',nonce:'a'.repeat(48),text:'来源 event:evt_demo\n待审核上下文'};
@@ -72,4 +77,56 @@ test('注入块新增非文本内容后，不会因为 textContent 相同就删�
   const injected=node.children[0];injected.innerHTML='用户在上下文内加入了图片';
   assert.throws(()=>adapter.remove(capsule.id),/富文本结构/);
   assert.equal(node.children[0],injected);
+});
+
+
+test('唯一 mobile textarea 追加和撤销均保留用户草稿，不代表已发送',()=>{
+  const {node,adapter}=setup('TEXTAREA','mobile-composer-prompt');
+  node.value='已有移动输入草稿🙂\n第二行';const original=node.value;
+  assert.equal(adapter.find(),node);
+  assert.equal(adapter.insert(capsule).status,'draft');
+  assert.ok(node.value.startsWith(original));
+  assert.throws(()=>adapter.confirmSent(capsule.id),/自己点击/);
+  assert.throws(()=>adapter.insert(capsule),/已经插入/);
+  node.value='新增前缀\n'+node.value+'\n新增后缀';
+  adapter.remove(capsule.id);
+  assert.equal(node.value,'新增前缀\n'+original+'\n新增后缀');
+  assert.deepEqual(node.events,['input','input']);
+});
+test('mobile 与旧版可见编辑器同时存在时拒绝猜测目标',()=>{
+  for(const tag of ['TEXTAREA','DIV']){
+    const {node,doc,adapter}=setup('TEXTAREA','mobile-composer-prompt');
+    const other=new Element(tag,'prompt-textarea');node.value='移动草稿';other.value='旧版草稿';doc.nodes.push(other);
+    assert.throws(()=>adapter.insert(capsule),/唯一/);
+    assert.equal(node.value,'移动草稿');assert.equal(other.value,'旧版草稿');
+    assert.deepEqual(node.events,[]);assert.deepEqual(other.events,[]);
+  }
+});
+test('mobile 输入框不可见、脱离文档、禁用或只读时均不写入',()=>{
+  for(const modify of [
+    node=>node.visible=false,
+    node=>node.isConnected=false,
+    node=>node.disabled=true,
+    node=>node.readOnly=true,
+    node=>node.attributes['aria-disabled']='true'
+  ]){
+    const {node,adapter}=setup('TEXTAREA','mobile-composer-prompt');node.value='保留草稿';modify(node);
+    assert.throws(()=>adapter.insert(capsule));assert.equal(node.value,'保留草稿');assert.deepEqual(node.events,[]);
+  }
+});
+test('mobile selector 只允许明确 textarea，不匹配任意编辑器',()=>{
+  for(const tag of ['INPUT','DIV']){
+    const {node,adapter}=setup(tag,'mobile-composer-prompt');node.value='不受支持的草稿';
+    assert.throws(()=>adapter.insert(capsule),/唯一/);assert.equal(node.value,'不受支持的草稿');assert.deepEqual(node.events,[]);
+  }
+  const {doc,adapter}=setup('TEXTAREA','unrelated-composer');doc.nodes.push(new Element('DIV','other-editor'));
+  assert.throws(()=>adapter.insert(capsule),/唯一/);assert.ok(doc.nodes.every(node=>node.events.length===0));
+});
+test('隐藏 mobile 不阻止唯一旧版输入框，两个可见候选中只读也不绕过歧义拒绝',()=>{
+  const {node,doc,adapter}=setup();node.value='旧版草稿';
+  const mobile=new Element('TEXTAREA','mobile-composer-prompt');mobile.visible=false;mobile.value='隐藏草稿';doc.nodes.push(mobile);
+  adapter.insert(capsule);assert.equal(mobile.value,'隐藏草稿');assert.deepEqual(mobile.events,[]);
+  adapter.remove(capsule.id);assert.equal(node.value,'旧版草稿');
+  mobile.visible=true;node.readOnly=true;assert.throws(()=>adapter.insert(capsule),/唯一/);
+  assert.equal(node.value,'旧版草稿');assert.equal(mobile.value,'隐藏草稿');
 });

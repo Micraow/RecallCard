@@ -32,3 +32,23 @@ jobs:
         with:
           node-version: '22'
       - run: node --test extension/tests/*.test.js
+
+  python:
+    name: 可选 worker 与跨语言合同
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo build --locked --workspace
+      - run: python3 -m unittest discover -s python/tests -v
+        env:
+          PYTHONPATH: python
+          RECALLCARD_TEST_BINARY: ${{ github.workspace }}/target/debug/recallcard
+          RECALLCARD_STATE_DIR: ${{ runner.temp }}/recallcard-python-state
+      - run: python3 python/tests/check_rust_embedding_contract.py "$PWD/target/debug/recallcard"
+        env:
+          PYTHONPATH: python
+          RECALLCARD_STATE_DIR: ${{ runner.temp }}/recallcard-python-state

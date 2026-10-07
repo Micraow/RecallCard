@@ -80,6 +80,13 @@ enum Command {
         #[arg(long, required = true)]
         scope: Vec<String>,
     },
+    /// 校验并先提交本地正本，再整合与推送指定 Git 远端
+    Sync {
+        #[arg(long)]
+        remote: String,
+    },
+    /// 查看资料库 Git 状态，不访问远端
+    Status,
     /// 离线重建文本快照与视图，不重新调用模型
     Rebuild,
     /// 根据 canonical Memory 重新生成人类视图
@@ -276,6 +283,8 @@ fn run(cli: Cli) -> Result<Value> {
             Context::new(&vault, Access::new(scope)?).embedding_corpus()
         }
         Command::Rebuild => vault.rebuild(),
+        Command::Sync { remote } => vault.sync(&remote),
+        Command::Status => vault.git_status(),
         Command::Views => Ok(json!({"ok":true,"memories":vault.rebuild_views()?})),
         Command::Doctor => vault.doctor(),
         Command::Bootstrap {
@@ -304,6 +313,13 @@ fn run(cli: Cli) -> Result<Value> {
     }
 }
 fn main() {
+    if let Some(result) = recallcard::native::dispatch_launcher() {
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let cli = Cli::parse();
     if let Command::NativeHost {
         scope,
