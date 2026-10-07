@@ -47,3 +47,9 @@ Linux 安装包工作流只在手动启动或 `validate/desktop-*` 分支上执�
 验证提交 `1baa4dc` 的运行 [37613355691](https://github.com/Micraow/RecallCard/actions/runs/37613355691) 在进入应用编译前失败：Node 22 报 `bad option: --test-isolation=none`。本地 Node 24.19.0 的55项DOM已通过，但新增工作流步骤没有同步运行版本。这是测试环境声明遗漏。安装包工作流现固定24.19.0，DOM包根级engines与说明一起收紧；依赖本身的引擎声明保持原样。
 
 参数依据：[Node 24.19.0 官方命令行说明](https://nodejs.org/download/release/v24.19.0/docs/api/cli.html#--test-isolationmode)。本次不重新编译已经通过的程序，因为该轮尚未构建应用；后续仍需完整执行产品验证，不能把版本修正本身算成验收通过。
+
+### 0.4 原生标识核对与成品复用
+
+`76ed836` 的 [37613963636](https://github.com/Micraow/RecallCard/actions/runs/37613963636) 已通过DOM、真实Chromium、完整Rust、正式GUI/CLI和安装包构建。原生第2步在取消文件选择后的资料库标识严格文本断言停止；失败截图与保存的HTML均显示“尚未打开资料库”，原脚本未记录WebDriver当时返回值。
+
+后续核对增加有界等待、实际DOM文字、屏幕内可见矩形及WebDriver原返回值的并列诊断。错误文字或不可见标识仍失败；不重发文件选择和写入操作。已补21项本地驱动合同。使用复用工作流核对程序源码、构建步骤、包内提交与二进制摘要后，重验同一0.4程序，不重新编译。该条记录不能提前表示原生闭环已经通过。
