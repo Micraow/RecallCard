@@ -14,7 +14,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import socket
 import subprocess
 import tempfile
 import time
@@ -282,8 +281,11 @@ class NativeSmoke:
         def ready():
             if server.poll() is not None:
                 raise AssertionError("tauri-driver 启动失败，请检查 tauri-driver.log")
-            with socket.create_connection(("127.0.0.1", 4444), timeout=1):
-                return True
+            # 代理端口先于 WebKitWebDriver 启动；只等 TCP 会让 /session 过早到达。
+            # /status 是实际驱动的只读健康检查，未就绪时继续等，不重复创建会话。
+            with urlopen("http://127.0.0.1:4444/status", timeout=2) as response:
+                status = json.load(response)
+            return status.get("value", {}).get("ready") is True
 
         wait_for(ready, "WebDriver 启动")
         self.driver = WebDriver(self.application)
