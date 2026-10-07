@@ -1,0 +1,81 @@
+name: 分发已验收的桌面安装包
+on:
+  workflow_dispatch:
+  push:
+    branches: ['distribute/desktop-9d76621']
+concurrency:
+  group: desktop-distribution-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  distribute:
+    name: 复用 9d76621 成品，不重新编译
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: 核实来源运行已经成功
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: run } = await github.rest.actions.getWorkflowRun({
+              ...context.repo, run_id: 37579114793
+            });
+            if (run.conclusion !== 'success' || run.head_sha !== '9d7662141c52752b592cf5c6a3e8ec8aaa0157b7') {
+              throw new Error('来源运行或提交不匹配，拒绝分发');
+            }
+      - uses: actions/download-artifact@v4
+        with:
+          name: RecallCard-Desktop-linux-x86_64-9d7662141c52752b592cf5c6a3e8ec8aaa0157b7
+          run-id: '37579114793'
+          github-token: ${{ github.token }}
+          path: original
+      - name: 校验成品并按安装方式归类
+        run: |
+          cd original
+          sha256sum --check SHA256SUMS.txt
+          cd ..
+          python3 - <<'PYTHON'
+          import hashlib, json, pathlib, shutil
+          source = pathlib.Path('original')
+          records = []
+          for suffix, category in [('.deb', 'deb'), ('.zip', 'runtime')]:
+              matches = [p for p in source.iterdir() if p.is_file() and p.suffix == suffix]
+              if len(matches) != 1:
+                  raise SystemExit(f'安装文件数量不正确：{category}')
+              path = matches[0]
+              if not path.stat().st_size:
+                  raise SystemExit('安装文件为空')
+              target = pathlib.Path('distribution') / category
+              target.mkdir(parents=True)
+              shutil.copyfile(path, target / path.name)
+              shutil.copyfile('docs/desktop-quickstart-v0.1.md', target / '开始使用-中文.md')
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              (target / 'SHA256SUMS.txt').write_text(f'{digest}  {path.name}\n')
+              records.append({'file': path.name, 'bytes': path.stat().st_size, 'sha256': digest})
+          target = pathlib.Path('distribution/checksums')
+          target.mkdir()
+          shutil.copyfile(source / 'SHA256SUMS.txt', target / 'SHA256SUMS.txt')
+          (target / '分发来源.json').write_text(json.dumps({'source_commit': '9d7662141c52752b592cf5c6a3e8ec8aaa0157b7', 'source_run': 37579114793, 'unchanged_installers': records}, ensure_ascii=False, indent=2))
+          print(json.dumps(records, ensure_ascii=False, indent=2))
+          PYTHON
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-Desktop-deb-9d76621
+          path: distribution/deb/
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-Desktop-runtime-9d76621
+          path: distribution/runtime/
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-Desktop-checksums-9d76621
+          path: distribution/checksums/
+          if-no-files-found: error
+          retention-days: 30
