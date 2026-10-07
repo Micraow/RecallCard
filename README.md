@@ -10,15 +10,15 @@
 
 默认即可使用本地搜索。整理记忆、浏览器扩展和同步等功能，可以用到时再设置。
 
-工作区0.4正在进行本阶段验收：[操作指南](docs/desktop-quickstart-v0.4.md)。下方下载仍为已交付0.3，验收完成后再更新。
+桌面0.4已通过标准Linux的28步真实窗口验收：[操作指南](docs/desktop-quickstart-v0.4.md)。常用界面集中为会话和记忆两个工作区。
 
 ## 下载与打开
 
-- Linux 安装包：[下载已验收的 0.3.0 安装包](https://github.com/Micraow/RecallCard/actions/runs/37603515640/artifacts/11473229342)（登录 GitHub 后下载 ZIP）；Arch 优先使用 AppImage，Ubuntu 可使用 deb
+- Linux 安装包：[下载 0.4.0 安装包](https://github.com/Micraow/RecallCard/actions/runs/37623800674/artifacts/11482734288)（登录 GitHub 后下载 ZIP）；Arch 优先使用 AppImage，Ubuntu 可使用 deb
 - 已拿到运行 ZIP：解压后运行 `recallcard-desktop` 或 `运行桌面版.sh`
-- [已交付0.3三步指南](docs/desktop-quickstart-v0.3.md) · [遇到问题](docs/desktop-v0.3.md#当前验收边界)
+- [三步指南与验收范围](docs/desktop-quickstart-v0.4.md) · [遇到问题](docs/desktop-v0.3.md#当前验收边界)
 
-安装包工作流会保留带版本和提交号的文件及校验清单。首版优先 Linux；其他平台的核心测试不代表桌面安装包已经实机验收。
+运行ZIP内含CLI与扩展0.3.1。程序提交41e70dd；安装包保留版本、提交号和校验清单。用户自己的Arch/KDE Wayland和登录态网站尚未实测；[0.3旧版](https://github.com/Micraow/RecallCard/actions/runs/37603515640/artifacts/11473229342)继续保留。
 
 ## 下一步
 
