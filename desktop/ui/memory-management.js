@@ -77,6 +77,7 @@ export function createMemoryManagement(ui) {
   function open(row) { if (state.busy) return; ui.discardBefore(() => openNow(row)); }
   async function openNow(row) {
     await run('正在读取完整记忆…', async current => {
+      if (memory().selected?.id !== row.id) ui.resetReaderView();
       clearSelection(); render();
       await cancelServerPreviews();
       const selected = await invoke('managed_memory', { ...args(), id: row.id });

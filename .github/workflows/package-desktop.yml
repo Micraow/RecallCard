@@ -15,30 +15,45 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
           node-version: '24.19.0'
           cache: npm
-          cache-dependency-path: extension/package-lock.json
+          cache-dependency-path: |
+            extension/package-lock.json
+            desktop/tests/local-dom/package-lock.json
+      - name: 准备固定预检工具
+        run: |
+          npm --prefix extension ci --ignore-scripts --no-audit --no-fund
+          npm --prefix desktop/tests/local-dom ci --ignore-scripts --no-audit --no-fund
+          python3 -m venv "$RUNNER_TEMP/recallcard-preflight-env"
+          "$RUNNER_TEMP/recallcard-preflight-env/bin/python" -m pip install --disable-pip-version-check -r scripts/preflight-requirements.txt
+          curl --fail --location --proto '=https' --tlsv1.2 https://github.com/rhysd/actionlint/releases/download/v1.7.11/actionlint_1.7.11_linux_amd64.tar.gz --output "$RUNNER_TEMP/actionlint.tar.gz"
+          printf '%s  %s\n' '900919a84f2229bac68ca9cd4103ea297abc35e9689ebb842c6e34a3d1b01b0a' "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --status
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+      - name: 提交前统一预检
+        run: '"$RUNNER_TEMP/recallcard-preflight-env/bin/python" scripts/preflight.py --actionlint "$RUNNER_TEMP/actionlint" --report "$RUNNER_TEMP/recallcard-preflight.json"'
+      - name: 保存预检报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-preflight-${{ github.sha }}
+          path: ${{ runner.temp }}/recallcard-preflight.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
           cache-on-failure: true
-      - name: 无网络界面模块验证
-        run: |
-          npm --prefix desktop/tests/local-dom ci --ignore-scripts --no-audit --no-fund
-          npm --prefix desktop/tests/local-dom test
       - name: 安装官方构建与验收依赖
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf file webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
       - name: 准备界面验证
         working-directory: extension
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium
       - name: 界面与状态验证
         run: |
-          node --test extension/tests/*.test.js desktop/tests/*.test.js desktop/tests/*.test.mjs
+          node --test desktop/tests/*.test.mjs
           npm --prefix extension run test:browser
       - name: 浏览器保存与桌面跨端合同
         env:

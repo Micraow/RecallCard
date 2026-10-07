@@ -62,6 +62,7 @@ export function createBackground(ui) {
   function open(row) { if (state.busy) return; if (background().draft && background().draft.id !== row.id) { const offset = background().offset; ui.discardBefore(async () => { await load(offset); const fresh = background().rows.find(item => item.id === row.id); if (fresh) await openNow(fresh); }); } else return openNow(row); }
   async function openNow(row) {
     await run('正在读取这条记忆与出处…', async current => {
+      if (background().selected?.id !== row.id) ui.resetReaderView();
       if (background().draft?.id === row.id) {
         const key = backgroundReviewKey(state);
         try {
@@ -183,10 +184,11 @@ export function createBackground(ui) {
   function currentPane() {
     const snapshot = background().snapshot;
     if (!snapshot) return null;
-    const box = $('details', { id: 'background-current', class: 'background-current' },
+    const box = $('details', { id: 'background-current', class: 'background-current', open: Boolean(background().actualOpen) },
       $('summary', {}, `当前实际带上的背景 · ${background().selectedCount || 0} 条已选择`), paragraph('检查实际内容后，再复制到目标 AI。'),
       background().selectedCount === 0 ? hint('还没有选择随身记忆。当前只有使用说明与资料目录。') : null,
       textPreview(snapshot, '当前实际随身背景'));
+    box.addEventListener('toggle', () => { if (box.isConnected) background().actualOpen = box.open; });
     if (background().draft || background().review) box.append(hint('选择尚未保存。请先检查并保存，或取消本次选择后再复制。'));
     else box.append($('div', { class: 'button-row' }, button('复制当前随身背景', copy, true),
       button('带上背景继续会话', () => navigate('conversations'))));
@@ -235,7 +237,7 @@ export function createBackground(ui) {
       ui.memoryToolbar());
     if (background().error) { content.append(hint(`随身背景需要重新核对：${background().error}`, true), button('重新读取随身背景', () => load())); return; }
     if (!background().loaded) { content.append(paragraph('正在读取随身背景…')); return; }
-    content.append($('div', { class: 'section-heading' }, $('span', {}, `已选择 ${background().selectedCount ?? 0} 条 · ${state.memoryFilter === 'selected' ? '已选背景' : '选择背景'}`), $('div', { class: 'button-row' }, button('查看实际背景', () => { state.mobileDetail = true; render(); }, false, 'small'), button('刷新随身背景', () => ui.discardBefore(() => load()), false, 'small'))));
+    content.append($('div', { class: 'section-heading' }, $('span', {}, `已选择 ${background().selectedCount ?? 0} 条 · ${state.memoryFilter === 'selected' ? '已选背景' : '选择背景'}`), $('div', { class: 'button-row' }, button('查看实际背景', () => { background().actualOpen = true; ui.resetReaderView(); state.mobileDetail = true; render(); }, false, 'small'), button('刷新随身背景', () => ui.discardBefore(() => load()), false, 'small'))));
     const list = $('section', { class: 'results background-list list-scroll', 'data-scroll': 'list', 'aria-label': '随身背景记忆列表' });
     const rows = state.memoryFilter === 'selected' ? background().rows.filter(row => row.selected || background().draft?.id === row.id) : background().rows;
     if (!rows.length) list.append($('div', { class: 'empty' }, $('h3', {}, state.memoryFilter === 'selected' ? '还没有已选背景' : '这个范围还没有记忆可选'), paragraph('从已有会话整理记忆，核对后选择每次带上。')));

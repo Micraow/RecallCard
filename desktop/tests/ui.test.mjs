@@ -799,3 +799,44 @@ test('窄窗口能从会话列表进入阅读，再返回列表并打开交接',
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   await assertNoWrite(native);
 });
+
+test('导入完成提示占据自己的布局空间，宽窄窗口都能直接点击交接复制', async t => {
+  const { page, native } = await fixture(t);
+  await page.setViewportSize({ width: 1180, height: 820 });
+  await openVault(page); await previewImport(page);
+  await button(page, '确认导入 2 条记录');
+  await page.locator('#modal').getByRole('button', { name: '确认导入', exact: true }).click(); await idle(page);
+  await openContinuation(page);
+  await page.getByRole('textbox', { name: '接下来要做什么', exact: true }).fill('继续当前任务');
+  await button(page, '准备交接内容'); await idle(page);
+  const copied = await page.getByRole('textbox', { name: '交接内容预览', exact: true }).inputValue();
+  const notice = page.locator('#notice');
+  const copy = page.getByRole('button', { name: '复制交接内容', exact: true });
+  for (const width of [1180, 860]) {
+    await page.setViewportSize({ width, height: 820 });
+    assert.equal(await notice.isVisible(), true);
+    assert.equal(await copy.isEnabled(), true);
+    const [a, b] = await Promise.all([copy.boundingBox(), notice.boundingBox()]);
+    assert(a && b);
+    assert(a.y >= 0 && a.y + a.height <= 820, '复制按钮应留在可见窗口内');
+    const overlap = a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+    assert.equal(overlap, false, '完成提示不得覆盖复制按钮');
+    const before = native.count('write_clipboard');
+    await copy.click(); await idle(page);
+    assert.equal(native.count('write_clipboard'), before + 1);
+    assert.equal(native.matching('write_clipboard').at(-1).payload.text, copied);
+  }
+});
+
+test('窄窗口直接点击查看实际背景即可看见正文，无需测试helper代为展开', async t => {
+  const { page, native } = await fixture(t);
+  await page.setViewportSize({ width: 860, height: 820 });
+  await openVault(page); await navigate(page, '记忆');
+  await page.locator('[data-action="background-select"]').click(); await idle(page);
+  await page.getByRole('button', { name: '查看实际背景', exact: true }).click(); await idle(page);
+  assert.equal(await page.locator('#background-current').evaluate(n => n.open), true);
+  assert.equal(await page.getByRole('textbox', { name: '当前实际随身背景', exact: true }).isVisible(), true);
+  const rect = await page.getByRole('textbox', { name: '当前实际随身背景', exact: true }).boundingBox();
+  assert(rect && rect.y >= 0 && rect.y < 820);
+  assert.equal(native.count('confirm_background_change'), 0);
+});

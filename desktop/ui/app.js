@@ -60,6 +60,12 @@ function restoreView() {
   const saved = state.viewport[content.dataset.view] || {};
   for (const node of content.querySelectorAll('[data-scroll]')) node.scrollTop = saved[node.dataset.scroll] || 0;
 }
+function resetReaderView(key = content.dataset.view) {
+  state.viewport[key] = { ...state.viewport[key], reader: 0, continuation: 0 };
+  if (content.dataset.view === key) {
+    for (const node of content.querySelectorAll('[data-scroll="reader"], [data-scroll="continuation"]')) node.scrollTop = 0;
+  }
+}
 function discardBefore(action) {
   if (!state.memory.mode && !state.background.draft) { action(); return; }
   modal.replaceChildren($('h2', { id: 'modal-title' }, '还有未保存的更改'), paragraph('离开会放弃这次更改。继续编辑会保留当前输入。'), $('div', { class: 'button-row' }, button('继续编辑', () => modal.close()), button('放弃更改', () => { modal.close(); memoryManagement.discard(); background.discard(); action(); }, true)));
@@ -123,6 +129,7 @@ async function locateEventNow(reference, continuation = false) {
     const result = await invoke('conversation_messages', { ...args(), conversationRef: ref, offset: location.offset || 0 });
     if (!current()) return;
     captureView(); state.readerReturn = previous;
+    resetReaderView('conversations:');
     const preservedGoal = state.conversation?.session_ref === ref ? state.continuationGoal : ''; state.resumeConversation = null;
     state.conversation = { session_ref: result.session_ref || ref, title: result.title || location.conversation_title || location.title || '原始会话', platform: result.platform || location.platform, message_count: result.total ?? location.total };
     state.conversationRows = result.messages || []; state.conversationOffset = location.offset || 0;
@@ -188,6 +195,7 @@ async function readRecordValue(item, current) {
 async function loadRecords(preserve = false) {
   await run('正在查找本地资料…', async current => {
     const selected = preserve ? state.selected : null;
+    if (!preserve) { resetReaderView('search:'); state.viewport['search:'].list = 0; }
     state.selected = null; state.sources = []; state.continuation = null; render();
     const query = state.query.trim();
     const result = await invoke(query ? 'search_records' : 'browse_records', { ...args(), target: state.target, ...(query ? { query } : {}) });
@@ -200,6 +208,7 @@ async function loadRecords(preserve = false) {
 }
 async function readRecord(item) {
   await run('正在读取记录与出处…', async current => {
+    if (recordRef(state.selected) !== recordRef(item)) resetReaderView('search:');
     state.selected = null; state.sources = []; render();
     await readRecordValue(item, current);
     if (current()) state.mobileDetail = true;
@@ -362,7 +371,8 @@ function importPage() {
       const batch = result.conversations || [];
       state.importBatch = batch.length ? { conversations: batch, added: result.events_added, duplicates: result.events_duplicates ?? Math.max(0, result.events_seen - result.events_added) } : null;
       const listed = await invoke('list_conversations', { ...args(), offset: 0 });
-      state.conversations = listed.conversations || []; state.conversationTotal = listed.total; state.conversationListNext = listed.next_offset;
+      state.conversations = listed.conversations || []; state.conversationTotal = listed.total; state.conversationListNext = listed.next_offset; state.conversationListOffset = 0;
+      state.viewport['conversations:'] = { list: 0, reader: 0, continuation: 0 };
       state.conversation = null; state.conversationRows = []; state.page = 'conversations'; state.workspace = 'conversations'; state.mobileDetail = false;
       const first = batch[0] || state.conversations[0]; if (first) await readConversation(first, 0, () => true);
       showNotice(`导入完成：新增 ${result.events_added} 条，重复 ${result.events_duplicates ?? Math.max(0, result.events_seen - result.events_added)} 条`);
@@ -384,7 +394,9 @@ async function readConversation(item, offset, current) {
 }
 async function loadConversations(offset = 0, preserve = false) {
   offset = Number.isSafeInteger(offset) ? offset : 0;
+  if (state.importBatch) offset = 0;
   await run('正在读取已保存的会话…', async current => {
+    if (!preserve) resetReaderView('conversations:');
     const selected = preserve ? state.conversation : null;
     const resume = state.resumeConversation;
     const goal = selected ? state.continuationGoal : resume?.goal || ''; const selectedOffset = selected ? state.conversationOffset : resume?.offset || 0;
@@ -414,6 +426,7 @@ async function loadConversations(offset = 0, preserve = false) {
 async function openConversation(item, offset = 0) {
   await run('正在打开会话…', async current => {
     const previous = state.conversation?.session_ref; state.resumeConversation = null;
+    if (previous !== item.session_ref || state.conversationOffset !== offset) resetReaderView('conversations:');
     const goal = previous === item.session_ref ? state.continuationGoal : '';
     state.conversation = null; state.conversationRows = []; state.continuation = null; render();
     await readConversation(item, offset, current);
@@ -598,7 +611,7 @@ document.addEventListener('keydown', event => {
     event.preventDefault(); siblings[Math.max(0, Math.min(siblings.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))]?.focus();
   }
 });
-const sharedUI = { state, content, $, button, paragraph, heading, panel, hint, line, scopeSelect, invoke, run, render, showNotice, confirmDialog, navigate, memoryToolbar, detailBack, technicalDetails, actionButton, locateEvent, showBackground, discardBefore };
+const sharedUI = { state, content, $, button, paragraph, heading, panel, hint, line, scopeSelect, invoke, run, render, showNotice, confirmDialog, navigate, memoryToolbar, detailBack, technicalDetails, actionButton, locateEvent, showBackground, discardBefore, resetReaderView };
 const memoryManagement = createMemoryManagement(sharedUI);
 const background = createBackground(sharedUI);
 render();

@@ -275,3 +275,63 @@ test('整理差异可在原位核对原话，来源失效移除先前证据且�
   assert.equal(ui.document.querySelector('.dream-evidence .body-text'), null);
   assert.match(ui.one('#notice').textContent, /原始出处已不可见/); ui.noWrites();
 });
+
+test('不同会话、消息页和定位目标从顶部阅读，同对象返回保留位置', async t => {
+  const ui = await fixture(t);
+  const first = ui.native.data.conversations[0];
+  ui.native.data.conversations.push({ ...first, session_ref: 'another-conversation', title: '另一段长会话' });
+  ui.native.data.messages = Array.from({ length: 25 }, (_, index) => ({ ref: `event:page-${index}`, role: 'user', text: `第${index}条合成原话`, occurred_at: null }));
+  await ui.openVault();
+  ui.one('.conversation-reader .reader-scroll').scrollTop = 380;
+  await action(ui, '[data-conversation-ref="another-conversation"]');
+  assert.equal(ui.one('.conversation-reader .reader-scroll').scrollTop, 0);
+  ui.one('.conversation-reader .reader-scroll').scrollTop = 240;
+  await ui.click('后续消息');
+  assert.equal(ui.native.matching('conversation_messages').at(-1).payload.offset, 20);
+  assert.equal(ui.one('.conversation-reader .reader-scroll').scrollTop, 0);
+  ui.one('.conversation-reader .reader-scroll').scrollTop = 160;
+  await ui.navigate('记忆'); await ui.navigate('会话');
+  assert.equal(ui.one('.conversation-reader .reader-scroll').scrollTop, 160);
+  ui.native.next('event_location', { ref: 'event:page-3', conversation_ref: first.session_ref, conversation_title: first.title, offset: 3, total: 25 });
+  ui.fill('#query', '来源'); await ui.click('查找'); await action(ui, '.results .result-card:first-child');
+  await ui.click('查看相邻消息');
+  assert.equal(ui.native.matching('conversation_messages').at(-1).payload.offset, 3);
+  assert.equal(ui.one('.conversation-reader .reader-scroll').scrollTop, 0);
+  ui.noWrites();
+});
+
+test('先浏览后页再导入，往返工作区不丢本批前页成果', async t => {
+  const ui = await fixture(t);
+  const seed = ui.native.data.conversations[0];
+  const old = Array.from({ length: 55 }, (_, index) => ({ ...seed, session_ref: `old-${index}`, title: `旧会话 ${index}` }));
+  ui.native.data.conversations = old; await ui.openVault(); await ui.click('更多会话');
+  assert.equal(ui.native.matching('list_conversations').at(-1).payload.offset, 50);
+  await action(ui, '#import-button'); await ui.click('选择文件并预览');
+  ui.check('[aria-label="选择会话：合成第一会话"]'); await ui.click('预览所选会话');
+  const batch = Array.from({ length: 53 }, (_, index) => ({ ...seed, session_ref: `new-${index}`, title: `本批会话 ${index}` }));
+  ui.native.data.conversations = [...batch, ...old];
+  ui.native.next('confirm_import', { events_added: 106, events_seen: 106, events_duplicates: 0, conversations: batch });
+  await ui.click('确认导入 3 条记录'); await ui.click('确认导入', ui.modal());
+  await ui.navigate('记忆'); await ui.navigate('会话');
+  assert.deepEqual([...ui.document.querySelectorAll('.conversation-list [data-conversation-ref]')].map(n => n.dataset.conversationRef), batch.map(c => c.session_ref));
+  const offsets = ui.native.matching('list_conversations').slice(-2).map(c => c.payload.offset);
+  assert.deepEqual(offsets, [0, 50]);
+});
+
+test('查看实际背景明确展开正文，重绘保留开关且从当前区域顶部开始', async t => {
+  const ui = await fixture(t); await ui.openVault(); await ui.navigate('记忆'); await ui.click('选择背景');
+  assert.equal(ui.one('#background-current').open, false);
+  ui.one('.background-detail .reader-scroll').scrollTop = 400;
+  await ui.click('查看实际背景');
+  assert.equal(ui.one('#background-current').open, true);
+  assert.equal(ui.one('.background-detail .reader-scroll').scrollTop, 0);
+  assert.equal(ui.one('.background-layout').classList.contains('show-detail'), true);
+  assert.ok(ui.one('[aria-label="当前实际随身背景"]').value);
+  ui.check('[data-memory-id="mem_background"] input');
+  assert.equal(ui.one('#background-current').open, true);
+  await action(ui, '#background-current > summary');
+  assert.equal(ui.one('#background-current').open, false);
+  await ui.click('查看实际背景');
+  assert.equal(ui.one('#background-current').open, true);
+  ui.noWrites();
+});
