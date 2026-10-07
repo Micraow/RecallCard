@@ -14,4 +14,6 @@ pub mod import;
 pub mod native;
 
 pub mod agent_hook;
+pub mod ipc;
+pub mod semantic;
 pub mod sync;

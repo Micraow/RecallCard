@@ -43,16 +43,24 @@
 - Hook 回归既调用库，也直接启动 RecallCard CLI；不运行外部 Agent，不自动安装配置
 - 对应 [浏览器适配](browser-adapters-v0.3.md) 与 [生命周期 Hook](agent-hooks-v0.3.md) 文档说明实机验证边界
 
+## 已接线、等待平台 CI：本机 IPC 与语义检索
+
+- Unix socket / Windows named pipe 只读 daemon，Vault/scope 固定绑定、有界帧、超时、私有端点与单实例保护
+- MCP、Native host 与生成的固定 Native 配置可选择 IPC；服务不可用时返回错误，不暗自换回直接读盘
+- Rust 监督 Python worker，兼容空间/当前 generation 校验、融合排序、等待后再检查权限/有效期；错误或超时退回文本检索
+- `search`、本地 `mcp`、`daemon` 的语义配置由可信启动参数指定；默认离线，云 query 需单独明确配置授权
+- 本机云终端底层拒绝 Unix socket bind（EPERM），包括标准库最小 bind；授权后的相同测试仍受限，真实 IPC 测试保留在 CI 中，不跳过也不记为通过
+- 该段先在验证分支运行现有三平台 CI，成功后才推进 main；详见 [IPC](ipc-v0.3.md) 和 [语义检索](semantic-search-v0.3.md)
+
 ## 下一步与未完成范围
 
-1. 独立 daemon 与本机 IPC；当前 MCP/Native 直接调用同一 Rust core
-2. Python worker 监督/自动接入 MCP 混合检索；目前显式导出与调用，不将旧缓存结果自动暴露给模型
-3. 实际 Agent 首次/恢复/compact 后加载，以及扩展安装后的真实网页端到端验证
-4. 大型资料库持久增量索引与性能验证；当前每次读取正本构建文本快照
+1. 本机 IPC 与语义后端的远端平台回归，以及真实安装验证
+2. 实际 Agent 首次/恢复/compact 后加载，以及扩展安装后的真实网页端到端验证
+3. 大型资料库持久增量索引与性能验证；当前每次读取正本构建文本快照
 
 ## 验证边界
 
-- 2026-10-07 当前 Linux 工作区重新执行：161 项 Rust、105 项 Python（包括 Rust→fake API→Rust review 合同）、74 项 Node 测试全部通过，格式检查与严格 Clippy 通过
+- 2026-10-07 本段 Linux 工作区：190 项不需要 socket 的 Rust 测试、105 项 Python（包括 Rust→fake API→Rust review 合同）、74 项 Node 全部通过，格式与严格 Clippy 通过；另有真实 IPC 端点/桥接测试被本机 EPERM 阻挡，未计入通过数，须由本段 CI 实跑
 - Rust→Python embedding 导出/哈希/增量缓存/撤权过滤合同独立通过
 - 已修复工作流 runner 上下文、Windows 严格告警、macOS 父目录别名；Windows 原子替换短暂占用修复及恢复阶段 d3105ef 已在三平台 Actions 全部通过；本段新改动另跑独立 CI，详见 [CI 修复记录](ci.md)
 - Linux/macOS/Windows CI 的每次结果绑定具体提交；本机通过不等于远端通过，也不等于浏览器安装验收

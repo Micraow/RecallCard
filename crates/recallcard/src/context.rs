@@ -1,5 +1,5 @@
 //! 四个只读能力。先授权/抑制过滤，再排序与预算，避免跨范围信息泄漏。
-use crate::{model::*, policy::Access, Vault};
+use crate::{model::*, policy::Access, semantic::SemanticSearch, Vault};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -84,7 +84,7 @@ impl Document {
             && !self.valid_to.is_some_and(|end| end <= time)
     }
 
-    fn current_memory_at(&self, time: DateTime<Utc>) -> bool {
+    pub(crate) fn current_memory_at(&self, time: DateTime<Utc>) -> bool {
         self.kind == "memory"
             && matches!(self.state.as_str(), "active" | "tentative")
             && self.valid_at(time)
@@ -94,10 +94,23 @@ impl Document {
 pub struct Context<'a> {
     vault: &'a Vault,
     access: Access,
+    semantic: Option<&'a SemanticSearch>,
 }
 impl<'a> Context<'a> {
     pub fn new(vault: &'a Vault, access: Access) -> Self {
-        Self { vault, access }
+        Self {
+            vault,
+            access,
+            semantic: None,
+        }
+    }
+    /// 只由可信启动代码注入；SearchArgs 不包含配置、路径或网络开关。
+    pub fn with_semantic(vault: &'a Vault, access: Access, semantic: &'a SemanticSearch) -> Self {
+        Self {
+            vault,
+            access,
+            semantic: Some(semantic),
+        }
     }
     pub fn documents(&self) -> Result<Vec<Document>> {
         let _read_guard = self.vault.read_guard()?;
@@ -248,40 +261,65 @@ impl<'a> Context<'a> {
         {
             return Err("未知 target/detail".into());
         }
-        // 仅用当前时刻选择有效记录，不将每次变化的 now 写入响应或游标绑定。
-        let effective_time = args.as_of.unwrap_or_else(Utc::now);
-        let docs = self
-            .documents()?
-            .into_iter()
-            .filter(|d| {
-                if args.target == "memories" && d.kind != "memory"
-                    || args.target == "events" && d.kind != "event"
-                {
-                    return false;
-                }
-                if let Some(session) = &args.session_ref {
-                    if d.session_ref.as_ref() != Some(session) {
-                        return false;
+        // worker 等待期间不持有 Vault 锁，遗忘/撤权写入可立即生效。
+        let candidate_result = if let Some(semantic) = self.semantic {
+            let snapshot = self.documents()?;
+            let now = Utc::now();
+            let selected = search_documents(&snapshot, &args, now);
+            Some(semantic.candidates(
+                &args.query,
+                &snapshot,
+                &selected,
+                &self.access.scopes(),
+                now,
+            ))
+        } else {
+            None
+        };
+        // worker 返回后重读正本并重新计算有效时间；保持最终读取锁到响应构造结束。
+        let _final_read_guard = self.vault.read_guard()?;
+        let current = self.documents()?;
+        let now = Utc::now();
+        let docs = search_documents(&current, &args, now);
+        let mut semantic_error = None;
+        let semantic_refs = match candidate_result {
+            Some(Ok(candidates)) => {
+                match candidates.revalidate(&current, &self.access.scopes(), now) {
+                    Ok(()) => Some(candidates.references),
+                    Err(error) => {
+                        semantic_error = Some(error.0);
+                        None
                     }
                 }
-                if args.as_of.is_some() {
-                    if d.kind == "event" && d.occurred_at.is_some_and(|t| t > effective_time) {
-                        return false;
-                    }
-                    if d.kind == "memory" && !d.valid_at(effective_time) {
-                        return false;
-                    }
-                } else if d.kind == "memory" && !d.current_memory_at(effective_time) {
-                    return false;
-                }
-                true
-            })
-            .collect::<Vec<_>>();
+            }
+            Some(Err(error)) => {
+                semantic_error = Some(error.0);
+                None
+            }
+            None => None,
+        };
         let generation = hash(&serde_json::to_vec(&docs).map_err(|e| e.to_string())?);
+        let tokens = tokenize(&args.query);
+        let mut ranked = rank(&docs, &tokens, &args.query);
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.reference.cmp(&b.1.reference)));
+        if let Some(references) = &semantic_refs {
+            ranked = fuse(&docs, &ranked, references);
+        }
+        // 排名路径或向量缓存变化也使游标失效，避免分页丢项或重复。
+        let ranking_signature = hash(
+            &serde_json::to_vec(
+                &ranked
+                    .iter()
+                    .map(|(score, document)| (score, &document.reference))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|e| e.to_string())?,
+        );
         let binding = hash(
             format!(
-                "{}:{}:{}:{:?}:{:?}:{:?}",
+                "{}:{}:{}:{}:{:?}:{:?}:{:?}",
                 generation,
+                ranking_signature,
                 args.query,
                 args.target,
                 args.session_ref,
@@ -299,9 +337,6 @@ impl<'a> Context<'a> {
         } else {
             0
         };
-        let tokens = tokenize(&args.query);
-        let mut ranked = rank(&docs, &tokens, &args.query);
-        ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.reference.cmp(&b.1.reference)));
         let total = ranked.len();
         if offset > total {
             return Err("游标超出范围".into());
@@ -338,6 +373,14 @@ impl<'a> Context<'a> {
         let next = offset + consumed;
         let truncated = next < total;
         let mut response = json!({"results":results,"coverage":{"event_search":"available","semantic_search":"unavailable","undreamed_events_included":true,"scope_filtered":true,"indexed_generation":generation},"truncated":truncated,"next_cursor":if truncated&&consumed>0{Some(format!("{binding}:{next}"))}else{None},"budget_exhausted":truncated&&consumed==0,"budget_unit":"conservative_utf8_bytes"});
+        if let Some(references) = &semantic_refs {
+            response["coverage"]["semantic_search"] = json!("available");
+            response["coverage"]["semantic_candidates"] = json!(references.len());
+            response["coverage"]["semantic_coverage"] = json!("indexed_current_memories");
+            response["coverage"]["ranking"] = json!("rrf");
+        } else if let Some(error) = semantic_error {
+            response["coverage"]["semantic_error"] = json!(error);
+        }
         while json_size(&response)? > args.budget_tokens {
             let count = response["results"].as_array().unwrap().len();
             if count == 0 {
@@ -545,6 +588,73 @@ pub fn tokenize(text: &str) -> Vec<String> {
     }
     tokens
 }
+fn search_documents(
+    documents: &[Document],
+    args: &SearchArgs,
+    now: DateTime<Utc>,
+) -> Vec<Document> {
+    let effective_time = args.as_of.unwrap_or(now);
+    documents
+        .iter()
+        .filter(|document| {
+            if (args.target == "memories" && document.kind != "memory")
+                || (args.target == "events" && document.kind != "event")
+                || args
+                    .session_ref
+                    .as_ref()
+                    .is_some_and(|session| document.session_ref.as_ref() != Some(session))
+            {
+                return false;
+            }
+            if args.as_of.is_some() {
+                !(document.kind == "event"
+                    && document
+                        .occurred_at
+                        .is_some_and(|time| time > effective_time))
+                    && !(document.kind == "memory" && !document.valid_at(effective_time))
+            } else {
+                document.kind != "memory" || document.current_memory_at(effective_time)
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+fn fuse<'a>(
+    documents: &'a [Document],
+    lexical: &[(f64, &'a Document)],
+    semantic: &[String],
+) -> Vec<(f64, &'a Document)> {
+    let current: BTreeMap<&str, &Document> = documents
+        .iter()
+        .map(|document| (document.reference.as_str(), document))
+        .collect();
+    let mut scores: BTreeMap<&str, f64> = BTreeMap::new();
+    for ranking in [
+        lexical
+            .iter()
+            .map(|(_, document)| document.reference.as_str())
+            .collect::<Vec<_>>(),
+        semantic.iter().map(String::as_str).collect(),
+    ] {
+        let mut seen = BTreeSet::new();
+        let mut rank = 0;
+        for reference in ranking {
+            if !current.contains_key(reference) || !seen.insert(reference) {
+                continue;
+            }
+            rank += 1;
+            *scores.entry(reference).or_default() += 1.0 / (60.0 + rank as f64);
+        }
+    }
+    let mut output = scores
+        .into_iter()
+        .map(|(reference, score)| (score, current[reference]))
+        .collect::<Vec<_>>();
+    output.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.reference.cmp(&b.1.reference)));
+    output
+}
+
 fn rank<'a>(docs: &'a [Document], query: &[String], raw: &str) -> Vec<(f64, &'a Document)> {
     let corpus: Vec<Vec<String>> = docs
         .iter()
@@ -617,7 +727,8 @@ fn json_size(value: &Value) -> Result<usize> {
 impl<'a> Context<'a> {
     pub fn embedding_corpus(&self) -> Result<Value> {
         let now = Utc::now();
-        let documents=self.documents()?.into_iter().filter(|d|d.current_memory_at(now)).map(|d|json!({"ref":d.reference,"content_hash":hash(d.text.as_bytes()),"text":d.text,"scope":d.scope})).collect::<Vec<_>>();
+        let documents =
+            crate::semantic::corpus_documents(&self.documents()?, &self.access.scopes(), now);
         let generation = hash(&serde_json::to_vec(&documents).map_err(|e| e.to_string())?);
         Ok(
             json!({"schema":"recallcard.embedding-corpus/1","generation":generation,"scope":self.access.scopes(),"documents":documents}),

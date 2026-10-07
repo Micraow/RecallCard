@@ -56,6 +56,8 @@ enum Command {
         origin: String,
         #[arg(long)]
         parent_window: Option<u64>,
+        #[arg(long)]
+        ipc_endpoint: Option<PathBuf>,
     },
     /// 生成待人工检查/注册的 Native Messaging 文件
     NativeInstall {
@@ -65,6 +67,8 @@ enum Command {
         extension_id: String,
         #[arg(long)]
         output_dir: PathBuf,
+        #[arg(long)]
+        ipc_endpoint: Option<PathBuf>,
     },
     /// 人工管理长期记忆
     Memory {
@@ -124,11 +128,31 @@ enum Command {
         detail: String,
         #[arg(long)]
         cursor: Option<String>,
+        /// 由本机维护者固定的可选语义 worker 配置；默认不启用
+        #[arg(long)]
+        semantic_config: Option<PathBuf>,
     },
     /// 为本地 Agent 提供四个只读工具；范围由此处绑定
     Mcp {
         #[arg(long, required = true)]
         scope: Vec<String>,
+        #[arg(long)]
+        ipc_endpoint: Option<PathBuf>,
+        #[arg(long, conflicts_with = "ipc_endpoint")]
+        semantic_config: Option<PathBuf>,
+    },
+    /// 启动固定资料库和范围的只读本机 IPC 服务
+    Daemon {
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+        #[arg(long)]
+        endpoint: Option<PathBuf>,
+        #[arg(long, default_value_t = 5000)]
+        timeout_ms: u64,
+        #[arg(long, default_value_t = 16)]
+        max_connections: usize,
+        #[arg(long)]
+        semantic_config: Option<PathBuf>,
     },
     /// 只读响应 Claude Code 启动/恢复/压缩生命周期，不运行外部 Agent
     AgentHook {
@@ -252,7 +276,14 @@ fn run(cli: Cli) -> Result<Value> {
             scope,
             extension_id,
             output_dir,
-        } => recallcard::native::prepare_install(&vault, scope, &extension_id, &output_dir),
+            ipc_endpoint,
+        } => recallcard::native::prepare_install_with_ipc(
+            &vault,
+            scope,
+            &extension_id,
+            &output_dir,
+            ipc_endpoint,
+        ),
         Command::NativeHost { .. } => Err("Native host 必须使用 framed stdio 模式".into()),
         Command::Dream { action } => match action {
             DreamCommand::Export {
@@ -347,17 +378,59 @@ fn run(cli: Cli) -> Result<Value> {
             as_of,
             detail,
             cursor,
-        } => Context::new(&vault, Access::new(scope)?).search(SearchArgs {
-            query,
-            target,
-            session_ref,
-            as_of,
-            limit,
-            detail,
-            budget_tokens,
-            cursor,
-        }),
+            semantic_config,
+        } => {
+            let semantic = semantic_config
+                .as_ref()
+                .map(|path| recallcard::semantic::SemanticSearch::from_config_file(path))
+                .transpose()?;
+            let access = Access::new(scope)?;
+            let context = match semantic.as_ref() {
+                Some(semantic) => Context::with_semantic(&vault, access, semantic),
+                None => Context::new(&vault, access),
+            };
+            context.search(SearchArgs {
+                query,
+                target,
+                session_ref,
+                as_of,
+                limit,
+                detail,
+                budget_tokens,
+                cursor,
+            })
+        }
         Command::Mcp { .. } => Err("MCP 必须以 stdio 模式启动".into()),
+        Command::Daemon {
+            scope,
+            endpoint,
+            timeout_ms,
+            max_connections,
+            semantic_config,
+        } => {
+            let access = Access::new(scope)?;
+            let endpoint = match endpoint {
+                Some(endpoint) => endpoint,
+                None => recallcard::ipc::default_endpoint(&vault, &access)?,
+            };
+            let mut server = recallcard::ipc::Server::bind(
+                vault,
+                access,
+                endpoint.clone(),
+                recallcard::ipc::Options {
+                    request_timeout: std::time::Duration::from_millis(timeout_ms),
+                    max_connections,
+                },
+            )?;
+            if let Some(path) = semantic_config {
+                server = server.with_semantic(std::sync::Arc::new(
+                    recallcard::semantic::SemanticSearch::from_config_file(&path)?,
+                ));
+            }
+            eprintln!("RecallCard 本机只读服务：{}", endpoint.display());
+            server.run()?;
+            Ok(json!({"ok":true}))
+        }
         Command::AgentHook {
             scope,
             budget_tokens,
@@ -384,16 +457,28 @@ fn main() {
         scope,
         allowed_extension,
         origin,
+        ipc_endpoint,
         ..
     } = &cli.command
     {
         let result = Vault::open(&cli.vault).and_then(|vault| {
-            recallcard::native::serve_native(
-                &vault,
-                Access::new(scope.clone())?,
-                allowed_extension,
-                origin,
-            )
+            let access = Access::new(scope.clone())?;
+            if let Some(endpoint) = ipc_endpoint {
+                let client = recallcard::ipc::Client::new(
+                    &vault,
+                    &access,
+                    endpoint.clone(),
+                    std::time::Duration::from_secs(5),
+                )?;
+                return recallcard::native::serve_native_service_io(
+                    |name, args| client.invoke(name, args),
+                    allowed_extension,
+                    origin,
+                    std::io::stdin().lock(),
+                    std::io::stdout().lock(),
+                );
+            }
+            recallcard::native::serve_native(&vault, access, allowed_extension, origin)
         });
         if let Err(error) = result {
             eprintln!("{error}");
@@ -401,9 +486,37 @@ fn main() {
         }
         return;
     }
-    if let Command::Mcp { scope } = &cli.command {
+    if let Command::Mcp {
+        scope,
+        ipc_endpoint,
+        semantic_config,
+    } = &cli.command
+    {
         let result = Vault::open(&cli.vault).and_then(|vault| {
-            recallcard::transport::serve_mcp(&vault, Access::new(scope.clone())?)
+            let access = Access::new(scope.clone())?;
+            if let Some(endpoint) = ipc_endpoint {
+                let client = recallcard::ipc::Client::new(
+                    &vault,
+                    &access,
+                    endpoint.clone(),
+                    std::time::Duration::from_secs(5),
+                )?;
+                return recallcard::transport::serve_mcp_service_io(
+                    |name, args| client.invoke(name, args),
+                    std::io::stdin().lock(),
+                    std::io::stdout().lock(),
+                );
+            }
+            if let Some(path) = semantic_config {
+                let semantic = recallcard::semantic::SemanticSearch::from_config_file(path)?;
+                let context = Context::with_semantic(&vault, access, &semantic);
+                return recallcard::transport::serve_mcp_service_io(
+                    |name, args| recallcard::transport::invoke(&context, name, args),
+                    std::io::stdin().lock(),
+                    std::io::stdout().lock(),
+                );
+            }
+            recallcard::transport::serve_mcp(&vault, access)
         });
         if let Err(error) = result {
             eprintln!("{error}");

@@ -19,7 +19,7 @@ RecallCard 是本地优先、文件原生的个人上下文层。Rust 主程序�
 - 可选 Python 向量 worker：空间签名、增量复用、权限过滤与离线降级
 - 可选 API Dream：固定前缀、请求预算、usage 记录，只生成待审核提议
 
-这是开发中的分阶段实现，不代表整份设计已完成。向量 worker 还未自动接入 MCP 检索，独立 daemon/IPC 与真实宿主生命周期验收仍在继续，见[实施进度](docs/progress.md)。核心离线功能不需要 Python、API key 或向量数据库。
+这是开发中的分阶段实现，不代表整份设计已完成。独立 daemon/IPC 与可选 MCP 语义后端已接线，正在验证分支跑跨平台验收；真实宿主生命周期验收仍在继续，见[实施进度](docs/progress.md)。核心离线功能不需要 Python、API key 或向量数据库。
 
 ## 快速开始
 
@@ -72,6 +72,8 @@ vault/
 - [Agent 生命周期 Hook v0.3](docs/agent-hooks-v0.3.md)
 - [安全 Git 同步](docs/sync.md)
 - [可选向量 worker](docs/embedding.md)
+- [本机 IPC 与桥接 v0.3](docs/ipc-v0.3.md)
+- [可选语义检索 v0.3](docs/semantic-search-v0.3.md)
 - [可选 API Dream](docs/dream-api.md)
 - [跨平台 CI 修复记录](docs/ci.md)
 - [具名 View、实体与有效期](docs/context-v0.3.md)
