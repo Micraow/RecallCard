@@ -2,6 +2,12 @@
 
 桌面版使用 Tauri 2，直接复用 RecallCard 的本地 Rust 核心。它和 CLI 共用同一个 Vault，无须迁移已有资料。首版优先 Linux x86_64，界面全中文。
 
+## 运行 Linux 成品包
+
+解压后双击 `recallcard-desktop`，或在解压目录运行 `./运行桌面版.sh`。包内带现有 CLI 与扩展目录；不需要 Rust、Node 或 Python。需要 Git、GLIBC 2.39+、GTK 3 和系统正常安装的 WebKitGTK 4.1 运行库。在 Arch Linux 上请使用系统包管理器安装 `webkit2gtk-4.1` 和 `git`，由它解析 GTK 等依赖。
+
+这是桌面预览构建（dev profile，已去除调试信息、未做发布优化）。可运行包不捆绑系统动态库，不安装后台服务。
+
 ## 第一条使用路径
 
 1. 启动 `recallcard-desktop`，点「创建新资料库」并在原生窗口选择一个空文件夹；已有 Vault 点「打开已有资料库」。再次确认后，应用初始化所选目录
@@ -47,6 +53,8 @@ cargo build --locked --manifest-path desktop/src-tauri/Cargo.toml
 
 ## 验证记录
 
-服务层已通过 Linux 上 106 项相关 Rust 测试，覆盖取消、改范围、换资料库、文件替换、过期 Dream read-set、受保护批准和正常导入/读取/发布。Windows/macOS CI 发现的文件身份与系统目录别名差异已修复，三平台全 targets 的 Clippy 与交叉编译通过，原生 CI 复跑中。Linux Tauri 2.12.1 窗口程序已构建成功、桌面 Clippy 通过；6 项前端状态测试通过。12 项真实 Chromium 合成交互测试随桌面 CI 执行，本机 Chromium 进程因套接字权限无法启动。
+服务层测试覆盖取消、改范围、换资料库、文件替换、过期 Dream read-set、受保护批准和正常导入/读取/发布。macOS 系统目录别名与 Windows 原生文件身份检查已有专门回归。Linux Tauri 2.12.1 程序在本机构建成功，桌面 Clippy 通过。
 
-完整桌面交互和原生窗口验收完成后，在本节追加确切版本与结果。此处不把服务层测试当成原生窗口测试，也不把合成页面测试当成已安装浏览器扩展的验证。
+提交 `88461b8` 的全部现有 CI 已通过：三平台 Rust、Python、Node、Linux Tauri 构建，以及 18 项真实 Chromium 的界面/状态回归。Chromium 用例使用合成原生响应，不等于 Tauri/Rust 完整链路。
+
+dot 云端桌面已通过正常启动器实际尝试运行，系统缺少标准路径的 `WebKitNetworkProcess`，因此没有完成原生窗口验收。仅解压官方系统库足以构建，但不足以运行该发行版写死辅助程序路径的 WebKit；没有修改系统策略或动态库。已增加 GitHub Linux runner 上使用正常系统依赖、官方 WebDriver 和 Xvfb 的真实 Tauri 验收，结果以对应 CI 为准。
