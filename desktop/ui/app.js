@@ -482,7 +482,7 @@ function conversationPage() {
   const header = $('div', { class: 'reader-heading' }, detailBack(), $('div', { class: 'reader-title' }, $('h2', {}, state.conversation?.title || '选择一段会话'), state.conversation ? $('span', { class: 'muted' }, `${state.conversation.platform || '来源未知'} · ${scopeLabel(state.scope)}`) : null));
   const body = $('div', { class: 'reader-scroll', 'data-scroll': 'reader' });
   if (state.conversation) {
-    header.append(actionButton('带到另一个AI', () => { state.continuationOpen = true; render(); }, 'open-continuation', true));
+    header.append(actionButton('带到另一个AI', () => { state.continuationOpen = true; state.mobileDetail = true; render(); }, 'open-continuation', true));
     body.append($('details', { class: 'coverage-details' }, $('summary', {}, '消息覆盖范围'), paragraph(state.conversationOrderKnown ? '保留已保存片段中的消息顺序；未加载或未保存的历史不在其中。' : '部分片段没有可核实的先后关系，其余按保存顺序显示，不代表原始时间顺序。')));
     for (const row of state.conversationRows || []) body.append($('article', { class: `conversation-message ${row.ref === state.focusedEvent ? 'located-message' : ''}`, 'data-reference': row.ref },
       $('div', { class: 'result-meta' }, $('strong', { class: 'message-role' }, roleLabel(row.role)), $('span', { class: 'muted' }, displayDate(row.occurred_at))),

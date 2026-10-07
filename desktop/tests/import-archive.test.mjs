@@ -1,7 +1,7 @@
 // 合成备份的真实 Chromium DOM；原生命令由边界 fixture 响应，Rust 边界另有集成测试。
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { workspaceAssets, idle, button, navigate, openImport } from './workspace-browser-helpers.mjs';
+import { captureBrowserEvidence, workspaceAssets, idle, button, navigate, openImport } from './workspace-browser-helpers.mjs';
 import { chromium } from '../../extension/node_modules/playwright/index.mjs';
 const vault = {session_id:'synthetic',root:'/synthetic/vault',display_name:'合成资料库',scopes:['personal'],event_count:0,memory_count:0,health:{ok:true}};
 const selection = {selection_id:'synthetic-archive',session_id:vault.session_id,file_name:'synthetic.zip',scope:'personal',file_hash:'synthetic-hash',byte_count:1024,
@@ -21,7 +21,7 @@ after(async()=>{await browser?.close();});
 async function fixture(t, chosen=selection){
   const page=await browser.newPage({locale:'zh-CN',timezoneId:'UTC'});page.setDefaultTimeout(5000);
   const calls=[];const errors=[];let failure=null;let imported=false;page.on('pageerror',e=>errors.push(e.message));
-  t.after(async()=>{await page.close();assert.deepEqual(errors,[]);});
+  t.after(async()=>{if(!t.passed||errors.length)await captureBrowserEvidence(page,`import-failure-${t.name}`);await page.close();assert.deepEqual(errors,[]);});
   await page.exposeFunction('__invoke',async(command,payload)=>{
     calls.push({command,payload});
     if(failure?.command===command){const error=failure.message;failure=null;throw new Error(error);}

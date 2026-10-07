@@ -1,6 +1,27 @@
 // 共享真实浏览器交互：仅点击、填写与等待公开 UI，不从 helper 调用原生桥。
 // UI 资源保持明确白名单，任一页面请求到外网或未列出的资源都会由 fixture 阻断。
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
+export async function captureBrowserEvidence(page, label) {
+  const directory = process.env.RECALLCARD_BROWSER_ARTIFACTS;
+  if (!directory) return;
+  await mkdir(directory, { recursive: true });
+  const name = label.replace(/[^\p{L}\p{N}-]+/gu, '-').slice(0, 100);
+  const layout = await page.evaluate(() => ({
+    viewport: { width: innerWidth, height: innerHeight },
+    workspace: document.querySelector('.workspace-split')?.className,
+    controls: ['#notice', '#continuation-panel', '.copy-continuation', '.conversation-list', '.reader-scroll'].map(selector => {
+      const node = document.querySelector(selector);
+      if (!node) return { selector, present: false };
+      const rect = node.getBoundingClientRect();
+      return { selector, present: true, rectangle: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, display: getComputedStyle(node).display };
+    }),
+  }));
+  await writeFile(join(directory, `${name}.json`), JSON.stringify(layout, null, 2));
+  await writeFile(join(directory, `${name}.html`), await page.content());
+  await page.screenshot({ path: join(directory, `${name}.png`), fullPage: false });
+}
 
 export async function workspaceAssets() {
   const assets = new Map();

@@ -2,7 +2,7 @@
 // 运行前在 extension 执行 npm ci 和 npx playwright install chromium。
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { workspaceAssets, idle, button, navigate, openImport, openConnections, openSearch, openDream, openContinuation, closeContinuation, openNote, expandDetails } from './workspace-browser-helpers.mjs';
+import { captureBrowserEvidence, workspaceAssets, idle, button, navigate, openImport, openConnections, openSearch, openDream, openContinuation, closeContinuation, openNote, expandDetails } from './workspace-browser-helpers.mjs';
 import { chromium } from '../../extension/node_modules/playwright/index.mjs';
 
 const vault = {
@@ -68,6 +68,7 @@ async function fixture(t) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   t.after(async () => {
+    if (!t.passed || errors.length) await captureBrowserEvidence(page, `ui-failure-${t.name}`);
     await page.close();
     assert.deepEqual(errors, [], '页面不应产生未处理的 JavaScript 异常');
   });
@@ -814,6 +815,7 @@ test('导入完成提示占据自己的布局空间，宽窄窗口都能直接�
   const copy = page.getByRole('button', { name: '复制交接内容', exact: true });
   for (const width of [1180, 860]) {
     await page.setViewportSize({ width, height: 820 });
+    await captureBrowserEvidence(page, `notice-handoff-${width}`);
     assert.equal(await notice.isVisible(), true);
     assert.equal(await copy.isEnabled(), true);
     const [a, b] = await Promise.all([copy.boundingBox(), notice.boundingBox()]);

@@ -335,3 +335,15 @@ test('查看实际背景明确展开正文，重绘保留开关且从当前区�
   assert.equal(ui.one('#background-current').open, true);
   ui.noWrites();
 });
+
+test('自动导入选中后打开接续进入详情状态，缩窄时不会退回列表', async t => {
+  const ui = await fixture(t); await ui.openVault(); await action(ui, '#import-button');
+  await ui.click('选择文件并预览'); ui.check('[aria-label="选择会话：合成第一会话"]');
+  await ui.click('预览所选会话'); await ui.click('确认导入 3 条记录'); await ui.click('确认导入', ui.modal());
+  assert.equal(ui.one('.conversation-layout').classList.contains('show-detail'), false);
+  await ui.click('带到另一个AI');
+  assert.equal(ui.one('.conversation-layout').classList.contains('show-detail'), true);
+  assert.ok(ui.one('#continuation-panel'));
+  await ui.click('返回阅读');
+  assert.equal(ui.one('.conversation-layout').classList.contains('show-detail'), true);
+});
