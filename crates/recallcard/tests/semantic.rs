@@ -13,6 +13,15 @@ use std::{
 };
 use tempfile::TempDir;
 
+// 各用例同时冷启动 Python 会争抢 CI 进程/防病毒扫描资源，混淆协议与启动时限。
+// 仅串行独立 fixture；同一测试内部的并发查询、撤权和真实超时仍完整执行。
+fn fixture_process_guard() -> std::sync::MutexGuard<'static, ()> {
+    static PROCESS_FIXTURES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    PROCESS_FIXTURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 struct Fixture {
     directory: TempDir,
     vault: Vault,
@@ -63,7 +72,7 @@ impl Fixture {
             expected_space_signature: signature,
             query_cache_path: Some(self.path("queries.json")),
             cloud_query: None,
-            timeout_ms: 3000,
+            timeout_ms: 10000,
         }
     }
     fn fake(&self, config: &mut SemanticConfig, body: &str) {
@@ -121,6 +130,7 @@ const ECHO: &str = "for line in sys.stdin:\n    r=json.loads(line)\n    result={
 
 #[test]
 fn real_python_offline_semantics_adds_nonlexical_memory_and_keeps_event() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let config = fixture.config("lexical");
     let response = fixture.search(config, "lexical");
@@ -136,6 +146,7 @@ fn real_python_offline_semantics_adds_nonlexical_memory_and_keeps_event() {
 
 #[test]
 fn default_search_does_not_need_python_or_configuration() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let response = fixture.context().search(args("lexical")).unwrap();
     assert_eq!(response["coverage"]["semantic_search"], "unavailable");
@@ -145,6 +156,7 @@ fn default_search_does_not_need_python_or_configuration() {
 
 #[test]
 fn absent_query_approval_never_launches_worker_even_with_index() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let mut config = fixture.config("different exact query");
     config.python = fixture.path("missing-python");
@@ -153,6 +165,7 @@ fn absent_query_approval_never_launches_worker_even_with_index() {
 
 #[test]
 fn missing_python_is_safe_text_fallback() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let mut config = fixture.config("lexical");
     config.python = fixture.path("missing-python");
@@ -163,6 +176,7 @@ fn missing_python_is_safe_text_fallback() {
 
 #[test]
 fn stale_incomplete_incompatible_and_bad_content_caches_fall_back() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     for (field, value, code) in [
         ("generation", json!("a".repeat(64)), "generation_mismatch"),
@@ -187,6 +201,7 @@ fn stale_incomplete_incompatible_and_bad_content_caches_fall_back() {
 
 #[test]
 fn cache_scope_cannot_expand_client_access() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let config = fixture.config("lexical");
     fixture.edit_index(|index| index["scope"] = json!(["personal", "project:private"]));
@@ -195,6 +210,7 @@ fn cache_scope_cannot_expand_client_access() {
 
 #[test]
 fn request_cannot_choose_startup_configuration() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let semantic = SemanticSearch::new(fixture.config("lexical")).unwrap();
     let context = Context::with_semantic(&fixture.vault, access(), &semantic);
@@ -214,6 +230,7 @@ fn request_cannot_choose_startup_configuration() {
 
 #[test]
 fn real_subprocess_timeout_is_bounded_and_does_not_restart() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let mut config = fixture.config("lexical");
     config.timeout_ms = 100;
@@ -230,6 +247,7 @@ fn real_subprocess_timeout_is_bounded_and_does_not_restart() {
 
 #[test]
 fn child_exit_malformed_and_oversized_stdout_are_bounded() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     for (body, code) in [
         ("return 3", "worker_exited"),
@@ -249,6 +267,7 @@ fn child_exit_malformed_and_oversized_stdout_are_bounded() {
 
 #[test]
 fn worker_error_message_is_not_exposed() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let mut config = fixture.config("lexical");
     fixture.fake(&mut config,"r=json.loads(sys.stdin.readline())\nprint(json.dumps({'id':r['id'],'ok':False,'error':{'code':'anything-secret','message':'DO-NOT-EXPOSE-QUERY-KEY'}}),flush=True)");
@@ -259,6 +278,7 @@ fn worker_error_message_is_not_exposed() {
 
 #[test]
 fn wrong_generation_wrong_id_and_hidden_refs_are_rejected() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     for body in [
         ECHO.replace(
@@ -279,6 +299,7 @@ fn wrong_generation_wrong_id_and_hidden_refs_are_rejected() {
 
 #[test]
 fn cloud_query_approval_is_separate_scoped_and_only_startup_supplies_it() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let mut config = fixture.config("different");
     config.query_cache_path = None;
@@ -304,6 +325,7 @@ fn cloud_query_approval_is_separate_scoped_and_only_startup_supplies_it() {
 
 #[test]
 fn suppression_during_worker_wait_rechecks_text_and_semantic_refs() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let mut config = fixture.config("lexical");
     let marker = fixture.path("worker-ready");
@@ -320,7 +342,7 @@ fn suppression_during_worker_wait_rechecks_text_and_semantic_refs() {
         let searching = scope.spawn(|| context.search(args("lexical")).unwrap());
         let start = Instant::now();
         while !marker.exists() {
-            assert!(start.elapsed() < Duration::from_secs(2));
+            assert!(start.elapsed() < Duration::from_secs(10));
             std::thread::sleep(Duration::from_millis(5));
         }
         fixture
@@ -335,6 +357,7 @@ fn suppression_during_worker_wait_rechecks_text_and_semantic_refs() {
 
 #[test]
 fn hybrid_response_respects_total_budget_including_coverage() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let semantic = SemanticSearch::new(fixture.config("lexical")).unwrap();
     let context = Context::with_semantic(&fixture.vault, access(), &semantic);
@@ -352,6 +375,7 @@ fn hybrid_response_respects_total_budget_including_coverage() {
 
 #[test]
 fn changed_ranking_mode_invalidates_pagination_cursor() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let config = fixture.config("lexical");
     let semantic = SemanticSearch::new(config).unwrap();
@@ -367,6 +391,7 @@ fn changed_ranking_mode_invalidates_pagination_cursor() {
 
 #[test]
 fn memory_revision_during_worker_wait_uses_only_current_text() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let mut config = fixture.config("lexical");
     let marker = fixture.path("revision-ready");
@@ -383,7 +408,7 @@ fn memory_revision_during_worker_wait_uses_only_current_text() {
         let searching = scope.spawn(|| context.search(args("lexical")).unwrap());
         let start = Instant::now();
         while !marker.exists() {
-            assert!(start.elapsed() < Duration::from_secs(2));
+            assert!(start.elapsed() < Duration::from_secs(10));
             std::thread::sleep(Duration::from_millis(5));
         }
         let id = fixture
@@ -406,6 +431,7 @@ fn memory_revision_during_worker_wait_uses_only_current_text() {
 
 #[test]
 fn validity_expiry_during_worker_wait_is_rechecked_at_response_time() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let id = fixture
         .memory_ref
@@ -430,6 +456,7 @@ fn validity_expiry_during_worker_wait_is_rechecked_at_response_time() {
 
 #[test]
 fn session_target_and_as_of_filters_apply_before_semantic_ranking() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let id = fixture
         .memory_ref
@@ -462,6 +489,7 @@ fn session_target_and_as_of_filters_apply_before_semantic_ranking() {
 
 #[test]
 fn busy_worker_falls_back_without_queueing_unbounded_work() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let mut config = fixture.config("lexical");
     let marker = fixture.path("busy-ready");
@@ -478,7 +506,7 @@ fn busy_worker_falls_back_without_queueing_unbounded_work() {
         let searching = scope.spawn(|| context.search(args("lexical")).unwrap());
         let start = Instant::now();
         while !marker.exists() {
-            assert!(start.elapsed() < Duration::from_secs(2));
+            assert!(start.elapsed() < Duration::from_secs(10));
             std::thread::sleep(Duration::from_millis(5));
         }
         let start = Instant::now();
@@ -493,6 +521,7 @@ fn busy_worker_falls_back_without_queueing_unbounded_work() {
 
 #[test]
 fn stdin_backpressure_is_covered_by_the_same_timeout() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     for number in 0..3 {
         let input: MemoryInput = serde_json::from_value(json!({"content":format!("另一份合成记忆 {number}"),"scope":"personal","source_refs":[fixture.source_id],"evidence":"user_explicit"})).unwrap();
@@ -526,6 +555,7 @@ fn stdin_backpressure_is_covered_by_the_same_timeout() {
 
 #[test]
 fn duplicate_nested_reply_fields_and_duplicate_cache_fields_are_rejected() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let mut config = fixture.config("lexical");
     fixture.fake(&mut config, &ECHO.replace("print(json.dumps({'id':r['id'],'ok':True,'result':result}),flush=True)","encoded=json.dumps({'id':r['id'],'ok':True,'result':result}); print(encoded.replace('\\\"ranking\\\": \\\"cosine\\\"','\\\"ranking\\\": \\\"cosine\\\", \\\"ranking\\\": \\\"cosine\\\"'),flush=True)"));
@@ -546,6 +576,7 @@ fn duplicate_nested_reply_fields_and_duplicate_cache_fields_are_rejected() {
 
 #[test]
 fn persistent_worker_is_reused_and_specific_failure_codes_are_safe() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let mut config = fixture.config("lexical");
     let starts = fixture.path("starts");
@@ -586,6 +617,7 @@ fn persistent_worker_is_reused_and_specific_failure_codes_are_safe() {
 
 #[test]
 fn cli_search_startup_config_recalls_nonlexical_memory() {
+    let _fixture_guard = fixture_process_guard();
     let fixture = Fixture::new();
     let config = fixture.config("lexical");
     write_json(
@@ -619,6 +651,7 @@ fn cli_search_startup_config_recalls_nonlexical_memory() {
 
 #[test]
 fn cli_mcp_reuses_real_worker_query_cache_and_budget_with_fake_provider() {
+    let _fixture_guard = fixture_process_guard();
     use std::io::Write;
     let fixture = Fixture::new();
     let mut config = fixture.config("unused");
