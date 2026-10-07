@@ -4,7 +4,7 @@
   class ComposerAdapter {
     constructor(doc) { this.doc = doc; this.receipts = new Map(); }
     find() {
-      const nodes = [...this.doc.querySelectorAll('#prompt-textarea')].filter((node) => node.isConnected && node.getClientRects().length > 0);
+      const nodes = [...this.doc.querySelectorAll('#prompt-textarea, textarea#mobile-composer-prompt')].filter((node) => node.isConnected && node.getClientRects().length > 0);
       if (nodes.length !== 1) throw new Error('没有找到唯一可用的输入框；请从预览手动复制，扩展已安全停止');
       const node = nodes[0];
       if (node.disabled || node.readOnly || node.getAttribute('aria-disabled') === 'true') throw new Error('输入框暂不可编辑');

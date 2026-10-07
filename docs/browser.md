@@ -2,7 +2,7 @@
 
 本页对应 `extension/`，以设计 v0.2 为准。扩展是无第三方运行依赖的 Chrome Manifest V3 实现，使用固定的 `com.recallcard.host` 本机桥，不启动 HTTP 服务，不调用付费 API。
 
-**验证状态：已运行 Node 内建单元、模拟 DOM 和生命周期测试；尚未在真实登录的 ChatGPT 页面、Chrome Native Messaging 安装环境或 Windows 上完成端到端验证。** 请先用合成资料验收；不要把“测试通过”理解为当前 ChatGPT DOM 已实测兼容。
+**验证状态：已运行 Node 内建单元、模拟 DOM 和生命周期测试，以及 Linux 上的 Native 启动器子进程、二进制分帧和配置拒绝测试；尚未在真实登录的 ChatGPT 页面、Chrome Native Messaging 安装环境、macOS 或 Windows 上完成端到端验证。** 请先用合成资料验收；不要把“测试通过”理解为当前 ChatGPT DOM 已实测兼容。
 
 ## 1. 本阶段支持什么
 
@@ -57,15 +57,20 @@ EXTENSION_ID=这里替换为Chrome显示的32字符扩展ID
   --output-dir "$HOST_DIR"
 ```
 
-`native-install` 生成固定 Vault、scope、扩展 ID 的启动包装器和 `com.recallcard.host.json`，不自动改动浏览器注册位置。先检查生成结果。核心启动命令为：
+`native-install` 只生成待检查文件，返回 `registered: false`，不注册浏览器、不修改注册表：
 
-```text
-recallcard --vault <绝对路径> native-host --scope personal --allowed-extension <扩展ID>
-```
+- `recallcard-native-launcher`（Windows 为 `.exe`）：当前平台 RecallCard 可执行文件的副本，不依赖原来的构建目录
+- `com.recallcard.host.config.json`：版本固定为 1，绑定 host 名、一个 Vault 绝对路径、显式 scope 列表和准确扩展 ID；没有密钥
+- `com.recallcard.host.json`：给 Chrome 的 Native Messaging manifest
+- Linux/macOS 另有 `recallcard-native-host` shell 包装器，只执行上述相邻副本并原样转交参数；Windows manifest 直接指向 `.exe`
 
-包装器必须把 Chrome 追加的调用来源参数原样传给程序。不要自行改成 `eval`，不要让网页提供命令、Vault 路径或 scope。Host 的标准输出只能包含 Native Messaging 二进制分帧，诊断应写标准错误。
+专用副本只从自身目录读取固定名字的配置；工作目录、浏览器参数和消息均不能另选配置、Vault、scope 或命令。它只接受准确的 `chrome-extension://<ID>/`，以及可选的 `--parent-window=<十进制非负整数>`。普通 `recallcard` 命令仍保持原 CLI 行为，人工诊断也可显式使用 `native-host` 子命令。不要改文件名、改用 `eval`，或把模型参数接到命令行。
 
-本机 manifest 的形状可参考 `extension/native-host-manifest.example.json`。`allowed_origins` 必须是准确的 `chrome-extension://<ID>/`，不能用通配符；`path` 指向可执行包装器的绝对路径。[Chrome 官方 Native Messaging 文档](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)
+安装拒绝已有目标文件、安装根及文件的符号链接和 Windows 重解析点；用户明确选定路径中的 `/var` 等父目录别名会先解析为真实安装路径，再把真实绝对路径写入配置和 manifest。文件通过临时文件无覆盖发布，manifest 最后生成。失败时可能留下本次已完成的副本，但不会自动删文件或注册半成品，请检查后改用新的输出目录。Unix 新目录/可执行文件权限为 `0700`、配置/manifest 为 `0600`，启动时拒绝可被组或其他用户写入的配置和安装目录。Windows 不会自动调整或核验 ACL，须由使用者选择自己控制、其他用户不可写的目录。以上检查不抵御已控制同一本机账号的恶意进程。
+
+配置最多 16 KiB、1–32 个不重复的有效 scope；拒绝未知/重复字段、错误版本、相对 Vault 路径、父目录跳转及不匹配的扩展来源。配置和安装目录应放在代码仓库、同步 Vault 之外，不要提交本机路径与权限配置。Host 的标准输出只有 Native Messaging 二进制分帧，诊断写标准错误。
+
+本机 manifest 的形状可参考 `extension/native-host-manifest.example.json`。`allowed_origins` 必须是准确的 `chrome-extension://<ID>/`，不能用通配符；`path` 指向可执行包装器或 Windows `.exe` 的绝对路径。[Chrome 官方 Native Messaging 文档](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)
 
 ### Linux：Google Chrome 用户级注册
 
@@ -85,7 +90,54 @@ cp "$HOST_DIR/com.recallcard.host.json" \
   "$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.recallcard.host.json"
 ```
 
-以上命令只作为用户自行安装的说明，本阶段未在用户电脑执行。Windows 原生包装器和注册流程尚待验证；不要把 Unix shell 包装器当作可直接在 Windows 使用的 `.exe`。Firefox、Safari、Edge 不在本轮验证范围。
+### Windows：生成 `.exe` 并由用户注册到 Google Chrome
+
+先在 Windows 构建 `recallcard.exe`；其他平台的二进制不能直接换扩展名使用。下面是供用户自行审阅、执行的 PowerShell 示例，路径和扩展 ID 必须替换：
+
+```powershell
+$Bin = 'C:\RecallCard\target\release\recallcard.exe'
+$Vault = 'C:\Users\你的用户名\recallcard-vault'
+$HostDir = Join-Path $env:LOCALAPPDATA 'RecallCard\native-v1'
+$ExtensionId = '这里替换为Chrome显示的32字符扩展ID'
+
+& $Bin --vault $Vault native-install --extension-id $ExtensionId `
+  --scope personal --output-dir $HostDir
+if ($LASTEXITCODE -ne 0) { throw '生成失败，请检查错误，不要继续注册' }
+
+$Manifest = (Resolve-Path -LiteralPath (Join-Path $HostDir 'com.recallcard.host.json')).Path
+Get-Content -LiteralPath $Manifest
+Get-Content -LiteralPath (Join-Path $HostDir 'com.recallcard.host.config.json')
+```
+
+先检查 manifest 的 `path` 指向本目录内的 `recallcard-native-launcher.exe`，`allowed_origins` 只有你的准确扩展来源；配置内 Vault、scope、扩展 ID 也必须正确。不要移动或只复制 `.exe`，配置必须相邻。
+
+Chrome 官方要求该 host 注册表项的默认 `REG_SZ` 值是 manifest **完整路径**，不是 `.exe` 路径。它先查 32 位、再查 64 位注册表视图。以下采用当前用户 HKCU 的 32 位视图，不写全机 HKLM；先查询已有值，发现旧配置时先核对归属并保留备份，别直接覆盖。[Chrome 官方注册说明](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)
+
+```powershell
+$Key = 'HKCU\Software\Google\Chrome\NativeMessagingHosts\com.recallcard.host'
+reg.exe query $Key /ve /reg:32
+# 64 位 Windows 还应检查另一个视图，避免旧配置造成混淆
+if ([Environment]::Is64BitOperatingSystem) { reg.exe query $Key /ve /reg:64 }
+```
+
+“找不到项”只有在该项确实未创建时才是正常情况。确认路径、权限与旧项归属后，**由用户执行**注册和复查；这里没有 `/f` 强制覆盖选项：
+
+```powershell
+reg.exe add $Key /ve /t REG_SZ /d $Manifest /reg:32
+if ($LASTEXITCODE -ne 0) { throw '注册未完成，请检查错误' }
+reg.exe query $Key /ve /reg:32
+```
+
+`/ve` 表示默认值，`/reg:32` 指定注册表视图；相关命令选项见 [Microsoft reg add](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/reg-add) 和 [reg query](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/reg-query)。注册完成后用合成 Vault 检查扩展连接、分帧和来源拒绝，不要直接输入私人资料。上述官方注册文档核对日期为 2026-10-06；部署时仍应核对当前浏览器版本。
+
+### 升级、迁移与撤销
+
+- 更新程序、Vault 位置、scope 或扩展 ID：用新的输出目录重新运行 `native-install`，检查后由用户将浏览器注册位置切换到新 manifest；旧副本不会跟随源二进制自动更新
+- 不要直接搬走已注册的输出目录：manifest 和 Unix wrapper 含绝对路径，须在目标位置重新生成并重新注册
+- 停用时先在 Chrome 禁用扩展；用户自行移除确认属于这次安装的 manifest 注册文件或 Windows 对应注册项。不要删除整个 `NativeMessagingHosts` 父目录/父项，也不要删除 Vault
+- 原始构建目录移走不影响已生成的副本；仍须满足当前操作系统的运行时要求，这不是跨操作系统二进制打包
+
+以上命令只作为用户自行安装的说明，本阶段未在用户电脑执行。Windows 注册表、Windows ACL/重解析点、Windows Chrome 的真实 `.exe` 启动及管道 I/O、macOS 平台执行均待实机验证。Linux 子进程测试只覆盖共用逻辑，不代表 Windows 已验收。Firefox、Safari、Edge 不在本轮验证范围。
 
 ## 4. 第一次使用
 
@@ -169,7 +221,7 @@ nonce 是误触防护和关联字段，模型及网页可以看到，不能代�
 - 每次 native 操作前后都校验活跃标签、URL、顶层 documentId、当前绑定；后台重启从 `chrome.storage.session` 恢复去重记录
 - session storage 暂存 nonce、已处理 ID、Bootstrap、最后预览及其原只读请求和结果指纹，不保存到磁盘 Vault、Git 或 storage.local。关闭标签会清理；浏览器重启、禁用、重载或更新扩展也会清空。Chrome 的会话存储不是抗本机恶意软件的安全边界。[Chrome Storage 文档](https://developer.chrome.com/docs/extensions/reference/api/storage)
 - 导航使旧请求失效；能完整识别的旧草稿块会移除。用户改过的内容不强行删除，必须人工检查
-- 附加的 DOM 操作依赖未稳定承诺的输入框结构。支持唯一可见的 `#prompt-textarea` textarea 或 ProseMirror contenteditable；结构不明就停止
+- 附加的 DOM 操作依赖未稳定承诺的输入框结构。支持唯一可见的 `#prompt-textarea` textarea、带此 ID 的 ProseMirror contenteditable，以及 `textarea#mobile-composer-prompt`；从这些明确候选中要求只有一个可见且仍连接文档的输入框，禁用或只读则拒绝。多个候选同时可见、结构不明或找不到输入框时停止，不猜测任意 textarea/contenteditable
 - 清理扩展状态或本机 Vault 不会撤回已交给网页、已发送或已经同步到其他设备的数据
 
 Chrome service worker 可能被停止，因此不能只用内存 Set 去重；实现将请求预留记录先存入 session storage，再调用本机桥。[MV3 生命周期](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)

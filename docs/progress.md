@@ -20,18 +20,28 @@
 - 浏览器重用启动快照/插入草稿前重新核验，资料变化或撤权会废弃旧预览
 - 只生成安装包装器与 manifest，不自动注册或修改用户电脑
 
-## 后续分段
+## 已实现：D/E 的可运行子集（2026-10-07 恢复并重新验证）
 
-1. D：可选云 Embedding/Python worker、向量空间签名、增量缓存与降级
-2. E：安全 Git 同步、冲突恢复、跨平台 CI/安装测试
+- Python 向量 worker：精确授权端点/范围/数据，默认离线，空间签名、输入哈希增量复用、批次/重试预算、原子检查点、离线 query_vector 与排序融合
+- API Dream：稳定中文前缀，单次有界请求，usage/cache 字段仅据服务返回记录，输出只作提议，经 Rust review 后仍需人工批准
+- Git 同步：先提交本地，再 fetch/整合/push；严格正本白名单、不运行 hooks/filter、不强推；文本/语义冲突保留待人工处理
+- Native 共享 executable launcher：固定相邻配置、复制二进制、Unix 包装器与 Windows manifest；不自动注册系统配置
+- 浏览器精确增加 ChatGPT guest 的 `textarea#mobile-composer-prompt`，继续要求唯一可见可写编辑器，不自动发送
+
+## 下一步与未完成范围
+
+1. 具名 View、实体/当前有效时间查询、CLI ref 与查询参数一致性
+2. 独立 daemon 与本机 IPC；当前 MCP/Native 直接调用同一 Rust core
+3. Python worker 监督/自动接入 MCP 混合检索；目前显式导出与调用，不将旧缓存结果自动暴露给模型
+4. 实际 Agent 首次/恢复/compact 后加载，以及扩展安装后的真实网页端到端验证
+5. 大型资料库持久增量索引与性能验证；当前每次读取正本构建文本快照
 
 ## 验证边界
 
-- 2026-10-06 第一段：Linux 53 项测试通过（38 项 Vault、12 项 Context/MCP、3 项导入），格式检查与 clippy 严格告警检查通过
-- 第二段：Linux 86 项 Rust 测试与 47 项扩展 Node 测试通过，格式与严格 clippy 检查通过
-- 第一段远端 CI 在运行前因 job 级 runner 上下文位置无效失败；第二段已将状态目录变量改为步骤级，重新观察三平台 CI
-- 测试编号、结果和检查命令随每段提交更新；不能将 fixture 成功等同于真实厂商网页或模型记忆准确率
-- 真实已登录 ChatGPT 页面、真实 Claude Code 宿主启动/压缩后钩子尚未验收
-- Windows/macOS 原生运行和安装尚未验收
-- 没有真实云 API 费用、embedding 效果或前缀缓存命中数据
-- 当前检索每次从正本构建内存文本索引，适用于小规模验证；尚未宣称大型库增量索引性能
+- 2026-10-07 当前 Linux 工作区重新执行：122 项 Rust、105 项 Python（包括 Rust→fake API→Rust review 合同）、52 项 Node 测试全部通过，格式检查与严格 Clippy 通过
+- Rust→Python embedding 导出/哈希/增量缓存/撤权过滤合同独立通过
+- 已修复工作流 runner 上下文、Windows 严格告警、macOS 父目录别名；Windows 原子替换短暂占用修复由远端 Actions 验证，详见 [CI 修复记录](ci.md)
+- Linux/macOS/Windows CI 的每次结果绑定具体提交；本机通过不等于远端通过，也不等于浏览器安装验收
+- Native 安装链路已做合成进程测试，Windows/macOS 真实浏览器注册与运行尚未验收
+- 没有真实云 API 费用、embedding 效果、记忆准确率或前缀缓存命中数据
+- 未执行实际 Claude Code 宿主启动/压缩后钩子；不得把 fixture 成功写成真实宿主验收
