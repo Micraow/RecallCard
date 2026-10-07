@@ -20,7 +20,7 @@ export function createImportTasks(ui) {
     return preview;
   }
   function validStatus(job) {
-    if (!job || job.scope !== state.scope || typeof job.job_id !== 'string' || !['running', 'cancelling', 'cancelled', 'interrupted', 'completed', 'failed'].includes(job.state)
+    if (!job || job.scope !== state.scope || typeof job.job_id !== 'string' || !job.job_id.trim() || typeof job.can_resume !== 'boolean' || !['running', 'cancelling', 'cancelled', 'interrupted', 'completed', 'failed'].includes(job.state)
       || !['events_total', 'events_processed', 'events_added', 'events_duplicates', 'files_total', 'conversations_total'].every(key => Number.isSafeInteger(job[key]) && job[key] >= 0) || job.events_total < 1 || job.events_processed > job.events_total || job.events_added + job.events_duplicates !== job.events_processed || (job.state === 'completed' && job.events_processed !== job.events_total)) throw new Error('导入进度暂时无法核实，请重新读取');
     return job;
   }
@@ -42,6 +42,17 @@ export function createImportTasks(ui) {
         selected.error = '暂时无法读取进度，导入可能仍在进行。请重新读取，或暂停后检查。'; render();
       }
     }, 600);
+  }
+  function restore(values) {
+    if (!Array.isArray(values)) throw new Error('无法读取之前的导入，请重试');
+    const jobs = values.map(validStatus);
+    const selected = data(); selected.history = jobs; selected.loaded = true;
+    // 服务按创建时间倒序给出。最新任务完成后，不把更早的暂停任务强行拉回首页。
+    const running = jobs.find(active);
+    const latest = jobs[0];
+    const resume = latest?.can_resume && latest.state !== 'completed' ? latest : null;
+    if (running || resume) { accept(running || resume); return true; }
+    return false;
   }
   async function history() {
     await run('正在查找之前的导入…', async current => {
@@ -142,5 +153,5 @@ export function createImportTasks(ui) {
     for (const previous of value.history.filter(item => item.can_resume && !active(item))) box.append($('div', { class: 'import-history-row' }, paragraph(`${previous.created_at ? new Date(previous.created_at).toLocaleString() + ' · ' : ''}${previous.files_total} 个文件 · 已处理 ${previous.events_processed} / ${previous.events_total} 条`), button('查看并继续', event => { if (state.busy || !event.currentTarget.isConnected || data() !== value || active(value.current) || !value.history.includes(previous)) return; revision += 1; clearTimer(); return run('正在读取导入任务…', async current => { const fresh = await invoke('import_job_status', { ...args(), jobId: previous.job_id }); if (current()) accept(fresh, previous.job_id); }); }, false, 'small')));
     return box;
   }
-  return { pane, history, active: () => active(data().current), clearPreview: () => { if (state.importJobs) state.importJobs.preview = null; }, clearTimer };
+  return { pane, history, restore, active: () => active(data().current), clearPreview: () => { if (state.importJobs) state.importJobs.preview = null; }, clearTimer };
 }

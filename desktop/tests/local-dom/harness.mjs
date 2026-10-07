@@ -13,7 +13,8 @@ const allowedModules = new Set(['app.js', 'model.js', 'memory-management.js', 'b
 
 // 每个用例加载真正的 index.html 与未改写的 ES 模块，彼此独立的 Window / 模块状态。
 // 禁止任意模块来源；不拼接应用逻辑、不改 import，不把 Window 混到 Node 全局。
-export async function fixture(t) {
+export async function fixture(t, { restoreResponse = null, restoreError = '', importJobs,
+  holdStartup = false, configureNative } = {}) {
   const errors = [];
   const networkAttempts = [];
   // 防回归护栏，不模拟网络成功：任何连接、监听或 UDP socket 请求都会直接失败。
@@ -33,10 +34,18 @@ export async function fixture(t) {
   const { window } = dom;
   const { document } = window;
   const native = syntheticBridge();
+  // 只在 IPC 边界提供启动响应，不访问或改写真实 ES 模块的业务状态。
+  let releaseStartup;
+  if (holdStartup) releaseStartup = native.hold('restore_workspace');
+  else if (restoreError) native.fail('restore_workspace', restoreError);
+  else native.next('restore_workspace', restoreResponse);
+  if (importJobs !== undefined) native.next('list_import_jobs', importJobs);
+  configureNative?.(native);
   window.__TAURI__ = { core: { invoke: native.invoke.bind(native) } };
 
   // jsdom 未实现原生 dialog 顶层/焦点行为。这里只模拟 open 标记，不宣称验证这些行为。
-  window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  const shownDialogs = [];
+  window.HTMLDialogElement.prototype.showModal = function () { shownDialogs.push(this.id); this.open = true; };
   window.HTMLDialogElement.prototype.close = function () { this.open = false; };
 
   t.after(() => {
@@ -113,13 +122,21 @@ export async function fixture(t) {
     if (node.checked !== checked) node.click();
   }
   function noWrites({ allowDefaultWorkspace = false } = {}) {
+    // 此断言针对资料写入；明确打开库允许 remember_workspace 保存本机设置。
     const commands = ['confirm_import', 'start_import_job', 'resume_import_job', 'confirm_note', 'apply_dream', 'confirm_memory_change', 'confirm_background_change'];
     if (!allowDefaultWorkspace) commands.push('open_default_workspace');
     for (const command of commands) {
       assert.equal(native.count(command), 0, `明确的最终确认前不得调用 ${command}`);
     }
   }
+  function noAutomaticWrites() {
+    noWrites();
+    assert.equal(native.count('remember_workspace'), 0, '只读启动恢复不得重新保存最近资料库设置');
+  }
+  // 默认 fixture 等待首次启动恢复结束；竞态用例显式保留原生 Promise。
+  if (!holdStartup) await idle();
   return { window, document, native, one, button, click, navigate, idle, fill, check, noWrites,
+    noAutomaticWrites, releaseStartup, shownDialogs,
     openVault: () => click('打开已有资料库'),
     modal: () => one('#modal'),
   };

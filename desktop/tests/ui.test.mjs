@@ -76,6 +76,8 @@ async function fixture(t) {
   const queues = new Map();
   const defaultResponse = (command, payload) => {
     switch (command) {
+      case 'restore_workspace': case 'remember_workspace': return null;
+      case 'list_import_jobs': return [];
       case 'choose_vault': case 'vault_status': return vault;
       case 'cancel_previews': return null;
       case 'preview_note': return { preview_id: 'synthetic-note', session_id: vault.session_id, scope: payload.scope, content: payload.content, redacted: false };
