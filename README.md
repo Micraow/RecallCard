@@ -1,20 +1,20 @@
 # RecallCard
 
-把对话、想法和重要决定收在一起，随时查找原文和出处。
+把不同 AI 的对话和重要记忆收进自己的资料库，带着原话和背景继续任务。
 
 ## 三步开始
 
 1. **打开桌面版，创建资料库**：选择一个空文件夹
-2. **添加第一条资料**：粘贴一段文字，预览后确认保存；已有对话文件可展开「导入对话文件」
-3. **开始查找**：输入关键词，打开结果查看原文和出处
+2. **接入一段对话**：导入对话文件，或用扩展预览、保存 DeepSeek / ChatGPT 当前可见消息
+3. **换一个 AI 继续**：在「会话与接续」选择对话，填写下一步目标，检查并复制交接内容，自己发送
 
 默认即可使用本地搜索。整理记忆、浏览器扩展和同步等功能，可以用到时再设置。
 
 ## 下载与打开
 
-- Linux 安装包：[下载已验收的 0.1.0 安装包](https://github.com/Micraow/RecallCard/actions/runs/37579114793/artifacts/11463936600)（登录 GitHub 后下载 ZIP）；Arch 优先使用 AppImage，Ubuntu 可使用 deb
+- Linux 安装包：[下载已验收的 0.2.0 安装包](https://github.com/Micraow/RecallCard/actions/runs/37592880905/artifacts/11469563248)（登录 GitHub 后下载 ZIP）；Arch 优先使用 AppImage，Ubuntu 可使用 deb
 - 已拿到运行 ZIP：解压后运行 `recallcard-desktop` 或 `运行桌面版.sh`
-- [三步使用指南](docs/desktop-quickstart-v0.1.md) · [遇到问题](docs/desktop-v0.1.md#当前边界)
+- [三步使用指南](docs/desktop-quickstart-v0.2.md) · [遇到问题](docs/desktop-v0.2.md#当前验收边界)
 
 安装包工作流会保留带版本和提交号的文件及校验清单。首版优先 Linux；其他平台的核心测试不代表桌面安装包已经实机验收。
 
@@ -22,7 +22,7 @@
 
 - [导入与资料格式](docs/usage.md)
 - [整理长期记忆](docs/dream.md)
-- [连接浏览器扩展](docs/browser.md)
+- [浏览器保存与导出](docs/browser-conversations-v0.3.md)
 - [命令行与高级功能](docs/project-overview-v0.3.md)
 - [整体设计](docs/RecallCard-DESIGN-v0.2.md) · [实施与验收状态](docs/progress.md)
 
