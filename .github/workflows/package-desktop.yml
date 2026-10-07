@@ -1,0 +1,74 @@
+name: Linux 桌面安装包
+on:
+  workflow_dispatch:
+  push:
+    branches: ['validate/desktop-*']
+concurrency:
+  group: desktop-package-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  package:
+    name: Ubuntu 22.04 / 原生验收与 AppImage、deb
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - name: 安装官方构建与验收依赖
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf file webkit2gtk-driver xvfb xauth xdotool scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
+      - name: 准备界面验证
+        working-directory: extension
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: 界面与状态验证
+        run: node --test desktop/tests/*.test.js desktop/tests/*.test.mjs
+      - name: 构建正式桌面程序
+        working-directory: desktop
+        run: npm exec --yes --package=@tauri-apps/cli@2.12.1 -- tauri build --ci --no-bundle -- --locked
+      - name: 构建配套 CLI 与依赖清单
+        run: |
+          cargo build --locked --release --bin recallcard --target-dir desktop/src-tauri/target
+          cargo metadata --locked --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$RUNNER_TEMP/desktop-metadata.json"
+      - name: 安装原生 WebDriver
+        run: cargo install tauri-driver --version 2.1.0 --locked
+      - name: 正式程序的原生操作闭环
+        timeout-minutes: 8
+        env:
+          LANG: C.UTF-8
+          GDK_BACKEND: x11
+        run: dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" /usr/bin/python3 desktop/tests/native_smoke.py --application desktop/src-tauri/target/release/recallcard-desktop --cli desktop/src-tauri/target/release/recallcard --artifacts "$RUNNER_TEMP/recallcard-native-smoke-artifacts"
+      - name: 准备中文说明、许可证与源码
+        run: |
+          python3 scripts/package_desktop.py --binary desktop/src-tauri/target/release/recallcard-desktop --cli desktop/src-tauri/target/release/recallcard --metadata "$RUNNER_TEMP/desktop-metadata.json" --commit "$GITHUB_SHA" --profile release --out desktop/release-artifacts
+          python3 scripts/prepare_bundle_notices.py desktop/release-artifacts desktop/src-tauri/distribution
+      - name: 打包 AppImage 与 deb
+        working-directory: desktop
+        run: npm exec --yes --package=@tauri-apps/cli@2.12.1 -- tauri bundle --config src-tauri/tauri.bundle.conf.json --bundles appimage,deb
+      - name: 收集版本化安装包与校验清单
+        run: python3 scripts/collect_desktop_bundles.py desktop/src-tauri/target/release/bundle desktop/release-artifacts "$GITHUB_SHA"
+      - name: 保存通过验收的安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-Desktop-linux-x86_64-${{ github.sha }}
+          path: desktop/release-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+      - name: 保存原生验收截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-native-acceptance-${{ github.sha }}
+          path: ${{ runner.temp }}/recallcard-native-smoke-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

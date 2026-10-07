@@ -5,7 +5,7 @@
 ## 宿主与界面约定
 
 - 路径只能由原生目录/文件选择器交给 Rust。前端不能传入任意 Vault、导入或 Dream 路径，也没有通用文件、shell、CLI、环境变量、网络或凭据命令
-- 创建、导入确认、导出本地 Dream Job、发布 Dream 结果由用户点击触发；打开失败不会自动创建资料库
+- 创建、笔记保存、导入确认、导出本地 Dream Job、发布 Dream 结果由用户点击触发；打开失败不会自动创建资料库
 - `select_vault(path, create)` 返回新的随机 `session_id`。所有后续操作都携带它。切换 Vault（包括切换失败）、关闭 Vault 或进程退出会废弃旧会话与预览
 - 服务还核对目录身份和 schema marker，目录在同一路径被替换后，旧命令失效。Unix 使用设备/inode；Windows 通过 `GetFileInformationByHandle` 读取卷序列号与文件索引，不使用可能被 NTFS 保留的创建时间作为身份
 - 原生文件选择器返回后再验证最初的 `session_id`。界面也应丢弃旧请求的迟到返回，切换范围时清除所选引用和未确认的预览
@@ -22,16 +22,26 @@
 | `browse` | `session_id, scope, target: &str` | 列表 JSON |
 | `search` | `session_id, scope, query, target: &str` | Context 搜索 JSON |
 | `read` / `sources` | `session_id, scope, reference: &str` | Context 读取 JSON |
+| `preview_note` | `session_id, scope, content: &str` | `NotePreview` |
+| `confirm_note` | `session_id, preview_id: &str` | `{ref, event}` |
 | `preview_import` | `session_id, format: &str, path: &Path, scope: &str` | `ImportPreview` |
 | `confirm_import` | `session_id, preview_id: &str` | 导入结果 JSON |
 | `export_dream` | `session_id, scope: &str, source_refs, memory_refs: &[String]` | `DreamJob` |
 | `review_dream` | `session_id: &str, path: &Path, scope: &str` | `DreamPreview` |
 | `apply_dream` | `session_id, preview_id: &str, approve_protected: bool` | `DreamReceipt` |
-| `cancel_previews` | `session_id: &str` | 清除两类待确认预览 |
+| `cancel_previews` | `session_id: &str` | 清除全部待确认预览 |
 
 可失败的方法均返回库内 `Result<T>`（中文字符串错误）。错误固定且有操作提示，不向界面转发操作系统、Git 或 JSON 解析器可能含有的路径、正文和秘密。
 
 `VaultInfo` 包含 `session_id`、`root`、`display_name`、`scopes`、`event_count`、`memory_count` 和 `health`。空资料库默认提供 `personal` 范围。`target` 只接受 `all`、`events`、`memories`。读操作与搜索最多输出 32 KiB；浏览与搜索最多显示 30 条，超出通过 `truncated` 告知。大记录的完整读取可能返回 `pending_refs`，界面不能把空列表误报为没有内容。
+
+## 第一条笔记：粘贴即可
+
+用户可以直接输入或粘贴一段文字，不需要准备导出文件、选择导入格式或编写 JSON。`preview_note` 接受 1–65536 字节的 UTF-8 正文，拒绝纯空白，并返回完整脱敏预览 `NotePreview {preview_id, session_id, scope, content, redacted}`；预览不写入 Vault。脱敏使用 capture 的相同启发式规则，界面仍应提醒用户检查预览。
+
+服务仅在内存中保留脱敏且经过验证的 EventInput，固定范围、发生时间和随机来源消息编号。用户点击保存后，`confirm_note` 只接受会话与预览编号，追加一条 `role=user`、`origin=user_input`、来源平台为 `recallcard-desktop` 的 Event，返回 `{ref, event}`。包含已知上下文注入标记的正文仍服从现有 capture 的来源分类保护。笔记立即可检索，但不自动生成 Memory。
+
+前端编辑正文或改变范围时必须清除旧预览并重新预览；修改前端预览对象不能改变服务端已批准的内容或范围。新预览、取消、切换 Vault 和退出都会撤销旧笔记预览；成功保存后消费编号，重复点击不会再追加。文件来源导入流程仍可用于批量资料。
 
 ## 导入预览与确认
 
@@ -53,4 +63,4 @@
 
 ## 已验证边界
 
-`cargo test -p recallcard --test desktop --test import` 覆盖正常预览/确认、脱敏与去重、两个导出适配器、范围/抑制、取消/替换预览、文件篡改、相同字节替代文件、Vault 路径替换、迟到会话、Dream 的只读审查/幂等发布、受保护批准、冲突与过期 read-set。文件系统身份防护用于避免误写和常见替换，不宣称是抵御具有同等本机文件权限的恶意并发进程的完整沙箱。
+`cargo test -p recallcard --test desktop --test import` 覆盖纯文本笔记的空白/字节上限、只读脱敏预览、范围固定、一次确认与过期预览；导入正常预览/确认、脱敏与去重、两个导出适配器、范围/抑制、取消/替换预览、文件篡改、相同字节替代文件、Vault 路径替换、迟到会话、Dream 的只读审查/幂等发布、受保护批准、冲突与过期 read-set。文件系统身份防护用于避免误写和常见替换，不宣称是抵御具有同等本机文件权限的恶意并发进程的完整沙箱。

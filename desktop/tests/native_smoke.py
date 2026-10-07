@@ -26,6 +26,7 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parents[2]
 ELEMENT = "element-6066-11e4-a52e-4f735466cecf"
 EVENT_TEXT = "合成资料：native-smoke 水星项目的说明使用简洁中文。"
+NOTE_TEXT = "合成首条记录：周末整理书单。"
 MEMORY_TEXT = "合成记忆：native-smoke 水星项目偏好简洁中文说明。"
 
 
@@ -91,6 +92,8 @@ class WebDriver:
         self.command("POST", f"/element/{element}/click", {})
 
     def button(self, label, container=""):
+        if label == "选择文件并预览" and not self.observe("return document.querySelector('#file-import-details').open"):
+            self.click("#file-import-details > summary")
         # 测试中的中文标签没有引号；由浏览器正常派发点击，不调用业务方法。
         self.click(f"{container}//button[normalize-space(.)='{label}']", "xpath")
 
@@ -210,7 +213,7 @@ class NativeSmoke:
             rows.append(f"{'  ' * depth}{node.getRoleName()}: {node.name} [{node.getState().getStates()}]")
         (self.artifacts / f"dialog-{self.dialog_count:02d}-accessibility.txt").write_text("\n".join(rows))
 
-    def dialog(self, title, path=None, save=False):
+    def dialog(self, title, path=None, save=False, create=False):
         self.dialog_count += 1
         window = wait_for(lambda: self.dialog_windows(title), f"原生窗口：{title}")[0]
         run("xdotool", "windowactivate", "--sync", window)
@@ -243,6 +246,11 @@ class NativeSmoke:
                 if self.dialog_windows(title):
                     self.describe_dialog(title)
         wait_for(lambda: not self.dialog_windows(title), f"关闭原生窗口：{title}")
+        if create:
+            wait_for(lambda: self.accessible_dialog("创建资料库"), "创建确认窗口")
+            approval = wait_for(lambda: self.native_button("创建资料库", "创建资料库"), "创建确认按钮")
+            assert approval.queryAction().doAction(0)
+            wait_for(lambda: not self.dialog_windows("创建资料库"), "创建确认窗口关闭")
         self.driver.idle()
 
     def preview_import(self, source):
@@ -256,7 +264,7 @@ class NativeSmoke:
         self.driver.idle()
 
     def exercise(self):
-        self.cli_command("init")
+        self.vault.mkdir()
         source = self.temporary / "conversations.json"
         source.write_text(json.dumps([{
             "id": "native-smoke-conversation", "current_node": "synthetic-user", "mapping": {
@@ -288,28 +296,48 @@ class NativeSmoke:
         browser.button("打开已有资料库")
         self.dialog("打开已有 RecallCard 资料库")
         assert browser.text("#vault-badge") == "尚未打开资料库"
-        browser.button("打开已有资料库")
-        self.dialog("打开已有 RecallCard 资料库", self.vault)
+        browser.button("创建新资料库")
+        self.dialog("选择用于新资料库的空文件夹", self.vault, create=True)
+        assert (self.vault / "control/schema-version.json").is_file()
         assert browser.text("#vault-badge") == self.vault.name
         browser.click("#switch-vault")
         browser.button("打开已有资料库", "//dialog[@id='modal']")
         self.dialog("打开已有 RecallCard 资料库")
         assert browser.text("#vault-badge") == self.vault.name
-        self.checkpoint("原生资料库选择与取消")
+        self.checkpoint("原生资料库创建选择与取消")
 
-        browser.navigate("导入资料")
+        browser.navigate("添加资料")
+        assert not browser.observe("return document.querySelector('#file-import-details').open")
+        browser.type("#note-content", NOTE_TEXT)
+        browser.button("预览并保存")
+        browser.idle()
+        assert not self.events()
+        assert browser.text(".note-preview") == NOTE_TEXT
+        browser.button("确认保存记录")
+        browser.idle()
+        note_events = self.events()
+        assert len(note_events) == 1 and note_events[0]["content"] == NOTE_TEXT
+        browser.type("#query", "书单")
+        browser.button("查找")
+        browser.idle()
+        browser.click(".result-card")
+        browser.idle()
+        assert browser.text(".reading-pane .body-text") == NOTE_TEXT
+        self.checkpoint("免配置粘贴首条资料并立即查找")
+
+        browser.navigate("添加资料")
         browser.button("选择文件并预览")
         self.dialog("选择要导入的对话文件")
-        assert not self.events()
+        assert self.events() == note_events
         self.preview_import(source)
-        assert not self.events(), "预览不得写入 Event"
+        assert self.events() == note_events, "预览不得写入 Event"
         browser.button("确认导入 1 条记录")
         browser.button("取消", "//dialog[@id='modal']")
-        assert not self.events(), "取消确认不得写入 Event"
+        assert self.events() == note_events, "取消确认不得写入 Event"
         self.checkpoint("导入预览与取消不写入")
         self.confirm_import()
         events = self.events()
-        assert len(events) == 1 and events[0]["content"] == EVENT_TEXT
+        assert len(events) == 2 and any(event["content"] == EVENT_TEXT for event in events)
         assert "新增 1 条" in browser.text("#notice")
         self.preview_import(source)
         self.confirm_import()
@@ -330,7 +358,7 @@ class NativeSmoke:
         browser.navigate("整理记忆")
         job_path = self.temporary / "synthetic-dream-job.json"
         browser.button("导出本次来源包")
-        self.dialog("保存本次整理的来源包", job_path, save=True)
+        self.dialog("保存整理包", job_path, save=True)
         job = json.loads(job_path.read_text())
         assert job["source_refs"][0]["event"]["content"] == EVENT_TEXT
         source_ref = job["source_refs"][0]["ref"]
@@ -343,16 +371,16 @@ class NativeSmoke:
             }],
         }, ensure_ascii=False))
         browser.button("选择结果并审阅")
-        self.dialog("选择 Dream 整理结果", result_path)
+        self.dialog("选择整理结果文件", result_path)
         assert MEMORY_TEXT in browser.text(".change .after")
         assert not self.memories(), "Dream 审阅不得写入 Memory"
-        browser.button("确认发布本次变更")
+        browser.button("保存这些记忆")
         browser.button("取消", "//dialog[@id='modal']")
         assert not self.memories(), "取消发布不得写入 Memory"
         self.checkpoint("来源导出与Dream审阅取消")
 
-        browser.button("确认发布本次变更")
-        browser.button("确认发布", "//dialog[@id='modal']")
+        browser.button("保存这些记忆")
+        browser.button("确认保存", "//dialog[@id='modal']")
         browser.idle()
         assert len(self.memories()) == 1
         receipt_path = self.vault / "control" / "dream-receipts" / f"{job['job_id']}.json"
@@ -365,9 +393,9 @@ class NativeSmoke:
         self.checkpoint("真实Dream发布与凭证")
 
         browser.button("选择结果并审阅")
-        self.dialog("选择 Dream 整理结果", result_path)
-        assert "已经发布" in browser.text("#content")
-        assert not browser.observe("return [...document.querySelectorAll('button')].some(b => b.textContent === '确认发布本次变更')")
+        self.dialog("选择整理结果文件", result_path)
+        assert "已经保存" in browser.text("#content")
+        assert not browser.observe("return [...document.querySelectorAll('button')].some(b => b.textContent === '保存这些记忆')")
         assert len(self.memories()) == 1
         browser.navigate("查找与阅读")
         browser.click("//button[contains(@class,'result-card')][.//span[text()='长期记忆']]", "xpath")

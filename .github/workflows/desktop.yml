@@ -1,6 +1,8 @@
 name: 桌面 GUI 验证
 on:
+  workflow_dispatch:
   push:
+    branches: ["validate/gui-*"]
     paths:
       - 'desktop/**'
       - 'crates/recallcard/**'
@@ -10,6 +12,9 @@ on:
       - 'desktop/**'
       - 'crates/recallcard/**'
       - '.github/workflows/desktop.yml'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:

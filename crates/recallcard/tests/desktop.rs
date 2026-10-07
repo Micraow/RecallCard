@@ -62,6 +62,175 @@ fn add(event: &Event) -> Value {
 }
 
 #[test]
+fn pasted_note_preview_is_read_only_and_confirms_one_searchable_user_event() {
+    let (_dir, mut session, info) = session();
+    let vault = Vault::open(Path::new(&info.root)).unwrap();
+    let content = "  合成笔记：下次说明请使用简洁中文\n保留原来的换行  ";
+    let preview = session
+        .preview_note(&info.session_id, "personal", content)
+        .unwrap();
+    assert_eq!(preview.session_id, info.session_id);
+    assert_eq!(preview.content, content);
+    assert!(!preview.redacted);
+    assert!(vault.events().unwrap().is_empty());
+    assert!(vault.memories().unwrap().is_empty());
+    let result = session
+        .confirm_note(&info.session_id, &preview.preview_id)
+        .unwrap();
+    let event = &result["event"];
+    assert_eq!(event["content"], content);
+    assert_eq!(event["role"], "user");
+    assert_eq!(event["origin"], "user_input");
+    assert_eq!(event["source"]["platform"], "recallcard-desktop");
+    assert_eq!(event["source"]["conversation_id"], "manual-notes");
+    let reference = result["ref"].as_str().unwrap();
+    assert_eq!(
+        reference,
+        format!("event:{}", event["id"].as_str().unwrap())
+    );
+    assert_eq!(
+        session
+            .read(&info.session_id, "personal", reference)
+            .unwrap()["results"][0]["record"]["content"],
+        content
+    );
+    let search = session
+        .search(&info.session_id, "personal", "中文", "events")
+        .unwrap();
+    assert_eq!(search["results"][0]["ref"], reference);
+    assert!(session
+        .confirm_note(&info.session_id, &preview.preview_id)
+        .is_err());
+    assert_eq!(vault.events().unwrap().len(), 1);
+    assert!(vault.memories().unwrap().is_empty());
+}
+
+#[test]
+fn pasted_note_is_redacted_before_preview_and_storage() {
+    let (_dir, mut session, info) = session();
+    let preview = session
+        .preview_note(
+            &info.session_id,
+            "personal",
+            "合成笔记 password=synthetic-note-secret\n其余正文",
+        )
+        .unwrap();
+    assert!(preview.redacted);
+    assert_eq!(preview.content, "合成笔记 [REDACTED]\n其余正文");
+    let result = session
+        .confirm_note(&info.session_id, &preview.preview_id)
+        .unwrap();
+    assert_eq!(result["event"]["content"], preview.content);
+    assert_eq!(result["event"]["capture"]["redacted"], true);
+    assert!(!result.to_string().contains("synthetic-note-secret"));
+}
+
+#[test]
+fn pasted_note_rejects_blank_and_over_limit_utf8_input_without_writes() {
+    let (_dir, mut session, info) = session();
+    for content in ["", " \t\n", "\u{3000}"] {
+        assert!(session
+            .preview_note(&info.session_id, "personal", content)
+            .is_err());
+    }
+    assert!(session
+        .preview_note(&info.session_id, "*", "合成笔记")
+        .is_err());
+    assert!(session
+        .preview_note(&info.session_id, "personal", &"x".repeat(65536))
+        .is_ok());
+    assert!(session
+        .preview_note(&info.session_id, "personal", &"x".repeat(65537))
+        .unwrap_err()
+        .contains("64 KiB"));
+    assert!(session
+        .preview_note(&info.session_id, "personal", &"中".repeat(21845))
+        .is_ok());
+    assert!(session
+        .preview_note(&info.session_id, "personal", &"中".repeat(21846))
+        .is_err());
+    assert_eq!(session.status(&info.session_id).unwrap().event_count, 0);
+}
+
+#[test]
+fn pasted_note_confirmation_uses_server_content_and_scope() {
+    let (_dir, mut session, info) = session();
+    let mut preview = session
+        .preview_note(&info.session_id, "project:demo", "原始批准正文")
+        .unwrap();
+    // 前端显示对象不是发布载荷；更改它不能替换待保存正文或扩大范围。
+    preview.scope = "personal".into();
+    preview.content = "未批准的替代正文".into();
+    let result = session
+        .confirm_note(&info.session_id, &preview.preview_id)
+        .unwrap();
+    assert_eq!(result["event"]["scope"], "project:demo");
+    assert_eq!(result["event"]["content"], "原始批准正文");
+    assert!(session
+        .read(
+            &info.session_id,
+            "personal",
+            result["ref"].as_str().unwrap()
+        )
+        .is_err());
+}
+
+#[test]
+fn pasted_note_cancel_replace_and_failed_preview_revoke_old_confirmation() {
+    let (_dir, mut session, info) = session();
+    let first = session
+        .preview_note(&info.session_id, "personal", "第一份合成笔记")
+        .unwrap();
+    let second = session
+        .preview_note(&info.session_id, "personal", "修改后的合成笔记")
+        .unwrap();
+    assert!(session
+        .confirm_note(&info.session_id, &first.preview_id)
+        .is_err());
+    session.cancel_previews(&info.session_id).unwrap();
+    assert!(session
+        .confirm_note(&info.session_id, &second.preview_id)
+        .is_err());
+    let third = session
+        .preview_note(&info.session_id, "personal", "尚未批准的合成笔记")
+        .unwrap();
+    assert!(session
+        .preview_note(&info.session_id, "personal", "")
+        .is_err());
+    assert!(session
+        .confirm_note(&info.session_id, &third.preview_id)
+        .is_err());
+    assert_eq!(session.status(&info.session_id).unwrap().event_count, 0);
+}
+
+#[test]
+fn pasted_note_vault_switch_revokes_preview_for_both_sessions() {
+    let (dir, mut session, first) = session();
+    let preview = session
+        .preview_note(
+            &first.session_id,
+            "personal",
+            "只属于第一个资料库的合成笔记",
+        )
+        .unwrap();
+    let second = session
+        .select_vault(&dir.path().join("second-note-vault"), true)
+        .unwrap();
+    assert!(session
+        .confirm_note(&first.session_id, &preview.preview_id)
+        .is_err());
+    assert!(session
+        .confirm_note(&second.session_id, &preview.preview_id)
+        .is_err());
+    assert!(Vault::open(Path::new(&first.root))
+        .unwrap()
+        .events()
+        .unwrap()
+        .is_empty());
+    assert_eq!(session.status(&second.session_id).unwrap().event_count, 0);
+}
+
+#[test]
 fn import_preview_is_read_only_redacted_and_confirmed_exactly_once() {
     let (dir, mut session, info) = session();
     assert_eq!(info.scopes, vec!["personal"]);

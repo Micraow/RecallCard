@@ -8,7 +8,7 @@ use crate::{
     context::{truncate_utf8, Context, ReadArgs, SearchArgs},
     dream::{DreamJob, DreamReceipt, DreamResult, DreamReview},
     import::{import_text, parse_text},
-    model::{hash, validate_scope, Origin, Result, Role},
+    model::{hash, validate_scope, EventInput, Origin, Result, Role},
     policy::Access,
     vault::reject_symlink,
     Vault,
@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 const IMPORT_LIMIT: usize = 16 * 1024 * 1024;
 const DREAM_LIMIT: usize = 1024 * 1024;
+const NOTE_LIMIT: usize = 64 * 1024;
 const RESPONSE_LIMIT: usize = 32768;
 const SAMPLE_COUNT: usize = 6;
 const STALE_SESSION: &str = "资料库会话已失效，请重新选择 Vault 后操作";
@@ -67,6 +68,15 @@ pub struct ImportPreview {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotePreview {
+    pub preview_id: String,
+    pub session_id: String,
+    pub scope: String,
+    pub content: String,
+    pub redacted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DreamPreview {
     pub preview_id: String,
     pub session_id: String,
@@ -76,12 +86,13 @@ pub struct DreamPreview {
     pub review: DreamReview,
 }
 
-/// 除已选 Vault 与两份待确认文件标识外，不存登录信息、API key 或外发配置。
+/// 保留已选 Vault、待确认文件标识与一条脱敏笔记，不存登录信息或外发配置。
 #[derive(Default)]
 pub struct DesktopSession {
     selected: Option<SelectedVault>,
     pending_import: Option<PendingImport>,
     pending_dream: Option<PendingDream>,
+    pending_note: Option<PendingNote>,
 }
 
 pub type SessionService = DesktopSession;
@@ -105,6 +116,11 @@ struct PendingDream {
     file: FileSnapshot,
     scope: String,
     result_hash: String,
+}
+
+struct PendingNote {
+    preview_id: String,
+    input: EventInput,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -164,6 +180,7 @@ impl DesktopSession {
         self.selected = None;
         self.pending_import = None;
         self.pending_dream = None;
+        self.pending_note = None;
     }
 
     pub fn status(&self, session_id: &str) -> Result<VaultInfo> {
@@ -275,6 +292,67 @@ impl DesktopSession {
         self.context(session_id, scope)?
             .sources(args)
             .map_err(|_| "来源不可访问、已变化或已被抑制，请重新检索".into())
+    }
+
+    /// 第一条记录无需文件或 JSON：预览完整脱敏内容，但不向 Vault 写入。
+    pub fn preview_note(
+        &mut self,
+        session_id: &str,
+        scope: &str,
+        content: &str,
+    ) -> Result<NotePreview> {
+        self.vault(session_id)?;
+        self.pending_note = None;
+        check_scope(scope)?;
+        if content.trim().is_empty() {
+            return Err("请输入或粘贴一段想保存的内容".into());
+        }
+        if content.len() > NOTE_LIMIT {
+            return Err("单条笔记最多 64 KiB，请拆分后保存".into());
+        }
+        let mut input: EventInput = serde_json::from_value(json!({
+            "occurred_at": Utc::now(),
+            "role": "user",
+            "origin": "user_input",
+            "scope": scope,
+            "content": content,
+            "source": {
+                "platform": "recallcard-desktop",
+                "conversation_id": "manual-notes",
+                "message_id": token()
+            },
+            "metadata": {"entry_method": "desktop_note"}
+        }))
+        .map_err(|_| "无法准备笔记，请检查内容后重试".to_owned())?;
+        // 仅存脱敏后的输入；确认时使用同一份输入、来源编号和范围。
+        redact_event(&mut input).map_err(|_| "笔记无法安全处理，请检查内容后重试".to_owned())?;
+        let preview = NotePreview {
+            preview_id: token(),
+            session_id: session_id.into(),
+            scope: input.scope.clone(),
+            content: input.content.clone(),
+            redacted: input.capture.redacted,
+        };
+        self.pending_note = Some(PendingNote {
+            preview_id: preview.preview_id.clone(),
+            input,
+        });
+        Ok(preview)
+    }
+
+    /// 用户确认后追加一条 Event；不接受前端重新传入的正文、范围或来源字段。
+    pub fn confirm_note(&mut self, session_id: &str, preview_id: &str) -> Result<Value> {
+        let vault = self.vault(session_id)?;
+        let pending = self
+            .pending_note
+            .as_ref()
+            .filter(|p| p.preview_id == preview_id)
+            .ok_or("笔记预览已失效，请重新预览后保存")?;
+        let event = vault
+            .capture(pending.input.clone())
+            .map_err(|_| "笔记保存未完成，请检查资料库后重试".to_owned())?;
+        self.pending_note = None;
+        Ok(json!({"ref": format!("event:{}", event.id), "event": event}))
     }
 
     pub fn preview_import(
@@ -461,6 +539,7 @@ impl DesktopSession {
         self.vault(session_id)?;
         self.pending_import = None;
         self.pending_dream = None;
+        self.pending_note = None;
         Ok(())
     }
 

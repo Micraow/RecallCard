@@ -54,7 +54,7 @@ async fn choose_vault(
         let title = if create { "选择用于新资料库的空文件夹" } else { "打开已有 RecallCard 资料库" };
         let Some(path) = app.dialog().file().set_title(title).blocking_pick_folder() else { return Ok(None); };
         let path = path.into_path().map_err(|_| "请选择本机文件夹")?;
-        if create && !app.dialog().message(format!("在此文件夹创建 RecallCard 资料库？\n\n{}\n\n将创建 Event、Memory 等资料目录。现有文件不会被覆盖。", path.display())).title("创建资料库").buttons(MessageDialogButtons::OkCancelCustom("创建资料库".into(), "取消".into())).blocking_show() { return Ok(None); }
+        if create && !app.dialog().message(format!("在此文件夹创建 RecallCard 资料库？\n\n{}\n\n将在此文件夹保存对话和记忆。现有文件不会被覆盖。", path.display())).title("创建资料库").buttons(MessageDialogButtons::OkCancelCustom("创建资料库".into(), "取消".into())).blocking_show() { return Ok(None); }
         Ok::<_, String>(Some(path))
     }).await.map_err(|_| "文件夹选择未完成")??;
     let Some(path) = selected else {
@@ -129,6 +129,29 @@ async fn read_sources(
     .await
 }
 #[tauri::command]
+async fn preview_note(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    content: String,
+) -> Result<recallcard::desktop::NotePreview, String> {
+    execute(state.service.clone(), move |s| {
+        s.preview_note(&session_id, &scope, &content)
+    })
+    .await
+}
+#[tauri::command]
+async fn confirm_note(
+    state: State<'_, AppState>,
+    session_id: String,
+    preview_id: String,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.confirm_note(&session_id, &preview_id)
+    })
+    .await
+}
+#[tauri::command]
 async fn pick_import(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -180,7 +203,7 @@ async fn pick_dream(
         let _guard = guard;
         app.dialog()
             .file()
-            .set_title("选择 Dream 整理结果")
+            .set_title("选择整理结果文件")
             .add_filter("Dream JSON", &["json"])
             .blocking_pick_file()
     })
@@ -221,7 +244,7 @@ async fn export_dream(
         let _guard = guard;
         app.dialog()
             .file()
-            .set_title("保存本次整理的来源包")
+            .set_title("保存整理包")
             .set_file_name("recallcard-dream-job.json")
             .add_filter("Dream JSON", &["json"])
             .blocking_save_file()
@@ -267,6 +290,8 @@ fn main() {
             read_record,
             read_sources,
             pick_import,
+            preview_note,
+            confirm_note,
             confirm_import,
             pick_dream,
             apply_dream,

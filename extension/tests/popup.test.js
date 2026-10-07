@@ -28,7 +28,7 @@ for(const [origin,name] of [['https://chat.qwen.ai','Qwen'],['https://chat.z.ai'
     await h.click('reset');assert.equal(h.nodes.bootstrap.disabled,false);
     assert.match(h.nodes.binding.textContent,new RegExp(name.replace('.','\\.')));assert.ok(h.nodes.privacy.textContent.includes(name));
     await h.click('bootstrap');assert.equal(h.nodes.preview.value,'本机合成预览');assert.equal(h.nodes.insert.disabled,false);
-    await h.click('insert');assert.ok(h.nodes.status.textContent.includes(name));assert.match(h.nodes.status.textContent,/自己点击/);
+    await h.click('insert');assert.ok(h.nodes.status.textContent.includes(name));assert.match(h.nodes.status.textContent,/点击.*网页的发送按钮/);
     assert.ok(h.sent.every(msg=>['inspect','reset','bootstrap','insert'].includes(msg.kind)));
   });
 }

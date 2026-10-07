@@ -3,9 +3,9 @@ const $ = (id) => document.getElementById(id);
 let tabId, state = null, busy = false, canReset = false;
 function status(text, error = false) { $('status').textContent = text; $('status').classList.toggle('error', error); }
 function render() {
-  $('binding').textContent = state ? `网站: ${state.platform_name}\nsession_ref: ${state.session_ref}\nnonce: ${state.nonce}\n${state.route}` : '';
+  $('binding').textContent = state ? `网站：${state.platform_name}\n当前对话：${state.route}` : '';
   $('preview').value = state?.preview?.text || '';
-  $('privacy').textContent = `插入会让${state?.platform_name || '当前对话网站'}接触这些资料；即使尚未发送，也请先检查隐私。这里只表示已准备草稿，不代表模型已读到。`;
+  $('privacy').textContent = `加入草稿后，${state?.platform_name || '当前网站'}即可读取这些资料。确认可以分享后，再在网页点击发送。`;
   for (const button of document.querySelectorAll('button')) button.disabled = busy || !state;
   $('reset').disabled = busy || !canReset;
   $('insert').disabled = busy || state?.preview?.delivery !== 'prepared';
@@ -23,13 +23,13 @@ async function run(kind) {
   try {
     state = await send(kind);
     const messages = {
-      inspect: state.platform !== 'chatgpt' ? `已核对 ${state.platform_name} 的地址与输入框，无法自动判断是否换了对话。切换或不确定时请先重置；旧预览插入前仍会核验本机资料。${state.warnings?.join('；') || ''}` : state.warnings?.length ? `已切换会话；旧草稿需要人工检查：${state.warnings.join('；')}` : (state.preview ? '已恢复暂存预览；插入前将重新核验本机资料。手动复制前请重新请求并检查。' : '已绑定当前会话。资料只会在你点击后准备。'),
-      reset: state.warnings?.length ? `已重置；请人工检查旧草稿：${state.warnings.join('；')}` : '已按你的选择重置绑定。旧请求已失效，请重新准备 Bootstrap；实验平台切换对话后须再次重置。',
-      bootstrap: 'Bootstrap 已准备。请检查资料和来源，再决定是否插入。',
-      execute: '本机读取完成。请检查预览；尚未插入或发送。',
-      insert: `已追加到可见草稿。请检查后自己点击 ${state.platform_name} 网页的发送按钮。`,
-      remove: '只移除了未被改动的 RecallCard 上下文，保留你的其他草稿。',
-      delivered: '已记录你的手动发送确认；扩展没有自动检测模型是否收到。',
+      inspect: state.platform !== 'chatgpt' ? `已识别 ${state.platform_name}。还不能自动判断是否换了对话，切换后请点“重新连接当前对话”。${state.warnings?.join('；') || ''}` : state.warnings?.length ? `已切换对话，请检查旧草稿：${state.warnings.join('；')}` : (state.preview ? '已恢复资料预览。手动复制前请重新查找，确认内容仍然有效。' : '已识别当前对话。点击“准备使用说明”开始。'),
+      reset: state.warnings?.length ? `已重新连接，请检查旧草稿：${state.warnings.join('；')}` : '已重新连接当前对话，请重新准备使用说明。',
+      bootstrap: '使用说明已准备，请检查后加入对话。',
+      execute: '资料已找到，请检查预览。',
+      insert: `资料已加入草稿。请检查后点击 ${state.platform_name} 网页的发送按钮。`,
+      remove: '已移除加入的资料，你原有的草稿已保留。',
+      delivered: '已记录为已发送。',
     };
     if (kind === 'reset') $('action').value = '';
     status(messages[kind]);
