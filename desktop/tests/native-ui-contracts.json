@@ -1,0 +1,6 @@
+{
+  "empty_search": {
+    "selector": ".results .empty h3",
+    "text": "没有找到匹配资料"
+  }
+}

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+const nativeContracts = JSON.parse(await readFile(new URL('../native-ui-contracts.json', import.meta.url), 'utf8'));
 import { fixture } from './harness.mjs';
 import { vault, preview } from './fixtures.mjs';
 const conversation = { session_ref: 'browser-contract', title: '从 DeepSeek 继续', platform: 'deepseek', message_count: 1, captured_at: '2026-10-06T10:00:00Z', coverage: 'partial' };
@@ -346,4 +348,17 @@ test('自动导入选中后打开接续进入详情状态，缩窄时不会退�
   assert.ok(ui.one('#continuation-panel'));
   await ui.click('返回阅读');
   assert.equal(ui.one('.conversation-layout').classList.contains('show-detail'), true);
+});
+
+// 与真实原生脚本共用验收文字，应用仍加载未修改的模块；改产品文案时本地即可发现脚本漂移。
+test('搜索空状态：移除旧结果和正文，并符合原生验收文案', async t => {
+  const ui = await fixture(t); await openPopulated(ui); await search(ui);
+  assert.equal(ui.one('.reading-pane .body-text').textContent, event.content);
+  ui.native.next('search_records', { results: [], truncated: false });
+  await ui.click('查找');
+  assert.equal(ui.document.querySelectorAll('.results .result-card').length, 0);
+  assert.equal(ui.document.querySelector('.reading-pane .body-text'), null);
+  const contract = nativeContracts.empty_search;
+  assert.equal(ui.one(contract.selector).textContent, contract.text);
+  ui.noWrites();
 });
