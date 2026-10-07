@@ -8,7 +8,7 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 import { syntheticBridge } from './fixtures.mjs';
 
 const uiDirectory = new URL('../../ui/', import.meta.url);
-const allowedModules = new Set(['app.js', 'model.js', 'memory-management.js', 'background.js', 'import-tasks.js']
+const allowedModules = new Set(['app.js', 'model.js', 'memory-management.js', 'background.js', 'import-tasks.js', 'context-selection.js']
   .map(name => new URL(name, uiDirectory).href));
 
 // 每个用例加载真正的 index.html 与未改写的 ES 模块，彼此独立的 Window / 模块状态。

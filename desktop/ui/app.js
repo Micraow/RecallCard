@@ -2,6 +2,7 @@ import { pages, shorten, displayDate, recordText, recordRef, newState, activateV
 import { createMemoryManagement, invalidateMemoryContent } from './memory-management.js';
 import { createBackground } from './background.js';
 import { createImportTasks } from './import-tasks.js';
+import { createContextSelection } from './context-selection.js';
 const state = newState();
 const content = document.querySelector('#content');
 const modal = document.querySelector('#modal');
@@ -78,6 +79,7 @@ async function enterPage(page) {
   if (['conversations', 'memories'].includes(page)) state.workspace = page;
   if (page === 'home') page = state.vault ? 'conversations' : 'home';
   state.page = page;
+  if (page !== 'search' && state.contextSelection) { state.contextSelection.open = false; contextSelection.invalidate(); }
   if (!['conversations', 'search'].includes(page)) state.continuationOpen = false;
   if (!state.vault || !['search', 'conversations', 'memories'].includes(page)) render();
   content.focus({ preventScroll: true });
@@ -251,11 +253,11 @@ async function loadRecords(preserve = false) {
   await run('正在查找本地资料…', async current => {
     const selected = preserve ? state.selected : null;
     if (!preserve) { resetReaderView('search:'); state.viewport['search:'].list = 0; }
-    state.selected = null; state.sources = []; state.continuation = null; render();
+    state.selected = null; state.sources = []; state.continuation = null; contextSelection.clear(); render();
     const query = state.query.trim();
     const result = await invoke(query ? 'search_records' : 'browse_records', { ...args(), target: state.target, ...(query ? { query } : {}) });
     if (!current()) return;
-    state.results = result.results || []; state.searchLoaded = true;
+    state.results = result.results || []; state.searchLoaded = true; state.resultQuery = query;
     state.resultNote = result.truncated ? '结果较多，请缩小关键词范围' : `${state.results.length} 条可见资料`;
     const freshSelected = selected && state.results.find(item => recordRef(item) === recordRef(selected));
     if (freshSelected) await readRecordValue(freshSelected, current);
@@ -303,18 +305,20 @@ function readingPane() {
 function searchPage() {
   const target = $('select', { 'aria-label': '资料类型' }, $('option', { value: 'all' }, '所有资料'), $('option', { value: 'events' }, '原始记录'), $('option', { value: 'memories' }, '长期记忆'));
   target.value = state.target; target.addEventListener('change', () => { state.target = target.value; loadRecords(); });
-  content.append($('div', { class: 'workspace-heading' }, $('h1', {}, '搜索结果'), $('span', { class: 'muted' }, state.resultNote || '在当前范围内查找'), target, button('返回工作区', () => navigate(state.workspace), false, 'small')));
+  content.append($('div', { class: 'workspace-heading' }, $('h1', {}, '搜索结果'), $('span', { class: 'muted' }, state.resultNote || '在当前范围内查找'), target, state.results.length ? button('带走这些资料', () => contextSelection.open(), true) : null, button('返回工作区', () => navigate(state.workspace), false, 'small')));
   const results = $('div', { class: 'results list-scroll', 'data-scroll': 'list', 'aria-label': '搜索结果' });
   if (!state.results.length) results.append($('div', { class: 'empty' }, $('h3', {}, state.query ? '没有找到匹配资料' : '还没有可见资料'), paragraph('试试更短的原话，或检查顶部资料范围。')));
   for (const item of state.results) {
     const ref = recordRef(item); const isMemory = ref.startsWith('memory:');
     const source = item.source_summary?.sources?.[0];
-    results.append($('button', { class: `result-card ${recordRef(state.selected) === ref ? 'selected' : ''}`, onclick: () => readRecord(item), 'aria-pressed': String(recordRef(state.selected) === ref), 'data-reference': ref },
+    const resultButton = $('button', { class: `result-card ${recordRef(state.selected) === ref ? 'selected' : ''}`, onclick: () => { if (state.contextSelection) state.contextSelection.open = false; contextSelection.invalidate(); readRecord(item); }, 'aria-pressed': String(recordRef(state.selected) === ref), 'data-reference': ref },
       $('strong', {}, item.conversation_title || item.title || (isMemory ? shorten(recordText(item), 52) : '原始记录')),
       $('span', { class: 'result-excerpt' }, shorten(recordText(item), 190)),
-      $('span', { class: 'muted' }, `${isMemory ? '记忆' : roleLabel(item.role)} · ${item.platform || source?.platform || '来源未知'} · ${displayDate(item.occurred_at || item.valid_from)}`)));
+      $('span', { class: 'muted' }, `${isMemory ? '记忆' : roleLabel(item.role)} · ${item.platform || source?.platform || '来源未知'} · ${displayDate(item.occurred_at || item.valid_from)}`));
+    const check = contextSelection.checkbox(item);
+    results.append(check ? $('div', { class: `context-result-row ${check.querySelector('input').checked ? 'included' : ''}` }, check, resultButton) : resultButton);
   }
-  content.append($('div', { class: `results-layout workspace-split ${state.mobileDetail && state.selected ? 'show-detail' : ''}` }, results, readingPane()));
+  content.append($('div', { class: `results-layout workspace-split ${state.mobileDetail && (state.selected || contextSelection.isOpen()) ? 'show-detail' : ''}` }, results, contextSelection.isOpen() ? contextSelection.pane() : readingPane()));
 }
 async function refreshStatus() { state.vault = await invoke('vault_status', { sessionId: state.vault.session_id }); }
 function discardChangedImport(error) {
@@ -692,20 +696,22 @@ function render() {
 document.querySelector('#switch-vault').addEventListener('click', () => discardBefore(vaultChooser));
 document.querySelector('#import-button').addEventListener('click', () => state.vault ? navigate('import') : vaultChooser());
 document.querySelector('#connect-button').addEventListener('click', () => navigate('connect'));
-document.querySelector('#query').addEventListener('input', event => { state.query = event.target.value; });
+document.querySelector('#query').addEventListener('input', event => { if (state.busy) { event.target.value = state.query; return; } state.query = event.target.value; });
 document.querySelector('#global-search').addEventListener('submit', event => { event.preventDefault(); if (!state.vault || state.busy) return; discardBefore(async () => { captureView(); state.page = 'search'; state.mobileDetail = false; render(); await loadRecords(); }); });
 document.querySelector('.brand').addEventListener('click', event => { event.preventDefault(); navigate(state.vault ? 'conversations' : 'home'); });
 document.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key === 'k' && !state.busy) { event.preventDefault(); document.querySelector('#query')?.focus(); }
+  if (event.key === 'Escape' && contextSelection.isOpen() && !modal.open) contextSelection.close();
   if (event.key === 'Escape' && state.continuationOpen && !modal.open) { state.continuationOpen = false; render(); }
   if (['ArrowDown', 'ArrowUp'].includes(event.key) && event.target.matches('button.result-card')) {
-    const siblings = [...event.target.parentElement.querySelectorAll('button.result-card')]; const index = siblings.indexOf(event.target);
+    const siblings = [...(event.target.closest('.results') || event.target.parentElement).querySelectorAll('button.result-card')]; const index = siblings.indexOf(event.target);
     event.preventDefault(); siblings[Math.max(0, Math.min(siblings.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))]?.focus();
   }
 });
-const sharedUI = { state, content, $, button, paragraph, heading, panel, hint, line, scopeSelect, invoke, run, render, showNotice, confirmDialog, navigate, memoryToolbar, detailBack, technicalDetails, actionButton, locateEvent, showBackground, discardBefore, resetReaderView };
+const sharedUI = { state, content, $, button, paragraph, heading, panel, hint, line, scopeSelect, invoke, run, render, showNotice, confirmDialog, navigate, memoryToolbar, detailBack, technicalDetails, actionButton, locateEvent, showBackground, discardBefore, resetReaderView, readRecord };
 const memoryManagement = createMemoryManagement(sharedUI);
 const background = createBackground(sharedUI);
+const contextSelection = createContextSelection(sharedUI);
 const importTasks = createImportTasks({ ...sharedUI, viewImported: () => { state.importBatch = null; navigate('conversations'); } });
 render();
 restoreWorkspace();

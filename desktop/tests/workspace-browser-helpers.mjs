@@ -11,7 +11,7 @@ export async function captureBrowserEvidence(page, label) {
   const layout = await page.evaluate(() => ({
     viewport: { width: innerWidth, height: innerHeight },
     workspace: document.querySelector('.workspace-split')?.className,
-    controls: ['#notice', '#continuation-panel', '.copy-continuation', '.conversation-list', '.reader-scroll'].map(selector => {
+    controls: ['#notice', '#continuation-panel', '#selection-context-panel', '.copy-continuation', '.conversation-list', '.reader-scroll'].map(selector => {
       const node = document.querySelector(selector);
       if (!node) return { selector, present: false };
       const rect = node.getBoundingClientRect();
@@ -25,7 +25,7 @@ export async function captureBrowserEvidence(page, label) {
 
 export async function workspaceAssets() {
   const assets = new Map();
-  for (const name of ['index.html', 'app.js', 'model.js', 'memory-management.js', 'background.js', 'import-tasks.js', 'styles.css']) {
+  for (const name of ['index.html', 'app.js', 'model.js', 'memory-management.js', 'background.js', 'import-tasks.js', 'context-selection.js', 'styles.css']) {
     assets.set(`/${name}`, await readFile(new URL(`../ui/${name}`, import.meta.url)));
   }
   return assets;

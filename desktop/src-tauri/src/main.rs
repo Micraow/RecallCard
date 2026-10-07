@@ -533,6 +533,21 @@ async fn prepare_continuation(
     .await
 }
 
+#[tauri::command]
+async fn prepare_selected_context(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    references: Vec<String>,
+    goal: String,
+    budget_tokens: usize,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |service| {
+        service.prepare_selected_context(&session_id, &scope, &references, &goal, budget_tokens)
+    })
+    .await
+}
+
 fn packaged_cli(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let executable = std::env::current_exe().map_err(|_| "无法确定程序位置")?;
     let mut candidates = vec![executable
@@ -928,6 +943,7 @@ fn main() {
             list_conversations,
             conversation_messages,
             prepare_continuation,
+            prepare_selected_context,
             prepare_client_config,
             install_browser_connection,
             search_records,

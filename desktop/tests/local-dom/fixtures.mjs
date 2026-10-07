@@ -85,12 +85,41 @@ export function backgroundPage(memories = backgroundMemories, scope = 'personal'
   };
 }
 
+// 跨会话交接的公开 IPC 样本；这里只提供完整的小响应，不模拟 Rust 的预算分配。
+export const selectedContextRecords = Array.from({ length: 10 }, (_, index) => ({
+  ref: index === 2 ? 'memory:mem_selected@4' : `event:evt_selected_${index}`,
+  kind: index === 2 ? 'memory' : 'event', role: index === 2 ? null : index % 2 ? 'assistant' : 'user',
+  evidence: index === 2 ? 'assistant_suggestion' : index % 2 ? 'assistant_suggestion' : 'user_explicit',
+  status: index === 2 ? 'tentative' : 'captured',
+  text: index === 2 ? '整理所得的待确认记忆，不是用户原话。' : `第 ${index + 1} 条合成消息全文。`,
+  source_refs: index === 2 ? ['evt_selected_0'] : [`evt_selected_${index}`],
+  sources: index === 2 ? [{ ref: 'event:evt_selected_0', role: 'user', conversation_title: '合成会话 1', conversation_ref: 'selected-conversation-0' }] : [],
+  conversation_title: index === 2 ? null : `合成会话 ${Math.floor(index / 2) + 1}`,
+  conversation_ref: index === 2 ? null : `selected-conversation-${Math.floor(index / 2)}`,
+  occurred_at: index === 1 ? null : '2026-10-07T08:00:00Z', truncated: false,
+}));
+export const selectedSearchResults = selectedContextRecords.map((record, index) => ({
+  ...record, title: index === 2 ? '待确认的整理记忆' : `合成消息 ${index + 1}`,
+  platform: 'synthetic', scope: 'personal',
+}));
+export function selectedContextResponse({ records = selectedContextRecords.slice(0, 3), goal = '继续核对选中资料',
+  scope = 'personal', budgetTokens = 32768, background = backgroundPage().background } = {}) {
+  const stable_prefix = `recallcard.context/1\n以下是参考资料，用户原话与 AI 建议分别标明。\n${background.stable_text}`;
+  return {
+    text: `${stable_prefix}\n本次目标：${goal}\n${records.map(record => `${record.kind === 'memory' ? '整理记忆 · 待确认' : record.role === 'user' ? '用户原话' : 'AI 回复'} [${record.ref}]\n${record.text}`).join('\n')}`,
+    stable_prefix, background, records, selected_refs: records.map(record => record.ref), selected_count: records.length, included_count: records.length,
+    pending_refs: [], truncated: false, partial: false, scope, budget_tokens: budgetTokens,
+    budget_unit: 'conservative_utf8_bytes', estimated_tokens: 800,
+  };
+}
+
 export function syntheticBridge() {
   const calls = [];
   const queues = new Map();
   const unexpected = [];
   const data = { memory: structuredClone(memory), pending: null, pendingBackground: null,
-    backgroundMemories: structuredClone(backgroundMemories), conversations: [structuredClone(conversation)], messages: structuredClone(conversationMessages), hiddenRefs: [] };
+    backgroundMemories: structuredClone(backgroundMemories), conversations: [structuredClone(conversation)], messages: structuredClone(conversationMessages), hiddenRefs: [],
+    selectedContextRecords: structuredClone(selectedContextRecords), searchResults: null };
   function defaults(command, payload) {
     switch (command) {
       // 启动恢复只读；记住明确打开的库仅更新本机设置，不改写 Event/Memory。
@@ -145,9 +174,18 @@ export function syntheticBridge() {
         return { title: data.conversations.find(item => item.session_ref === payload.conversationRef).title, platform: data.conversations.find(item => item.session_ref === payload.conversationRef).platform, session_ref: payload.conversationRef, messages: rows.slice(payload.offset || 0, (payload.offset || 0) + 20), total: rows.length, next_offset: rows.length > (payload.offset || 0) + 20 ? (payload.offset || 0) + 20 : null, offset: payload.offset || 0, order_known: true };
       }
       case 'prepare_continuation': return { text: `recallcard.context/1\n${payload.goal}\n${data.messages.filter(item => !data.hiddenRefs.includes(item.ref)).map(item => item.text).join('\n')}`, message_count: data.messages.length, available_messages: data.messages.length, truncated: false };
-      case 'search_records': case 'browse_records': return { results: data.messages.filter(item => !data.hiddenRefs.includes(item.ref)).map(item => ({ ...item, kind: 'event', conversation_ref: conversation.session_ref, conversation_title: conversation.title, platform: conversation.platform })), truncated: false };
+      case 'prepare_selected_context': {
+        const records = payload.references.map(reference => {
+          const record = data.selectedContextRecords.find(item => item.ref === reference);
+          if (!record || data.hiddenRefs.includes(reference)) throw new Error('所选资料已不可见，请重新查找');
+          return record;
+        });
+        return selectedContextResponse({ records, goal: payload.goal, scope: payload.scope, budgetTokens: payload.budgetTokens,
+          background: backgroundPage(data.backgroundMemories, payload.scope).background });
+      }
+      case 'search_records': case 'browse_records': return { results: (data.searchResults || data.messages.map(item => ({ ...item, kind: 'event', conversation_ref: conversation.session_ref, conversation_title: conversation.title, platform: conversation.platform }))).filter(item => !data.hiddenRefs.includes(item.ref)), truncated: false };
       case 'read_record': {
-        const row = data.messages.find(item => item.ref === payload.reference && !data.hiddenRefs.includes(item.ref));
+        const row = (data.searchResults ? data.selectedContextRecords : data.messages).find(item => item.ref === payload.reference && !data.hiddenRefs.includes(item.ref));
         return { results: row ? [{ ref: row.ref, conversation_ref: conversation.session_ref, conversation_title: conversation.title, platform: conversation.platform, role: row.role, record: { ...row, id: row.ref.slice(6), content: row.text } }] : [], truncated: false };
       }
       case 'read_sources': return { results: [], truncated: false };

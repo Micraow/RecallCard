@@ -10,6 +10,16 @@
 
 .import-job{max-width:960px}.import-job>h2{margin-top:0}.import-job progress{display:block;width:100%;height:14px;accent-color:var(--accent);margin:16px 0}.import-job-actions{position:sticky;bottom:-22px;padding:12px 0;background:var(--surface);z-index:1}.import-job details{margin-top:18px}.official-export-guide{padding-top:18px;border-top:1px solid var(--border)}.official-export-guide p,.import-job-details p{font-size:13px;overflow-wrap:anywhere}.import-history-row{display:flex;justify-content:space-between;gap:12px;align-items:center;border-top:1px solid var(--border);margin-top:12px}.import-history-row p{font-size:12px}
 
-.handoff-branches { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 16px; }
+.handoff-branches { border-top: 1px solid var(--border); padding-top: 16px; margin-top: 16px; }
 .handoff-branches select { width: 100%; min-width: 0; text-overflow: ellipsis; }
 .branch-end { margin-top: 10px; }
+
+.context-result-row{display:grid;grid-template-columns:28px minmax(0,1fr);align-items:start;gap:8px}
+.context-result-row .result-card{min-width:0;width:100%}
+.context-check{padding-top:17px;display:flex;justify-content:center}
+.context-check input{width:17px;height:17px}
+.selected-context-record{border-bottom:1px solid var(--border);padding:12px 0;overflow-wrap:anywhere}
+.selected-context-record p{white-space:pre-wrap}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+.context-result-row.included>.result-card{background:var(--accent-soft)}
+.context-result-row>.result-card.selected{box-shadow:none}

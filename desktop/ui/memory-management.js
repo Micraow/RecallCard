@@ -22,6 +22,7 @@ export function memoryReviewKey(state) {
 }
 // 变更后立即废弃可能包含旧内容的阅读、交接、整理任务和来源选择。
 export function invalidateMemoryContent(state) {
+  state.contextSelection = null; state.resultQuery = '';
   if (state.conversation?.session_ref) state.resumeConversation = { session_ref: state.conversation.session_ref, goal: state.continuationGoal || '', offset: state.conversationOffset || 0 };
   state.results = []; state.resultNote = ''; state.selected = null; state.sources = [];
   state.selectedRefs = []; state.dreamPreview = null; state.dreamEvidence = {}; state.dreamTask = null; state.dreamResultText = '';
