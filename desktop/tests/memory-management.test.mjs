@@ -34,6 +34,8 @@ async function fixture(t, overrides = {}) {
   const defaults = (command, payload) => {
     const row = { ...data.memory, content: '列表记忆片段', hidden: data.hidden, can_restore: data.canRestore };
     switch (command) {
+      case 'restore_workspace': case 'remember_workspace': return null;
+      case 'list_import_jobs': return [];
       case 'choose_vault': case 'vault_status': return vault;
       case 'cancel_previews': data.pending = null; return null;
       case 'manage_memories': return { memories: payload.scope === 'work' || (!payload.includeHidden && (data.hidden || !['active', 'tentative'].includes(row.status))) ? [] : [row], total: data.listTotal, next_offset: payload.offset + 30 < data.listTotal ? payload.offset + 30 : null };

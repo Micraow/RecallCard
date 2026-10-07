@@ -141,16 +141,63 @@ async function locateEventNow(reference, continuation = false) {
     state.page = 'conversations'; state.workspace = 'conversations'; state.mobileDetail = true;
   });
 }
+function workspaceCurrent() {
+  const epoch = state.epoch, session = state.vault?.session_id, scope = state.scope;
+  return () => state.epoch === epoch && state.vault?.session_id === session && state.scope === scope;
+}
+let rememberQueue = Promise.resolve();
+async function rememberWorkspace(current = workspaceCurrent()) {
+  if (!state.vault || !current()) return;
+  const payload = args();
+  const operation = rememberQueue.then(async () => {
+    if (!current()) return;
+    try { await invoke('remember_workspace', payload); }
+    catch (error) { if (current()) showNotice('资料已打开，但暂时无法记住这个位置。下次仍可手动打开。', true); }
+  });
+  // 串行保存并跳过已经过期的设置，避免较早范围的迟到写入覆盖新选择。
+  rememberQueue = operation.catch(() => {});
+  await operation;
+}
+async function openWorkspaceContents(current = workspaceCurrent()) {
+  try {
+    const jobs = await invoke('list_import_jobs', args());
+    if (!current()) return;
+    if (importTasks.restore(jobs)) { state.page = 'import'; return; }
+  } catch (error) {
+    if (!current()) return;
+    showNotice('资料已打开，但上次导入的状态暂时无法核实。可在添加资料中重新检查。', true);
+  }
+  if (!current()) return;
+  if (!state.vault.event_count) { state.page = 'import'; return; }
+  state.page = 'conversations';
+  const listed = await invoke('list_conversations', { ...args(), offset: 0 });
+  if (!current()) return;
+  state.conversations = listed.conversations || []; state.conversationTotal = listed.total; state.conversationListNext = listed.next_offset;
+  if (state.conversations[0]) await readConversation(state.conversations[0], 0, current);
+}
+async function restoreWorkspace() {
+  if (!window.__TAURI__?.core?.invoke) return;
+  await run('正在打开上次的资料…', async initialCurrent => {
+    const restored = await invoke('restore_workspace', {});
+    if (!initialCurrent() || !restored) return;
+    if (!restored.vault || typeof restored.vault.session_id !== 'string' || !restored.vault.session_id || typeof restored.scope !== 'string' || !restored.scope.trim() || restored.scope.length > 128 || /[\u0000-\u001f]/.test(restored.scope)) throw new Error('上次的位置无法核实，请重新选择资料库');
+    activateVault(state, restored.vault); resetScope(state, restored.scope);
+    await openWorkspaceContents(workspaceCurrent());
+  });
+}
 async function chooseVault(create) {
   modal.close();
-  await run(create ? '正在创建资料库…' : '正在打开资料库…', async () => {
-    try {
-      const vault = await invoke('choose_vault', { create });
-      if (vault) { activateVault(state, vault); showNotice(`已打开 ${vault.display_name}`); const listed = await invoke('list_conversations', { ...args(), offset: 0 }); state.conversations = listed.conversations || []; state.conversationTotal = listed.total; state.conversationListNext = listed.next_offset; if (state.conversations[0]) await readConversation(state.conversations[0], 0, () => true); }
-    } catch (error) {
-      // 核心在一次失败的切换后会失效旧会话，页面也立即清除旧预览。
-      activateVault(state, { scopes: [] }); state.vault = null; throw error;
+  await run(create ? '正在创建资料库…' : '正在打开资料库…', async initialCurrent => {
+    let vault;
+    try { vault = await invoke('choose_vault', { create }); }
+    catch (error) {
+      if (initialCurrent()) { activateVault(state, { scopes: [] }); state.vault = null; }
+      throw error;
     }
+    if (!vault || !initialCurrent()) return;
+    activateVault(state, vault); const current = workspaceCurrent(); showNotice(`已打开 ${vault.display_name}`);
+    await rememberWorkspace(current);
+    if (current()) await openWorkspaceContents(current);
   });
 }
 function vaultChooser() {
@@ -173,19 +220,18 @@ async function cancelPreviews(next) {
 function scopeSelect() {
   const node = $('select', { 'aria-label': '资料范围' });
   for (const scope of scopeOptions(state.vault, state.scope)) { const option = $('option', { value: scope }, scopeLabel(scope)); option.selected = scope === state.scope; node.append(option); }
-  node.addEventListener('change', () => { const scope = node.value; node.value = state.scope; discardBefore(async () => { await cancelPreviews(() => resetScope(state, scope)); if (state.page === 'search') loadRecords(); else if (state.page === 'conversations') loadConversations(); else if (state.page === 'memories') memoryManagement.load(); }); });
+  node.addEventListener('change', () => { const scope = node.value; node.value = state.scope; discardBefore(async () => { await cancelPreviews(() => resetScope(state, scope)); await rememberWorkspace(); if (state.page === 'search') loadRecords(); else if (state.page === 'conversations') loadConversations(); else if (state.page === 'memories') memoryManagement.load(); }); });
   return node;
 }
 function needsVault() {
   content.append(heading('打开资料库', '选择保存记忆的文件夹，即可导入、检索和审阅资料。'), $('div', { class: 'empty' }, $('div', { class: 'empty-icon' }, '▧'), $('h2', {}, '选择保存资料的位置'), paragraph('从已有资料库继续，或创建一个新的本地空间。'), button('选择资料库', vaultChooser, true)));
 }
 function home() {
-  content.append($('section', { class: 'onboarding' }, $('h1', {}, '把以前的对话接着用'), paragraph('导入历史，找到原话，换一个 AI 继续。'), button('开始使用', () => run('正在准备本机保存位置…', async () => {
-    const vault = await invoke('open_default_workspace', {}); activateVault(state, vault);
-    if (!vault.event_count) { state.page = 'import'; return; }
-    const listed = await invoke('list_conversations', { ...args(), offset: 0 });
-    state.conversations = listed.conversations || []; state.conversationTotal = listed.total; state.conversationListNext = listed.next_offset;
-    if (state.conversations[0]) await readConversation(state.conversations[0], 0, () => true);
+  content.append($('section', { class: 'onboarding' }, $('h1', {}, '把以前的对话接着用'), paragraph('导入历史，找到原话，换一个 AI 继续。'), button('开始使用', () => run('正在准备本机保存位置…', async initialCurrent => {
+    const vault = await invoke('open_default_workspace', {}); if (!initialCurrent()) return;
+    activateVault(state, vault); const current = workspaceCurrent();
+    await rememberWorkspace(current);
+    if (current()) await openWorkspaceContents(current);
   }), true), paragraph('默认保存在本机，不需要账号或 API。'), $('div', { class: 'button-row' }, button('打开已有资料库', () => chooseVault(false)), button('创建新资料库', () => chooseVault(true)))));
 }
 async function readRecordValue(item, current) {
@@ -662,3 +708,4 @@ const memoryManagement = createMemoryManagement(sharedUI);
 const background = createBackground(sharedUI);
 const importTasks = createImportTasks({ ...sharedUI, viewImported: () => { state.importBatch = null; navigate('conversations'); } });
 render();
+restoreWorkspace();

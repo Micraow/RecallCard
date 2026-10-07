@@ -99,6 +99,39 @@ async fn open_default_workspace(
     .await
 }
 
+fn recent_workspace_file(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|directory| directory.join("recent-workspace.json"))
+        .map_err(|_| "无法确定上次资料库设置的保存位置".into())
+}
+
+#[tauri::command]
+async fn remember_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> Result<(), String> {
+    let path = recent_workspace_file(&app)?;
+    execute(state.service.clone(), move |service| {
+        service.remember_workspace(&session_id, &scope, &path)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn restore_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<recallcard::desktop::RestoredWorkspace>, String> {
+    let path = recent_workspace_file(&app)?;
+    execute(state.service.clone(), move |service| {
+        service.restore_workspace(&path)
+    })
+    .await
+}
+
 /// 固定公开网址，不能由网页或导入文件传入地址、参数或任意系统命令。
 #[tauri::command]
 fn open_deepseek(window: tauri::WebviewWindow) -> Result<(), String> {
@@ -879,6 +912,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             choose_vault,
             open_default_workspace,
+            remember_workspace,
+            restore_workspace,
             open_deepseek,
             pick_import_files,
             start_import_job,

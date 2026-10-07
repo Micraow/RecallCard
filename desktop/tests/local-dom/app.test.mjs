@@ -38,8 +38,8 @@ test('实际首页与资料入口存在，选择资料库以前没有原生写�
   ui.button('创建新资料库', ui.modal()); ui.button('打开已有资料库', ui.modal());
   await ui.click('取消', ui.modal());
   assert.equal(ui.modal().open, false);
-  assert.equal(ui.native.calls.length, 0);
-  ui.noWrites();
+  assert.deepEqual(ui.native.calls, [{ command: 'restore_workspace', payload: {} }]);
+  ui.noAutomaticWrites();
 });
 
 test('导入来源与时间增加段落后，恶意正文仍只有一个纯文本正文节点', async t => {

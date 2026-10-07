@@ -15,6 +15,8 @@ async function setup(t, width, height) {
   await page.exposeFunction('__invoke', async (command, payload) => {
     calls.push({ command, payload });
     switch (command) {
+      case 'restore_workspace': case 'remember_workspace': return null;
+      case 'list_import_jobs': return [];
       case 'open_default_workspace': return vault;
       case 'vault_status': return vault;
       case 'cancel_previews': return null;

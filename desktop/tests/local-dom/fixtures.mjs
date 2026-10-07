@@ -93,6 +93,9 @@ export function syntheticBridge() {
     backgroundMemories: structuredClone(backgroundMemories), conversations: [structuredClone(conversation)], messages: structuredClone(conversationMessages), hiddenRefs: [] };
   function defaults(command, payload) {
     switch (command) {
+      // 启动恢复只读；记住明确打开的库仅更新本机设置，不改写 Event/Memory。
+      case 'restore_workspace': return null;
+      case 'remember_workspace': return null;
       case 'choose_vault': case 'vault_status': return vault;
       case 'open_default_workspace': return { ...vault, event_count: 0 };
       case 'open_deepseek': return null;

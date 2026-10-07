@@ -8,10 +8,12 @@ mod background;
 mod branches;
 mod imports;
 mod memory;
+mod recent;
 mod records;
 pub use background::{BackgroundCandidate, BackgroundPage, BackgroundReview};
 pub use imports::{ImportJobFile, ImportJobPreview, ImportJobState, ImportJobStatus};
 pub use memory::{MemoryEdit, MemoryReview};
+pub use recent::RestoredWorkspace;
 
 use crate::{
     capture::redact_event,
@@ -141,6 +143,7 @@ struct SelectedVault {
     session_id: String,
     identity: FileIdentity,
     marker: FileSnapshot,
+    access: recent::WorkspaceAccess,
 }
 
 struct PendingImport {
@@ -175,6 +178,7 @@ struct PendingNote {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct FileSnapshot {
     path: PathBuf,
     identity: FileIdentity,
@@ -183,6 +187,7 @@ struct FileSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct FileIdentity {
     #[cfg(unix)]
     device: u64,
@@ -204,19 +209,21 @@ impl DesktopSession {
         let vault = if create {
             Vault::init(path)
         } else {
-            Vault::open(path)
+            Vault::open_existing(path)
         }
         .map_err(|_| {
             "无法打开资料库，请选择有效的 RecallCard Vault；新目录请使用创建".to_owned()
         })?;
         let identity = path_identity(vault.root())?;
         let (marker, _) = bounded_file(&vault.root().join("control/schema-version.json"), 4096)?;
+        let access = recent::WorkspaceAccess::capture(vault.root(), &marker.path)?;
         let session_id = token();
         self.selected = Some(SelectedVault {
             vault,
             session_id: session_id.clone(),
             identity,
             marker,
+            access,
         });
         match self.status(&session_id) {
             Ok(info) => Ok(info),

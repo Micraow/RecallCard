@@ -70,6 +70,13 @@ impl Vault {
         Ok(vault)
     }
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_checked(root, true)
+    }
+    /// 桌面打开/启动恢复只接受完整的已有目录；缺损时绝不补建或替换。
+    pub fn open_existing(root: &Path) -> Result<Self> {
+        Self::open_checked(root, false)
+    }
+    fn open_checked(root: &Path, repair_directories: bool) -> Result<Self> {
         reject_root_symlink(root)?;
         let root = fs::canonicalize(root).map_err(err)?;
         let vault = Self { root };
@@ -84,7 +91,7 @@ impl Vault {
         ] {
             let path = vault.root.join(name);
             reject_symlink(&path)?;
-            if !path.exists() {
+            if repair_directories && !path.exists() {
                 fs::create_dir_all(&path).map_err(err)?;
             }
             if !path.is_dir() {

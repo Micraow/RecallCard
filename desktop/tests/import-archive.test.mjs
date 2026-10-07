@@ -26,6 +26,8 @@ async function fixture(t, chosen=selection){
     calls.push({command,payload});
     if(failure?.command===command){const error=failure.message;failure=null;throw new Error(error);}
     switch(command){
+      case 'restore_workspace': case 'remember_workspace': return null;
+      case 'list_import_jobs': return [];
       case 'choose_vault':return vault;
       case 'vault_status':return {...vault,event_count:imported?2:0};
       case 'list_conversations':return {conversations:imported?[importedConversation]:[],total:imported?1:0,next_offset:null};
