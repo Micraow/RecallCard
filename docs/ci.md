@@ -12,3 +12,7 @@ CI 对 Linux、Windows、macOS 分别执行 Rust 格式、严格 Clippy 与完�
 第 4 项新增 Windows 专用回归：读句柄释放后成功、持续占用后旧记录完整。原有并发读写测试继续启用，没有降低线程数或移除覆盖。Linux 本机无法运行 Windows 专用测试，须以该提交的 Windows Actions 结果为准。
 
 参考：[Rust 文件共享默认行为](https://doc.rust-lang.org/std/os/windows/fs/trait.OpenOptionsExt.html#tymethod.share_mode)、[Microsoft MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)。
+
+## Windows worker fixture 的启动竞争
+
+文档提交的复跑曾在 Windows 触发多个 Python 冷启动同时争抢资源，使语义用例的 3 秒成功窗口误触发既有的正常降级。测试现串行安排独立进程 fixture，并给成功/握手场景 10 秒准备窗口；同一个用例里的并发查询、撤权/修订、100 毫秒超时、阻塞 stdin 与快速忙碌降级检查仍保持。没有修改生产默认时限，没有跳过用例，也没有把运行失败当作通过。
