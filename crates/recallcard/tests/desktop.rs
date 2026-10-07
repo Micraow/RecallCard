@@ -732,3 +732,86 @@ fn macos_system_tmp_alias_allows_native_file_selection() {
         1
     );
 }
+
+#[test]
+fn conversation_import_guides_roles_and_cross_ai_continuation_without_dream() {
+    let (dir, mut service, info) = session();
+    let input = json!({"schema":"recallcard.conversation/1","capture_id":"capture-desktop-test","captured_at":"2026-10-07T00:00:00Z","title":"选型对话","source":{"platform":"deepseek","conversation_id":"demo","url":"https://chat.deepseek.com/a/chat/s/demo"},"coverage":{"extent":"visible_only","complete":false,"reason":"visible_only","warnings":[]},"messages":[{"id":"a","role":"user","text":"决定使用 Rust。","occurred_at":null},{"id":"b","role":"assistant","text":"建议增加 Python，等待确认。","occurred_at":null}]});
+    let file = dir.path().join("DeepSeek会话.json");
+    fs::write(&file, input.to_string()).unwrap();
+    let p = service
+        .preview_import(&info.session_id, "auto", &file, "personal")
+        .unwrap();
+    assert_eq!(p.format, "recallcard-conversation");
+    assert_eq!(p.samples[1].role, recallcard::Role::Assistant);
+    service
+        .confirm_import(&info.session_id, &p.preview_id)
+        .unwrap();
+    let list = service.conversations(&info.session_id, "personal").unwrap();
+    let item = &list["conversations"][0];
+    assert_eq!(item["title"], "选型对话");
+    assert_eq!(item["message_count"], 2);
+    let conversation = item["session_ref"].as_str().unwrap();
+    let messages = service
+        .conversation_messages(&info.session_id, "personal", conversation, 0)
+        .unwrap();
+    assert_eq!(messages["messages"][1]["role"], "assistant");
+    assert!(messages["messages"][0]["occurred_at"].is_null());
+    let handoff = service
+        .continuation(
+            &info.session_id,
+            "personal",
+            conversation,
+            "继续实现已经决定的部分",
+        )
+        .unwrap();
+    let text = handoff["text"].as_str().unwrap();
+    assert!(text.contains("recallcard.context/1"));
+    assert!(text.contains("决定使用 Rust"));
+    assert!(text.contains("建议增加 Python"));
+    assert!(text.contains("原始时间未知"));
+    assert_eq!(handoff["message_count"], 2);
+    let vault = Vault::open(Path::new(&info.root)).unwrap();
+    assert!(vault.memories().unwrap().is_empty());
+    assert!(service
+        .continuation(&info.session_id, "work", conversation, "")
+        .is_err());
+    vault
+        .suppress(&vault.events().unwrap()[0].id, "撤回测试".into())
+        .unwrap();
+    let now = service
+        .continuation(&info.session_id, "personal", conversation, "")
+        .unwrap();
+    assert!(!now["text"].as_str().unwrap().contains("决定使用 Rust"));
+}
+
+#[test]
+fn conversation_pages_are_bounded_and_vault_switch_rejects_old_handoff() {
+    let (dir, mut service, info) = session();
+    let vault = Vault::open(Path::new(&info.root)).unwrap();
+    for i in 0..22 {
+        capture(&vault, &format!("page-{i}"), "personal");
+    }
+    let list = service.conversations(&info.session_id, "personal").unwrap();
+    let reference = list["conversations"][0]["session_ref"].as_str().unwrap();
+    let first = service
+        .conversation_messages(&info.session_id, "personal", reference, 0)
+        .unwrap();
+    assert!(first["next_offset"].as_u64().is_some());
+    assert!(first.to_string().len() < 32768);
+    let next = service
+        .conversation_messages(
+            &info.session_id,
+            "personal",
+            reference,
+            first["next_offset"].as_u64().unwrap() as usize,
+        )
+        .unwrap();
+    assert!(next["next_offset"].is_null());
+    service
+        .select_vault(&dir.path().join("另一个资料库"), true)
+        .unwrap();
+    assert!(service
+        .continuation(&info.session_id, "personal", reference, "")
+        .is_err());
+}

@@ -302,7 +302,7 @@ class NativeSmoke:
         wait_for(ready, "WebDriver 启动")
         self.driver = WebDriver(self.application)
         browser = self.driver
-        wait_for(lambda: browser.text("h1") == "把散落的想法，找回来。", "真实 WebKit 首页")
+        wait_for(lambda: browser.text("h1") == "换一个 AI，也能接着聊。", "真实 WebKit 首页")
         browser.idle()
         assert browser.observe("return !!window.__TAURI__?.core?.invoke")
         self.checkpoint("真实桌面首页")
@@ -419,8 +419,54 @@ class NativeSmoke:
         doctor = self.cli_command("doctor")
         assert doctor["ok"], doctor
         self.checkpoint("长期记忆出处与发布防重放")
+        # 扩展真实交换格式 → 本机安装副本 → Vault；没有使用浏览器隐藏接口或模拟模型。
+        conversation = json.loads((ROOT / "extension/tests/fixtures/conversation.json").read_text())
+        extension_id = "abcdefghijklmnopabcdefghijklmnop"
+        install = self.cli_command("native-install", "--scope", "personal", "--capture-scope", "personal", "--extension-id", extension_id, "--output-dir", str(self.temporary / "native-conversation"))
+        def native_call(action, arguments):
+            request = json.dumps({"protocol":"recallcard.action/1","request_id":f"native-{action}","nonce":"synthetic-capture-nonce","session_ref":"deepseek:synthetic-demo","action":action,"arguments":arguments}).encode()
+            import sys
+            output = subprocess.run([install["launcher"], f"chrome-extension://{extension_id}/"], input=len(request).to_bytes(4, sys.byteorder)+request, capture_output=True, check=True, timeout=15).stdout
+            size = int.from_bytes(output[:4], sys.byteorder)
+            assert size == len(output)-4
+            value = json.loads(output[4:])
+            assert value["ok"], value
+            return value["result"]
+        connection = native_call("connection", {})
+        assert connection["capture_enabled"] and connection["capture_scope"] == "personal"
+        capture_preview = native_call("capture_preview", {"conversation":conversation})
+        before_capture = len(self.events())
+        saved = native_call("capture_save", {"conversation":conversation,"approval_hash":capture_preview["approval_hash"]})
+        assert saved["events_added"] == 2 and len(self.events()) == before_capture + 2
+        assert native_call("capture_save", {"conversation":conversation,"approval_hash":capture_preview["approval_hash"]})["events_added"] == 0
+        assert native_call("search", {"query":"离线会话","budget_tokens":8000})["results"]
+        browser.navigate("会话与接续")
+        browser.click("//button[contains(@class,'result-card')][.//strong[contains(text(),'合成验收')]]", "xpath")
+        browser.idle()
+        assert "保存原始消息和来源" in browser.text(".conversation-layout")
+        assert "时间未知" in browser.text(".conversation-message")
+        browser.type("textarea[aria-label='接下来要做什么']", "继续实现已经确认的决定")
+        browser.button("准备交接内容")
+        browser.idle()
+        handoff = browser.observe("return document.querySelector('textarea[aria-label=\"交接内容预览\"]').value")
+        assert "recallcard.context/1" in handoff and "下一步测试导入幂等" in handoff
+        assert "event:" in handoff and "原始时间未知" in handoff
+        browser.button("复制交接内容")
+        copied = run("xclip", "-selection", "clipboard", "-o")
+        assert copied == handoff, "真实桌面剪贴板必须与预览完全一致"
+        self.checkpoint("可见会话直接保存并跨AI接续")
+        browser.navigate("连接与状态")
+        browser.button("生成客户端配置")
+        browser.idle()
+        client_config = json.loads(browser.observe("return document.querySelector('textarea[aria-label=\"MCP客户端配置\"]').value"))
+        server = client_config["mcpServers"]["recallcard"]
+        assert Path(server["command"]).is_file()
+        mcp_request = json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"query":"离线会话","budget_tokens":8000}}}) + "\n"
+        mcp = subprocess.run([server["command"], *server["args"]], input=mcp_request, capture_output=True, text=True, check=True, timeout=15)
+        assert "离线会话" in mcp.stdout and "event:" in mcp.stdout
+        self.checkpoint("GUI生成的持久MCP组件读取刚保存会话")
         (self.artifacts / "canonical-evidence.json").write_text(json.dumps({
-            "events": events, "memory": memory, "receipt": receipt, "doctor": doctor,
+            "events": self.events(), "memory": memory, "receipt": receipt, "doctor": doctor,
             "job": job,
         }, ensure_ascii=False, indent=2))
 
@@ -467,6 +513,8 @@ def main():
         temporary = Path(directory)
         # 独立本机状态目录不会碰触开发者已有的状态、授权或资料。
         os.environ["RECALLCARD_STATE_DIR"] = str(temporary / "state")
+        os.environ["XDG_DATA_HOME"] = str(temporary / "data")
+        os.environ["XDG_CONFIG_HOME"] = str(temporary / "config")
         smoke = NativeSmoke(args, temporary)
         success = False
         try:

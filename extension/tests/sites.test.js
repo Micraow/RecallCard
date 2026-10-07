@@ -68,8 +68,8 @@ for(const spec of cases){
     }
   });
 }
-test('未启用 DeepSeek、apex 或泛域，不能因为有相同 textarea 就放行',()=>{
-  for(const url of ['https://chat.deepseek.com/','https://chat.deepseek.com/a/chat/s/'+id,'https://qwen.ai/','https://www.qwen.ai/','https://qwenlm.ai/','https://z.ai/','https://api.z.ai/']){
+test('拒绝 DeepSeek 登录/共享页、apex 或泛域，不能因为有相同 textarea 就放行',()=>{
+  for(const url of ['https://chat.deepseek.com/login','https://chat.deepseek.com/share/'+id,'https://qwen.ai/','https://www.qwen.ai/','https://qwenlm.ai/','https://z.ai/','https://api.z.ai/']){
     assert.throws(()=>routeFor(url));const {node,adapter}=setup('TEXTAREA','chat-input',url,['ds-scroll-area']);
     assert.throws(()=>adapter.insert(capsule));assert.equal(node.value,'');
   }

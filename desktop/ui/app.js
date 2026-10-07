@@ -52,6 +52,7 @@ function navigate(page) {
   render();
   content.focus({ preventScroll: true });
   if (page === 'search' && state.vault && !state.results.length) loadRecords();
+  if (page === 'conversations' && state.vault) loadConversations();
 }
 async function chooseVault(create) {
   modal.close();
@@ -84,7 +85,7 @@ async function cancelPreviews(next) {
 function scopeSelect() {
   const node = $('select', { 'aria-label': '资料范围' });
   for (const scope of scopeOptions(state.vault, state.scope)) { const option = $('option', { value: scope }, scopeLabel(scope)); option.selected = scope === state.scope; node.append(option); }
-  node.addEventListener('change', async () => { const scope = node.value; await cancelPreviews(() => resetScope(state, scope)); if (state.page === 'search') loadRecords(); });
+  node.addEventListener('change', async () => { const scope = node.value; await cancelPreviews(() => resetScope(state, scope)); if (state.page === 'search') loadRecords(); else if(state.page === 'conversations') loadConversations(); });
   return node;
 }
 function needsVault() {
@@ -92,17 +93,17 @@ function needsVault() {
 }
 function home() {
   const art = $('div', { class: 'hero-art', 'aria-hidden': 'true' }, $('div', { class: 'memory-card back' }), $('div', { class: 'memory-card front' }, $('div', { class: 'card-mark' }, '✧'), $('div', { class: 'card-line' }), $('div', { class: 'card-line' }), $('div', { class: 'card-line short' })));
-  content.append($('div', { class: 'hero' }, $('div', { class: 'hero-copy' }, $('div', { class: 'eyebrow' }, '给重要的事，一个归处'), $('h1', {}, '把散落的想法，找回来。'), paragraph(state.vault ? `正在使用 ${state.vault.display_name}。从这里添加资料，查找原文和出处。` : '把对话、想法和重要决定收在一起，随时查找。'), $('div', { class: 'button-row' }, button(state.vault ? (state.vault.event_count ? '查找资料' : '添加第一条资料') : '创建新资料库', () => state.vault ? navigate(state.vault.event_count ? 'search' : 'import') : chooseVault(true), true), button(state.vault ? '添加资料' : '打开已有资料库', () => state.vault ? navigate('import') : chooseVault(false)))), art));
+  content.append($('div', { class: 'hero' }, $('div', { class: 'hero-copy' }, $('div', { class: 'eyebrow' }, '给重要的事，一个归处'), $('h1', {}, '换一个 AI，也能接着聊。'), paragraph(state.vault ? `正在使用 ${state.vault.display_name}。从这里添加资料，查找原文和出处。` : '把不同 AI 的对话保存在自己的资料库，带上原话和背景继续任务。'), $('div', { class: 'button-row' }, button(state.vault ? (state.vault.event_count ? '继续已有会话' : '接入第一份对话') : '创建新资料库', () => state.vault ? navigate(state.vault.event_count ? 'conversations' : 'import') : chooseVault(true), true), button(state.vault ? '添加资料' : '打开已有资料库', () => state.vault ? navigate('import') : chooseVault(false)))), art));
   if (state.vault) {
     content.append($('div', { class: 'grid-three' }, panel($('span', { class: 'muted' }, '原始记录'), $('div', { class: 'stat' }, String(state.vault.event_count)), paragraph('保存的对话、想法和原始资料')), panel($('span', { class: 'muted' }, '长期记忆'), $('div', { class: 'stat' }, String(state.vault.memory_count)), paragraph('已整理的决定、偏好与背景')), panel($('span', { class: 'muted' }, '资料库状态'), $('div', { class: 'stat' }, state.vault.health?.ok ? '正常' : '待检查'), paragraph('随时查找和整理已有资料'))));
   }
   content.append($('div', { class: 'section-heading' }, $('h2', {}, state.vault ? '接下来，你可以…' : '三个简单的步骤'), $('span', {}, '离线也能开始')));
   const features = [
-    ['↥', '添加第一条资料', '导入 ChatGPT 或 Claude Code 的对话记录，也可以直接粘贴文字。', 'import', ''],
-    ['⌕', '找到当时的上下文', '按关键词查找对话、记忆和出处。', 'search', 'purple'],
+    ['↥', '接入你的对话', '用浏览器扩展保存 DeepSeek / ChatGPT 对话，或选择已有导出文件。', 'import', ''],
+    ['⇄', '在另一个 AI 继续', '选择一段已保存的对话，带上原话、背景和接下来的目标。', 'conversations', 'purple'],
     ['✧', '把重要的事留下来', '导入整理结果，审阅后保存重要记忆。', 'dream', 'sand'],
   ];
-  content.append($('div', { class: 'grid-three' }, features.map(([icon, title, description, page, color]) => panel($('div', { class: `step-icon ${color}` }, icon), $('h3', {}, title), paragraph(description), $('button', { class: 'text-link', onclick: () => state.vault ? navigate(page) : vaultChooser() }, ({import:'导入对话 →',search:'查找资料 →',dream:'整理记忆 →'})[page])))));
+  content.append($('div', { class: 'grid-three' }, features.map(([icon, title, description, page, color]) => panel($('div', { class: `step-icon ${color}` }, icon), $('h3', {}, title), paragraph(description), $('button', { class: 'text-link', onclick: () => state.vault ? navigate(page) : vaultChooser() }, ({import:'导入对话 →',search:'查找资料 →',conversations:'继续会话 →',dream:'整理记忆 →'})[page])))));
 }
 async function loadRecords() {
   await run('正在查找本地资料…', async current => {
@@ -170,8 +171,10 @@ function searchPage() {
 }
 async function refreshStatus() { state.vault = await invoke('vault_status', { sessionId: state.vault.session_id }); }
 function importPage() {
-  content.append(heading('添加资料', '粘贴一段文字，或导入已有对话。保存后就可以直接查找。'));
-  const text = $('textarea', { id: 'note-content', rows: 5, maxlength: 65536, placeholder: '写下一个想法，或粘贴一段需要留存的对话…', 'aria-label': '资料正文' }, state.noteText || '');
+  const sourceChoices = panel($('h2', {}, '这次从哪里带入对话？'), paragraph('选择来源后，检查消息角色和覆盖范围，再保存到当前资料库。'), $('div', { class: 'grid-three' },
+    ...[['recallcard-conversation', '浏览器扩展', 'DeepSeek、ChatGPT 等：在扩展中保存到本机，或导出 JSON 后选择文件'], ['chatgpt-export', 'ChatGPT 官方导出', '选择解压后的 conversations.json；只导入当前分支'], ['claude-code', 'Claude Code 对话', '选择你主动提供的会话 JSONL 文件；不扫描其他项目']].map(([format,title,help]) => panel($('h3',{},title),paragraph(help),button('选择这类文件',()=>{state.importFormat=format;state.fileImportOpen=true;render();document.querySelector('#file-import-details')?.scrollIntoView({block:'center'});},false,'small')))));
+  content.append(heading('添加资料', '从对话来源开始，保留原话、角色和出处；个人补充可单独记为新笔记。'), sourceChoices);
+  const text = $('textarea', { id: 'note-content', rows: 5, maxlength: 65536, placeholder: '例如：我希望项目说明优先使用中文。这里写你自己的新补充，不粘贴多角色聊天。', 'aria-label': '资料正文' }, state.noteText || '');
   text.addEventListener('input', () => { state.noteText = text.value; });
   const previewNote = () => run('正在准备预览…', async current => {
     await invoke('cancel_previews', { sessionId: state.vault.session_id });
@@ -180,7 +183,7 @@ function importPage() {
     if (current()) state.notePreview = preview;
   });
   if (!state.notePreview) {
-    content.append(panel($('h2', {}, '记下一段文字'), text, $('div', { class: 'button-row' }, button('预览并保存', previewNote, true))));
+    content.append(panel($('h2', {}, '或者，写下你自己的补充说明'), paragraph('这里保存的是你本人的新笔记。完整聊天请使用上面的来源导入，以保留用户/AI角色和原始时间。'), text, $('div', { class: 'button-row' }, button('预览并保存', previewNote, true))));
   } else {
     const note = state.notePreview;
     content.append(panel($('h2', {}, '确认保存的内容'), $('div', { class: 'body-text note-preview' }, note.content), note.redacted ? hint('检测到可能的敏感字段，已在预览中遮蔽。') : null,
@@ -194,7 +197,7 @@ function importPage() {
   const fileDetails = $('details', { id: 'file-import-details', class: 'panel import-file-options', open: Boolean(state.fileImportOpen || state.importPreview) }, $('summary', {}, '或者，导入对话文件'));
   fileDetails.addEventListener('toggle', () => { state.fileImportOpen = fileDetails.open; });
   content.append(fileDetails);
-  const format = $('select', { id: 'import-format', 'aria-label': '导入格式' }, $('option', { value: 'chatgpt-export' }, 'ChatGPT 官方导出 JSON'), $('option', { value: 'claude-code' }, 'Claude Code 对话 JSONL'), $('option', { value: 'manual-jsonl' }, 'RecallCard 标准 JSONL'));
+  const format = $('select', { id: 'import-format', 'aria-label': '导入格式' }, $('option', { value: 'auto' }, '自动识别支持的会话文件'), $('option', { value: 'recallcard-conversation' }, 'RecallCard 扩展导出的会话 JSON'), $('option', { value: 'chatgpt-export' }, 'ChatGPT 官方导出 JSON'), $('option', { value: 'claude-code' }, 'Claude Code 对话 JSONL'), $('option', { value: 'manual-jsonl' }, 'RecallCard 标准 JSONL'));
   format.value = state.importFormat || 'chatgpt-export';
   format.addEventListener('change', () => { const next = format.value; cancelPreviews(() => { state.importFormat = next; }); });
   const scope = $('input', { id: 'import-scope', value: state.scope, placeholder: 'personal', 'aria-label': '导入范围' });
@@ -215,6 +218,48 @@ function importPage() {
   if (preview.truncated) box.append(paragraph('预览仅展示部分内容，导入确认后会处理全部已解析记录。'));
   box.append($('div', { class: 'button-row' }, button('取消这次导入', () => cancelPreviews()), button(`确认导入 ${preview.event_count} 条记录`, () => confirmDialog('确认写入资料库', `将 ${preview.file_name} 中的 ${preview.event_count} 条记录导入 ${state.vault.display_name} / ${preview.scope}。已存在的相同记录会跳过。`, () => run('正在导入，完成前请勿关闭应用…', async () => { const result = await invoke('confirm_import', { sessionId: state.vault.session_id, previewId: preview.preview_id }); state.importPreview = null; state.results = []; await refreshStatus(); showNotice(`导入完成：新增 ${result.events_added} 条，处理 ${result.events_seen} 条`); }), '确认导入'), true)));
   content.append(box);
+}
+async function loadConversations(offset = 0) {
+  offset = Number.isSafeInteger(offset) ? offset : 0;
+  await run('正在读取已保存的会话…', async current => {
+    const result = await invoke('list_conversations', { ...args(), offset });
+    if (current()) { state.conversationListOffset=offset;state.conversationListNext=result.next_offset;state.conversationTotal=result.total;state.conversations = result.conversations || []; state.conversationNote = result.note; state.conversation=null;state.conversationRows=[];state.continuation=null; }
+  });
+}
+async function openConversation(item, offset = 0) {
+  await run('正在打开会话…', async current => {
+    const result = await invoke('conversation_messages', { ...args(), conversationRef: item.session_ref, offset });
+    if (current()) { if(state.conversation?.session_ref!==item.session_ref) state.continuationGoal=''; state.conversation = item; state.conversationRows = result.messages || []; state.conversationOrderKnown=result.order_known;state.conversationOffset = offset; state.conversationNext = result.next_offset; state.continuation = null; }
+  });
+}
+function copyText(text) {
+  const field = $('textarea', { readonly: true, 'aria-label': '复制内容' }); field.value = text;
+  document.body.append(field); field.select();
+  try {
+    if (!document.execCommand('copy')) throw new Error('copy failed');
+    showNotice('已复制，可以粘贴到你选择的客户端');
+  } catch { showNotice('无法自动复制，请在预览框中全选后按 Ctrl+C', true); }
+  field.remove();
+}
+function conversationPage() {
+  content.append(heading('会话与接续', '按来源找回一段对话，把原话和接下来的目标带到另一个 AI。'));
+  content.append($('div', {class:'toolbar'},scopeSelect(),button('刷新已保存会话',()=>loadConversations(0),false,'small'),button('接入对话',()=>navigate('import'),false,'small')));
+  if (!state.conversations.length) { content.append(panel($('h2',{},'还没有保存的会话'),paragraph('在浏览器扩展中预览并保存当前对话，或者导入对话文件。未保存的网站历史不会自动出现在这里。'),button('选择对话来源',()=>navigate('import'),true))); return; }
+  const list=$('div',{class:'conversation-list'});
+  list.append(paragraph(`共 ${state.conversationTotal ?? state.conversations.length} 个可访问会话`));
+  if(state.conversationListOffset)list.append(button('回到第一页',()=>loadConversations(0),false,'small'));
+  if(state.conversationListNext!=null)list.append(button('更多会话',()=>loadConversations(state.conversationListNext),false,'small'));
+  for(const item of state.conversations) list.append($('button',{class:`result-card ${state.conversation?.session_ref===item.session_ref?'selected':''}`,onclick:()=>openConversation(item)},$('strong',{},item.title),$('span',{class:'muted'},`${item.platform} · ${item.message_count} 条已保存消息`),$('span',{class:'muted'},`最近保存 ${displayDate(item.captured_at)}`)));
+  const pane=panel($('h2',{},state.conversation?.title||'选择要继续的对话'));
+  if(state.conversation){
+    pane.append(hint(state.conversationOrderKnown?'以下保留已捕获片段中的消息顺序；网站未加载或未保存的历史不在其中。':'部分片段缺少可核实的先后关系；保留已知关系，其余按保存顺序显示，不代表原始时间顺序。'));
+    for(const row of state.conversationRows||[]) pane.append($('article',{class:'conversation-message'},$('div',{class:'result-meta'},$('span',{class:'tag'},row.role==='user'?'我':row.role==='assistant'?'AI':'工具/其他'),$('span',{class:'muted'},displayDate(row.occurred_at))),$('div',{class:'body-text'},row.text),row.text_truncated?hint('本条较长，这里是节选。请在“查找与阅读”按原话检索查看。'):null,$('div',{class:'ref'},row.ref)));
+    pane.append($('div',{class:'button-row'},...(state.conversationOffset?[button('回到开头',()=>openConversation(state.conversation,0),false,'small')]:[]),...(state.conversationNext!=null?[button('后续消息',()=>openConversation(state.conversation,state.conversationNext),false,'small')]:[])));
+    const goal=$('textarea',{rows:2,placeholder:'例如：接着实现上次确定的方案，先检查还缺什么','aria-label':'接下来要做什么'});goal.value=state.continuationGoal||'';goal.addEventListener('input',()=>{state.continuationGoal=goal.value;state.continuation=null;document.querySelector('.copy-continuation')?.setAttribute('disabled','');});
+    pane.append($('hr',{class:'divider'}),$('h2',{},'在另一个 AI 继续'),paragraph('写下下一步，程序会准备稳定背景、来源和选定会话中的消息。你检查后复制，再到目标客户端发送。'),goal,button('准备交接内容',()=>run('正在准备有来源的交接内容…',async current=>{const result=await invoke('prepare_continuation',{...args(),conversationRef:state.conversation.session_ref,goal:state.continuationGoal||''});if(current())state.continuation=result;}),true));
+    if(state.continuation){const preview=$('textarea',{rows:12,readonly:true,'aria-label':'交接内容预览'});preview.value=state.continuation.text;pane.append(preview,hint(`已带上 ${state.continuation.message_count} / ${state.continuation.available_messages} 条消息。复制和发送前请检查是否适合分享给目标服务。`),button('复制交接内容',()=>run('正在重新核对交接内容…',async current=>{const shown=state.continuation;const fresh=await invoke('prepare_continuation',{...args(),conversationRef:state.conversation.session_ref,goal:state.continuationGoal||''});if(!current())return;if(!shown||fresh.text!==shown.text){state.continuation=null;throw new Error('资料或权限已改变，请重新生成并检查交接预览');}copyText(shown.text);}),true,'copy-continuation'));}
+  } else pane.append(paragraph('先从左侧选择一段已保存的对话。'));
+  content.append($('div',{class:'conversation-layout'},list,pane));
 }
 function dreamPage() {
   content.append(heading('整理记忆', '选好资料，导出整理包，再导入结果逐条审阅。'));
@@ -245,10 +290,18 @@ function dreamPage() {
   content.append(box);
 }
 function connectPage() {
-  content.append(heading('连接与状态', '查看资料库状态，连接浏览器扩展或命令行工具。'));
-  content.append($('div', { class: 'grid-two file-preview' }, panel($('h2', {}, '资料库健康状态'), line('资料库', state.vault.display_name), line('目录', state.vault.root), line('原始记录 / 长期记忆', `${state.vault.event_count} / ${state.vault.memory_count}`), line('完整性检查', state.vault.health?.ok ? '通过' : '请检查资料库'), line('云端 API', '未启用'), button('重新检查', () => run('正在检查资料库…', async () => { await refreshStatus(); showNotice('资料库检查完成'); }), false, 'small')), panel($('h2', {}, '命令行工具'), paragraph('命令行工具和浏览器扩展可使用同一资料库。'), hint('Git 同步和其他高级设置请使用命令行工具。'))));
-  const extension = panel($('h2', {}, '浏览器扩展：按需连接'), paragraph('1. 在浏览器允许安装的环境中，加载独立扩展 ZIP 解压后的目录，并复制扩展 ID。'), paragraph('2. 使用随 CLI 运行包提供的 recallcard 程序生成 Native Messaging 配置，按输出指引人工注册。'), paragraph('3. 在扩展中选择资料，再点“注入输入框”。最终发送由你点击。'), hint('桌面应用不会安装扩展或更改浏览器策略。当前页面未检测浏览器连接，不能据此判断扩展已连接。', true), $('div', { class: 'toolbar' }, scopeSelect()), $('div', { class: 'code-block' }, nativeInstructions(state.vault.root, state.scope)), paragraph('完整中文步骤：github.com/Micraow/RecallCard → docs/quickstart-linux-v0.3.md'));
-  extension.classList.add('file-preview'); content.append(extension);
+  content.append(heading('连接你的 AI 工具', '先选资料范围，再连接浏览器或本地 Agent。连接成功后，已保存的对话可在同一资料库中被查到。'));
+  content.append($('div',{class:'toolbar'},$('label',{},'允许此客户端使用的资料范围'),scopeSelect()));
+  const extension=panel($('h2',{},'浏览器扩展'),paragraph('扩展可在网页上预览、保存和导出对话；没有本机连接时仍能导出文件。连接后可直接保存到当前资料库。'));
+  const id=$('input',{placeholder:'粘贴浏览器扩展页显示的32位ID','aria-label':'RecallCard扩展ID',value:state.extensionId||''});id.addEventListener('input',()=>state.extensionId=id.value.trim());
+  const browser=$('select',{'aria-label':'浏览器'},$('option',{value:'chromium'},'Chromium'),$('option',{value:'chrome'},'Google Chrome'),$('option',{value:'brave'},'Brave'));browser.value=state.browser||'chromium';browser.addEventListener('change',()=>state.browser=browser.value);
+  const capture=$('input',{type:'checkbox',id:'allow-browser-capture'});capture.checked=Boolean(state.allowBrowserCapture);capture.addEventListener('change',()=>state.allowBrowserCapture=capture.checked);
+  extension.append(paragraph('1. 正常安装 RecallCard 扩展，在浏览器扩展管理页复制它的 ID'),$('label',{},'2. 选择浏览器并填写扩展 ID'),browser,id,$('label',{class:'check',for:'allow-browser-capture'},capture,'同时允许扩展把我预览确认的对话保存到此范围'),button('连接此浏览器',()=>run('正在配置本机连接…',async current=>{const result=await invoke('install_browser_connection',{...args(),extensionId:state.extensionId||'',browser:state.browser||'chromium',allowCapture:Boolean(state.allowBrowserCapture)});if(current()&&result){state.connectionResult=result;showNotice('本机连接已注册，请到扩展点击“检查连接”');}}),true));
+  if(state.connectionResult)extension.append(hint(state.connectionResult.note),line('保存对话',state.connectionResult.capture_enabled?'已允许':'未允许'),paragraph('3. 回到扩展点击“检查连接”，看到资料库名称后，再预览并保存当前会话'));
+  extension.append(paragraph('若浏览器提示策略禁止安装，应用不会改变该策略。仍可使用导出文件和桌面导入。'));
+  const agent=panel($('h2',{},'本地 Agent / MCP'),paragraph('为支持 MCP 的客户端生成当前资料库的只读配置。配置完成后，客户端可按需查找原话和出处。'),button('生成客户端配置',()=>run('正在生成受限读取配置…',async current=>{const value=await invoke('prepare_client_config',args());if(current())state.clientConfig=JSON.stringify(value,null,2);}),true));
+  if(state.clientConfig){const preview=$('textarea',{rows:9,readonly:true,'aria-label':'MCP客户端配置'});preview.value=state.clientConfig;agent.append(preview,button('复制客户端配置',()=>copyText(state.clientConfig)),hint('将配置加入你选定客户端的 MCP 设置，保留原有服务。该客户端可能把读取的资料发送给其模型服务，请先确认范围。'),paragraph('添加后先让客户端调用 bootstrap，再搜索刚保存对话中的一句原话。这里生成配置不等于宿主已经连接。'));}
+  content.append($('div',{class:'grid-two file-preview'},extension,agent),panel($('h2',{},'资料库状态'),line('当前资料库',state.vault.display_name),line('已保存记录 / 长期记忆',`${state.vault.event_count} / ${state.vault.memory_count}`),line('完整性检查',state.vault.health?.ok?'通过':'需要检查'),button('重新检查',()=>run('正在检查资料库…',refreshStatus),false,'small')));
 }
 function render() {
   document.querySelector('#navigation').replaceChildren(...pages.map(([id, title, icon]) => $('button', { class: state.page === id ? 'active' : '', 'aria-current': state.page === id ? 'page' : null, onclick: () => navigate(id) }, $('span', { class: 'symbol', 'aria-hidden': 'true' }, icon), title)));
@@ -257,7 +310,7 @@ function render() {
   document.querySelector('#switch-vault').textContent = state.vault ? '切换资料库' : '打开资料库';
   content.replaceChildren();
   if (state.page !== 'home' && !state.vault) needsVault();
-  else ({ home, search: searchPage, import: importPage, dream: dreamPage, connect: connectPage })[state.page]();
+  else ({ home, conversations: conversationPage, search: searchPage, import: importPage, dream: dreamPage, connect: connectPage })[state.page]();
   setBusy();
 }
 document.querySelector('#switch-vault').addEventListener('click', vaultChooser);

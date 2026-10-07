@@ -1,0 +1,49 @@
+{
+  "schema": "recallcard.conversation/1",
+  "capture_id": "11111111-1111-4111-8111-111111111111",
+  "captured_at": "2026-10-07T06:00:00.000Z",
+  "title": "合成验收：跨 AI 继续项目",
+  "source": {
+    "platform": "deepseek",
+    "conversation_id": "synthetic-demo",
+    "url": "https://chat.deepseek.com/a/chat/s/synthetic-demo"
+  },
+  "coverage": {
+    "extent": "visible_only",
+    "complete": false,
+    "reason": "仅用户主动选中的当前可见文字；未验证完整历史。",
+    "warnings": [
+      "这是自动化验收用合成记录，不含真实私聊。",
+      "第二条无稳定网站ID，使用捕获编号加顺序，不承诺跨次捕获去重。",
+      "消息原始时间未知。"
+    ]
+  },
+  "messages": [
+    {
+      "id": "synthetic-user-001",
+      "role": "user",
+      "text": "我们用中文做一个离线会话资料库。先保存当前决定，再交给下一个 AI。",
+      "occurred_at": null,
+      "metadata": {
+        "role_confirmed_by_user": true
+      }
+    },
+    {
+      "id": "11111111-1111-4111-8111-111111111111:2",
+      "role": "assistant",
+      "text": "当前决定：保存原始消息和来源；下一步测试导入幂等。\n代码文字 <script>synthetic()</script> 与 ``` 应保持为普通文本。",
+      "occurred_at": null,
+      "metadata": {
+        "weaker_identity": true
+      }
+    }
+  ],
+  "metadata": {
+    "adapter": "deepseek-visible-dom-v1",
+    "weaker_conversation_identity": false,
+    "captured_message_count": 2,
+    "selected_message_count": 2,
+    "hash_algorithm": "SHA-256",
+    "snapshot_hash": "48e4b074ea5fc3938fa4c55b6d62c3acc1d8453be54c99f96bee0ed0d20d6b48"
+  }
+}

@@ -26,14 +26,20 @@ jobs:
           workspaces: desktop/src-tauri
           cache-on-failure: true
       - name: 安装官方构建与验收依赖
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf file webkit2gtk-driver xvfb xauth xdotool scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf file webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
       - name: 准备界面验证
         working-directory: extension
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npx playwright install --with-deps chromium
       - name: 界面与状态验证
-        run: node --test desktop/tests/*.test.js desktop/tests/*.test.mjs
+        run: |
+          node --test extension/tests/*.test.js desktop/tests/*.test.js desktop/tests/*.test.mjs
+          npm --prefix extension run test:browser
+      - name: 浏览器保存与桌面跨端合同
+        env:
+          RECALLCARD_STATE_DIR: ${{ runner.temp }}/recallcard-product-state
+        run: cargo test --locked -j1 -p recallcard --test conversation --test desktop --test native --test context --test import
       - name: 构建正式桌面程序
         working-directory: desktop
         run: npm exec --yes --package=@tauri-apps/cli@2.12.1 -- tauri build --ci --no-bundle -- --locked

@@ -17,6 +17,7 @@ async function pageFor(html) {
 const platforms = [
   ['ChatGPT', 'https://chatgpt.com/', '<textarea id="prompt-textarea"></textarea>'],
   ['ChatGPT mobile', 'https://chatgpt.com/', '<textarea id="mobile-composer-prompt"></textarea>'],
+  ['DeepSeek', 'https://chat.deepseek.com/', '<textarea class="ds-scroll-area" name="search" placeholder="Message DeepSeek"></textarea>'],
   ['Qwen', 'https://chat.qwen.ai/', '<textarea class="message-input-textarea"></textarea>'],
   ['Z.ai', 'https://chat.z.ai/', '<textarea id="chat-input"></textarea>'],
 ];

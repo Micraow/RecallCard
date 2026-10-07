@@ -23,16 +23,23 @@ pub(crate) fn parse_text(format: &str, text: &str, scope: &str) -> Result<Vec<Ev
     if text.len() > 16 * 1024 * 1024 {
         return Err("单次导入上限 16 MiB；请分批导出".into());
     }
-    let inputs = match format {
-        "manual-jsonl" => text
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str::<EventInput>(l).map_err(|e| e.to_string()))
-            .collect::<Result<Vec<_>>>()?,
-        "claude-code" => claude_code(text, scope)?,
-        "chatgpt-export" => chatgpt_export(text, scope)?,
-        _ => return Err("支持的格式：manual-jsonl、claude-code、chatgpt-export".into()),
-    };
+    let inputs =
+        match format {
+            "manual-jsonl" => text
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| serde_json::from_str::<EventInput>(l).map_err(|e| e.to_string()))
+                .collect::<Result<Vec<_>>>()?,
+            "claude-code" => claude_code(text, scope)?,
+            "chatgpt-export" => chatgpt_export(text, scope)?,
+            "recallcard-conversation" => {
+                crate::conversation::Conversation::parse(text)?.events(scope)?
+            }
+            _ => return Err(
+                "支持的格式：recallcard-conversation、manual-jsonl、claude-code、chatgpt-export"
+                    .into(),
+            ),
+        };
     if inputs.len() > 5000 {
         return Err("单次最多导入 5000 个事件".into());
     }

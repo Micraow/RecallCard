@@ -1,4 +1,4 @@
-//! 浏览器 Native Messaging：只读，范围与扩展 ID 来自本机配置。
+//! 浏览器 Native Messaging：读取和用户确认的会话捕获分别授权；MCP 始终只读。
 use crate::{context::Context, model::Result, policy::Access, transport::invoke, Vault};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -30,6 +30,8 @@ pub struct LauncherConfig {
     extension_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ipc_endpoint: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capture_scope: Option<String>,
 }
 
 /// 纯配置校验，不读取 Vault，不注册浏览器，也不修改文件。
@@ -58,6 +60,11 @@ pub fn parse_launcher_config(bytes: &[u8]) -> Result<LauncherConfig> {
     let access = Access::new(config.scopes.clone())?;
     if access.scopes().len() != config.scopes.len() {
         return Err("Native 配置不能包含重复 scope".into());
+    }
+    if let Some(scope) = &config.capture_scope {
+        if !access.permits(scope) {
+            return Err("浏览器保存范围必须属于已配置的资料范围".into());
+        }
     }
     Ok(config)
 }
@@ -122,14 +129,31 @@ fn run_launcher(executable: &Path, arguments: Vec<OsString>) -> Result<()> {
         let client =
             crate::ipc::Client::new(&vault, &access, endpoint, std::time::Duration::from_secs(5))?;
         return serve_native_service_io(
-            |name, args| client.invoke(name, args),
+            |name, args| {
+                browser_operation(
+                    &vault,
+                    &access,
+                    config.capture_scope.as_deref(),
+                    name,
+                    &args,
+                )
+                .unwrap_or_else(|| client.invoke(name, args))
+            },
             &config.extension_id,
             origin,
             std::io::stdin().lock(),
             std::io::stdout().lock(),
         );
     }
-    serve_native(&vault, access, &config.extension_id, origin)
+    serve_native_capture_io(
+        &vault,
+        access,
+        config.capture_scope.as_deref(),
+        &config.extension_id,
+        origin,
+        std::io::stdin().lock(),
+        std::io::stdout().lock(),
+    )
 }
 
 fn metadata_is_link(metadata: &fs::Metadata) -> bool {
@@ -258,14 +282,77 @@ pub fn serve_native_io<R: Read, W: Write>(
     reader: R,
     writer: W,
 ) -> Result<()> {
-    let context = Context::new(vault, access);
+    serve_native_capture_io(vault, access, None, extension, origin, reader, writer)
+}
+
+/// capture_scope 只能来自安装者的本机配置，网页和模型不能通过请求启用。
+pub fn serve_native_capture_io<R: Read, W: Write>(
+    vault: &Vault,
+    access: Access,
+    capture_scope: Option<&str>,
+    extension: &str,
+    origin: &str,
+    reader: R,
+    writer: W,
+) -> Result<()> {
+    if capture_scope.is_some_and(|scope| !access.permits(scope)) {
+        return Err("浏览器保存范围不在本机允许名单中".into());
+    }
+    let context = Context::new(vault, access.clone());
     serve_native_service_io(
-        |name, args| invoke(&context, name, args),
+        |name, args| {
+            browser_operation(vault, &access, capture_scope, name, &args)
+                .unwrap_or_else(|| invoke(&context, name, args))
+        },
         extension,
         origin,
         reader,
         writer,
     )
+}
+
+fn browser_operation(
+    vault: &Vault,
+    access: &Access,
+    capture_scope: Option<&str>,
+    name: &str,
+    args: &Value,
+) -> Option<Result<Value>> {
+    if !matches!(name, "connection" | "capture_preview" | "capture_save") {
+        return None;
+    }
+    Some((|| {
+        if name == "connection" {
+            if args.as_object().is_none_or(|a| !a.is_empty()) {
+                return Err("连接检查不接受额外参数".into());
+            }
+            return Ok(
+                json!({"connection_id":crate::conversation::connection_id(vault,capture_scope.unwrap_or("read-only"))?,"capture_enabled":capture_scope.is_some(),"capture_scope":capture_scope,"read_scopes":access.scopes(),
+                "vault_name":vault.root().file_name().and_then(|s|s.to_str()).unwrap_or("RecallCard"),"protocol":"recallcard.conversation/1"}),
+            );
+        }
+        let scope =
+            capture_scope.ok_or("本机连接尚未允许保存对话，请在桌面连接设置中明确选择保存范围")?;
+        let object = args.as_object().ok_or("会话请求必须为对象")?;
+        let fields: &[&str] = if name == "capture_save" {
+            &["conversation", "approval_hash"]
+        } else {
+            &["conversation"]
+        };
+        if object.len() != fields.len() || object.keys().any(|key| !fields.contains(&key.as_str()))
+        {
+            return Err("会话请求不能附加 scope、路径或未知参数".into());
+        }
+        let conversation =
+            crate::conversation::Conversation::parse(&object["conversation"].to_string())?;
+        if name == "capture_preview" {
+            return crate::conversation::preview(vault, &conversation, scope);
+        }
+        let approval = object["approval_hash"]
+            .as_str()
+            .ok_or("请先预览并明确确认保存")?;
+        crate::conversation::save(vault, &conversation, scope, approval)
+    })())
 }
 
 pub fn serve_native_service_io<R: Read, W: Write>(
@@ -364,6 +451,27 @@ pub fn prepare_install_with_ipc(
     output: &Path,
     ipc_endpoint: Option<PathBuf>,
 ) -> Result<Value> {
+    let source = std::env::current_exe().map_err(|e| e.to_string())?;
+    prepare_install_from_binary(
+        vault,
+        scopes,
+        extension,
+        output,
+        ipc_endpoint,
+        None,
+        &source,
+    )
+}
+
+pub fn prepare_install_from_binary(
+    vault: &Vault,
+    scopes: Vec<String>,
+    extension: &str,
+    output: &Path,
+    ipc_endpoint: Option<PathBuf>,
+    capture_scope: Option<String>,
+    source: &Path,
+) -> Result<Value> {
     let origin = extension_origin(extension)?;
     let access = Access::new(scopes)?;
     if let Some(endpoint) = &ipc_endpoint {
@@ -413,17 +521,17 @@ pub fn prepare_install_with_ipc(
         scopes: access.scopes(),
         extension_id: extension.into(),
         ipc_endpoint,
+        capture_scope,
     };
     let config_bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
     parse_launcher_config(&config_bytes)?;
-    let source = std::env::current_exe().map_err(|e| e.to_string())?;
-    reject_links(&source)?;
+    reject_links(source)?;
     // manifest 最后发布；每个文件原子新建，失败也不覆盖或删除用户的文件。
     // 失败目录可能包含本次已完成的副本，应检查后改用新的输出目录。
     let generated = (|| -> Result<()> {
         write_new(
             &executable,
-            &mut File::open(&source).map_err(|e| e.to_string())?,
+            &mut File::open(source).map_err(|e| e.to_string())?,
             true,
         )?;
         write_new(&config_path, &mut config_bytes.as_slice(), false)?;
