@@ -3,6 +3,8 @@ import importlib.util
 from http.client import RemoteDisconnected
 from pathlib import Path
 from types import SimpleNamespace
+import subprocess
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -17,6 +19,55 @@ class NativeControlsTest(unittest.TestCase):
         driver.address = "http://127.0.0.1:4444"
         driver.session = "synthetic"
         return driver
+
+    def test_direct_webkit_capabilities_match_official_tauri_linux_mapping(self):
+        with patch.object(module.WebDriver, "request", return_value={"sessionId": "synthetic"}) as request:
+            driver = module.WebDriver(Path("/synthetic/recallcard-desktop"))
+            self.assertEqual(driver.session, "synthetic")
+            self.assertEqual(request.call_args.args, ("POST", "/session", {"capabilities": {"alwaysMatch": {
+                "browserName": "wry", "webkitgtk:browserOptions": {"binary": "/synthetic/recallcard-desktop", "args": []},
+            }}}))
+            self.assertEqual(request.call_count, 1)
+
+    def test_native_driver_start_environment_and_failure_log_are_local(self):
+        with tempfile.TemporaryDirectory() as directory:
+            smoke = object.__new__(module.NativeSmoke)
+            smoke.artifacts = Path(directory); smoke.logs = []; smoke.processes = []; smoke.driver = None
+            child = Mock(); child.poll.return_value = 0
+            with patch.object(module.subprocess, "Popen", return_value=child) as start:
+                self.assertIs(smoke.start_native_driver(), child)
+                self.assertEqual(start.call_args.args[0], ["WebKitWebDriver", "--host=127.0.0.1", "--port=4444"])
+                environment = start.call_args.kwargs["env"]
+                self.assertEqual(environment["TAURI_AUTOMATION"], "true")
+                self.assertEqual(environment["TAURI_WEBVIEW_AUTOMATION"], "true")
+                self.assertNotIn("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", environment)
+                self.assertEqual(start.call_args.kwargs["stderr"], subprocess.STDOUT)
+                start.call_args.kwargs["stdout"].write("合成驱动错误记录\n")
+            smoke.close()
+            self.assertEqual((Path(directory) / "webkit-webdriver.log").read_text(), "合成驱动错误记录\n")
+
+    def test_native_driver_cleanup_closes_session_and_reaps_process(self):
+        smoke = object.__new__(module.NativeSmoke); smoke.driver = Mock(); smoke.logs = []
+        child = Mock(); child.poll.return_value = None
+        child.wait.side_effect = [subprocess.TimeoutExpired("synthetic", 5), 0]
+        smoke.processes = [child]
+        smoke.close()
+        smoke.driver.close.assert_called_once()
+        child.terminate.assert_called_once(); child.kill.assert_called_once()
+        self.assertEqual(child.wait.call_count, 2)
+
+    def test_native_driver_start_failure_preserves_log_and_does_not_create_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            smoke = object.__new__(module.NativeSmoke)
+            smoke.artifacts = Path(directory); smoke.logs = []; smoke.processes = []; smoke.driver = None
+            with patch.object(module.subprocess, "Popen", side_effect=FileNotFoundError("合成缺失驱动")), patch.object(module, "WebDriver") as session:
+                with self.assertRaises(FileNotFoundError):
+                    smoke.start_native_driver()
+                session.assert_not_called()
+            self.assertEqual(smoke.processes, [])
+            smoke.close()
+            self.assertTrue((Path(directory) / "webkit-webdriver.log").exists())
+            self.assertTrue(all(log.closed for log in smoke.logs))
 
     def test_target_is_located_and_scrolled_before_one_real_click(self):
         driver = self.driver()

@@ -69,7 +69,7 @@ class WebDriver:
         result = self.request("POST", "/session", {
             "capabilities": {"alwaysMatch": {
                 "browserName": "wry",
-                "tauri:options": {"application": str(application)},
+                "webkitgtk:browserOptions": {"binary": str(application), "args": []},
             }},
         }, timeout=60)
         self.session = result["sessionId"]
@@ -78,7 +78,7 @@ class WebDriver:
         body = None if data is None else json.dumps(data).encode()
         request = Request(self.address + path, data=body, method=method,
                           headers={"Content-Type": "application/json"})
-        # 代理到 WebKit 的空闲连接偶尔被关闭；只重试观察/定位和幂等滚动。
+        # 直接连接官方 WebKitWebDriver；仅观察/定位和幂等滚动允许有界传输恢复。
         # 点击、输入、创建会话均不自动重发，避免重复写入。
         safe = method == "GET" or path.endswith("/element") or (path.endswith("/execute/sync") and data and (data.get("script", "").startswith("return ") or data.get("script", "").startswith("arguments[0].scrollIntoView")))
         for attempt in range(3 if safe else 1):
@@ -211,13 +211,18 @@ class NativeSmoke:
             except Exception as error:
                 print(f"截图未完成 ({label})：{error}", flush=True)
 
-    def start(self, executable, logfile):
+    def start(self, executable, logfile, extra_env=None):
         stream = (self.artifacts / logfile).open("w")
         self.logs.append(stream)
         process = subprocess.Popen(executable, stdout=stream, stderr=subprocess.STDOUT,
-                                   start_new_session=True)
+                                   start_new_session=True, env={**os.environ, **(extra_env or {})})
         self.processes.append(process)
         return process
+
+    def start_native_driver(self):
+        # 与官方 tauri-driver 的 Linux 能力映射和自动化环境一致，直接使用其底层驱动。
+        return self.start(["WebKitWebDriver", "--host=127.0.0.1", "--port=4444"],
+                          "webkit-webdriver.log", {"TAURI_AUTOMATION": "true", "TAURI_WEBVIEW_AUTOMATION": "true"})
 
     def cli_command(self, *args):
         return json.loads(run(str(self.cli), "--vault", str(self.vault), *args))
@@ -619,12 +624,12 @@ class NativeSmoke:
         }], ensure_ascii=False))
         archive = self.create_zip_fixture()
         self.start(["openbox"], "window-manager.log")
-        server = self.start(["tauri-driver"], "tauri-driver.log")
+        server = self.start_native_driver()
 
         def ready():
             if server.poll() is not None:
-                raise AssertionError("tauri-driver 启动失败，请检查 tauri-driver.log")
-            # 代理端口先于 WebKitWebDriver 启动；只等 TCP 会让 /session 过早到达。
+                raise AssertionError("WebKitWebDriver 启动失败，请检查 webkit-webdriver.log")
+            # 等底层驱动明确报告就绪；只等 TCP 端口不能证明会话可创建。
             # /status 是实际驱动的只读健康检查，未就绪时继续等，不重复创建会话。
             with urlopen("http://127.0.0.1:4444/status", timeout=2) as response:
                 status = json.load(response)
@@ -866,7 +871,7 @@ def main():
     parser.add_argument("--artifacts", type=Path,
                         default=Path(tempfile.gettempdir()) / "recallcard-native-smoke-artifacts")
     args = parser.parse_args()
-    for name in ["tauri-driver", "WebKitWebDriver", "xdotool", "xclip", "scrot", "openbox"]:
+    for name in ["WebKitWebDriver", "xdotool", "xclip", "scrot", "openbox"]:
         if not shutil.which(name):
             parser.error(f"缺少官方测试依赖：{name}")
     for binary in [args.application, args.cli]:

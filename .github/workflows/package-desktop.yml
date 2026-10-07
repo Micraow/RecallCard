@@ -56,8 +56,6 @@ jobs:
         run: npm exec --yes --package=@tauri-apps/cli@2.12.1 -- tauri bundle --config src-tauri/tauri.bundle.conf.json --bundles appimage,deb
       - name: 收集版本化安装包与校验清单
         run: python3 scripts/collect_desktop_bundles.py desktop/src-tauri/target/release/bundle desktop/release-artifacts "$GITHUB_SHA"
-      - name: 安装原生 WebDriver
-        run: cargo install tauri-driver --version 2.1.0 --locked
       - name: 正式程序的原生操作闭环
         timeout-minutes: 8
         env:
