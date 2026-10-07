@@ -220,7 +220,7 @@ test('导入预览与取消不写入，一次确认无需弹窗且只提交原�
   await openVault(page);
   await previewImport(page);
   assert.deepEqual(native.matching('pick_import')[0].payload,
-    { sessionId: vault.session_id, scope: 'personal', format: 'chatgpt-export' });
+    { sessionId: vault.session_id, scope: 'personal', format: 'auto' });
   await assertNoWrite(native);
   assert.match(await page.locator('.file-preview').textContent(), /尚未写入/);
   assert.match(await page.locator('.file-preview').textContent(), /写入资料库合成资料库.*写入范围personal/);
@@ -481,7 +481,7 @@ test('导入内的新笔记先预览再保存并进入查找，无需选择文�
   const { page, native } = await fixture(t);
   await openVault(page);
   await openImport(page);
-  assert.equal(await page.locator('#file-import-details').evaluate(node => node.open), true);
+  assert.equal(await page.locator('#file-import-details').evaluate(node => node.open), false);
   assert.equal(await page.locator('#note-import-details').evaluate(node => node.open), false);
   await openNote(page);
   await page.locator('#note-content').fill('合成首条记录：周末整理书单');
@@ -727,7 +727,7 @@ test('空资料库显示导入空状态，不制造默认会话或原话', async
   assert.equal(await page.locator('.conversation-message').count(), 0);
   assert.equal(native.count('conversation_messages'), 0);
   await openImport(page);
-  assert.equal(await page.locator('#file-import-details').evaluate(node => node.open), true);
+  assert.equal(await page.locator('#file-import-details').evaluate(node => node.open), false);
   assert.equal(await page.locator('#note-import-details').evaluate(node => node.open), false);
   await assertNoWrite(native);
 });

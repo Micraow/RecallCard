@@ -94,6 +94,10 @@ export function syntheticBridge() {
   function defaults(command, payload) {
     switch (command) {
       case 'choose_vault': case 'vault_status': return vault;
+      case 'open_default_workspace': return { ...vault, event_count: 0 };
+      case 'open_deepseek': return null;
+      case 'list_import_jobs': return [];
+      case 'pick_import_files': return null;
       case 'cancel_previews': data.pending = null; data.pendingBackground = null; return null;
       case 'read_background': case 'read_background_page': return backgroundPage(data.backgroundMemories, payload.scope, payload.offset || 0);
       case 'review_background_change': {

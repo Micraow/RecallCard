@@ -190,7 +190,7 @@ impl DesktopSession {
                 occurred_at: event.occurred_at, content: truncate_utf8(&event.text(), 1200),
                 redacted: event.capture.redacted,
             }).collect(),
-            warning: "确认后导入全部可见消息，仅追加 Event，不自动生成 Memory。秘密检测是启发式的，请检查来源；暂停或中断不会回滚已写入的消息，恢复会安全核对并去重。".into(),
+            warning: "确认后保存以上对话，之后可以按需整理成记忆。请检查文字样本；暂停后已保存的消息会保留，继续时会跳过重复内容。".into(),
         };
         self.pending_import_job = Some(PendingImportJob {
             preview_id: preview.preview_id.clone(),

@@ -12,7 +12,7 @@ export function newBackgroundState() { return { actualOpen: false, snapshot: nul
 export function newState() { return { vault: null, page: 'home', workspace: 'conversations', memoryFilter: 'all', continuationOpen: false, mobileDetail: false, viewport: {}, importBatch: null, searchLoaded: false, scope: 'personal', busy: false, query: '', target: 'all', results: [], selected: null, sources: [], importPreview: null, importSelection: null, importSelectedIds: [], dreamPreview: null, dreamTask: null, dreamResultText: '', notePreview: null, noteText: '', selectedRefs: [], conversations: [], conversation: null, conversationRows: [], conversationOffset: 0, continuation: null, continuationGoal: '', memory: newMemoryState(), background: newBackgroundState(), epoch: 0 }; }
 export function activateVault(state, vault) { state.epoch += 1; state.vault = vault; state.scope = vault.scopes?.[0] || 'personal'; state.results = []; state.selected = null; state.sources = []; state.importPreview = null; state.importSelection = null; state.importSelectedIds = []; state.dreamPreview = null; state.dreamTask=null;state.dreamResultText='';state.notePreview = null; state.selectedRefs = []; state.query = ''; state.noteText = ''; state.conversations = []; state.conversation = null; state.conversationRows = []; state.continuation = null; state.continuationGoal = ''; state.clientConfig = null; state.connectionResult = null; state.memory = newMemoryState(); state.background = newBackgroundState(); state.page = 'conversations'; state.workspace = 'conversations'; resetWorkspace(state); }
 export function resetScope(state, scope) { state.epoch += 1; state.scope = scope; state.results = []; state.selected = null; state.sources = []; state.importPreview = null; state.importSelection = null; state.importSelectedIds = []; state.dreamPreview = null; state.dreamTask=null;state.dreamResultText='';state.notePreview = null; state.selectedRefs = []; state.conversations = []; state.conversation = null; state.conversationRows = []; state.continuation = null; state.continuationGoal = ''; state.clientConfig = null; state.connectionResult = null; state.memory = newMemoryState(); state.background = newBackgroundState(); resetWorkspace(state); }
-function resetWorkspace(state) { state.dreamEvidence = {}; state.resumeConversation = null; state.pendingMemoryId = null; state.focusedEvent = ''; state.noteText = ''; state.noteOpen = false; state.fileImportOpen = false; state.allowBrowserCapture = false; state.memoryFilter = 'all'; state.continuationOpen = false; state.mobileDetail = false; state.viewport = {}; state.importBatch = null; state.searchLoaded = false; state.readerReturn = ''; state.conversationListOffset = 0; state.conversationListNext = null; state.conversationTotal = 0; state.conversationOffset = 0; state.conversationNext = null; }
+function resetWorkspace(state) { state.branchConversationRef = ''; state.conversationBranches = null; state.continuationBranchRef = ''; state.continuationBranchLabel = '';  state.importJobs = null; state.dreamEvidence = {}; state.resumeConversation = null; state.pendingMemoryId = null; state.focusedEvent = ''; state.noteText = ''; state.noteOpen = false; state.fileImportOpen = false; state.allowBrowserCapture = false; state.memoryFilter = 'all'; state.continuationOpen = false; state.mobileDetail = false; state.viewport = {}; state.importBatch = null; state.searchLoaded = false; state.readerReturn = ''; state.conversationListOffset = 0; state.conversationListNext = null; state.conversationTotal = 0; state.conversationOffset = 0; state.conversationNext = null; }
 export function scopeOptions(vault, selected) { return [...new Set([selected, ...(vault?.scopes || []), 'personal'])].filter(Boolean); }
 export function nativeInstructions(root, scope, extensionId = '替换为扩展ID') {
   const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
@@ -24,9 +24,9 @@ export function displayState(value) { return ({ active: '有效', tentative: '�
 
 export function importSelectionStats(selection, selectedIds) {
   const ids = new Set(selectedIds);
-  const selected = (selection?.conversations || []).filter(c => ids.has(c.source_id));
+  const selected = (selection?.conversations || []).filter(c => ids.has(c.selection_key || c.source_id));
   const events = selected.reduce((total, conversation) => total + conversation.event_count, 0);
-  return { conversations: selected.length, events, valid: events > 0 && events <= 5000 && selected.length === ids.size };
+  return { conversations: selected.length, events, valid: events > 0 && events <= 100000 && selected.length === ids.size };
 }
 
 export function importCoverageLines(coverage) {
@@ -45,5 +45,7 @@ export function importCoverageLines(coverage) {
     ['unsupported_messages_skipped', '不支持的消息已跳过'], ['empty_messages_skipped', '空消息已跳过'],
     ['unsupported_content_parts_skipped', '不支持的内容片段已跳过'],
   ]) if (messages[key]) lines.push(`${title}：${messages[key]}`);
+  const deepseek = coverage.deepseek || {};
+  for (const [key, title] of [['branch_points', '保留的分支节点'], ['hidden_fragments_skipped', '隐藏推理片段未导入'], ['unsupported_fragments_skipped', '不支持的片段未导入'], ['ambiguous_role_messages_skipped', '角色不明确的消息未导入'], ['attachments_skipped', '附件原件未导入'], ['missing_message_timestamps', '原始时间未知的消息']]) if (deepseek[key]) lines.push(`${title}：${deepseek[key]}`);
   return [...lines, ...(coverage.notes || [])];
 }

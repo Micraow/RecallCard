@@ -25,7 +25,7 @@ export async function captureBrowserEvidence(page, label) {
 
 export async function workspaceAssets() {
   const assets = new Map();
-  for (const name of ['index.html', 'app.js', 'model.js', 'memory-management.js', 'background.js', 'styles.css']) {
+  for (const name of ['index.html', 'app.js', 'model.js', 'memory-management.js', 'background.js', 'import-tasks.js', 'styles.css']) {
     assets.set(`/${name}`, await readFile(new URL(`../ui/${name}`, import.meta.url)));
   }
   return assets;

@@ -81,6 +81,151 @@ async fn choose_vault(
     })
     .await
 }
+/// 新用户点击开始后使用应用私有目录；已有非资料库目录不覆盖、不迁移。
+#[tauri::command]
+async fn open_default_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<recallcard::desktop::VaultInfo, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "无法确定本机保存位置")?
+        .join("vault");
+    let create = !root.exists();
+    execute(state.service.clone(), move |s| {
+        s.select_vault(&root, create)
+    })
+    .await
+}
+
+/// 固定公开网址，不能由网页或导入文件传入地址、参数或任意系统命令。
+#[tauri::command]
+fn open_deepseek(window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("此窗口不能打开外部网页".into());
+    }
+    #[cfg(target_os = "linux")]
+    let mut command = std::process::Command::new("xdg-open");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut cmd = std::process::Command::new("rundll32.exe");
+        cmd.arg("url.dll,FileProtocolHandler");
+        cmd
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    {
+        let mut child = command
+            .arg("https://chat.deepseek.com/")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|_| "无法请求浏览器打开，请手动打开 https://chat.deepseek.com/")?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    Err("请在浏览器打开 https://chat.deepseek.com/".into())
+}
+
+#[tauri::command]
+async fn pick_import_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    format: String,
+) -> Result<Option<recallcard::desktop::ImportJobPreview>, String> {
+    let guard = dialog_guard(&state)?;
+    let paths = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        app.dialog()
+            .file()
+            .set_title("选择导出文件（可多选）")
+            .add_filter("会话导出", &["json", "jsonl", "zip"])
+            .blocking_pick_files()
+    })
+    .await
+    .map_err(|_| "文件选择未完成")?;
+    let Some(paths) = paths else {
+        return Ok(None);
+    };
+    let paths = paths
+        .into_iter()
+        .map(|p| p.into_path().map_err(|_| "请选择本机文件"))
+        .collect::<Result<Vec<_>, _>>()?;
+    execute(state.service.clone(), move |s| {
+        s.prepare_import_job(&session_id, &format, &paths, &scope)
+            .map(Some)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn start_import_job(
+    state: State<'_, AppState>,
+    session_id: String,
+    preview_id: String,
+    scope: String,
+) -> Result<recallcard::desktop::ImportJobStatus, String> {
+    execute(state.service.clone(), move |s| {
+        s.start_import_job(&session_id, &preview_id, &scope)
+    })
+    .await
+}
+#[tauri::command]
+async fn import_job_status(
+    state: State<'_, AppState>,
+    session_id: String,
+    job_id: String,
+    scope: String,
+) -> Result<recallcard::desktop::ImportJobStatus, String> {
+    execute(state.service.clone(), move |s| {
+        s.import_job_status(&session_id, &job_id, &scope)
+    })
+    .await
+}
+#[tauri::command]
+async fn cancel_import_job(
+    state: State<'_, AppState>,
+    session_id: String,
+    job_id: String,
+    scope: String,
+) -> Result<recallcard::desktop::ImportJobStatus, String> {
+    execute(state.service.clone(), move |s| {
+        s.cancel_import_job(&session_id, &job_id, &scope)
+    })
+    .await
+}
+#[tauri::command]
+async fn resume_import_job(
+    state: State<'_, AppState>,
+    session_id: String,
+    job_id: String,
+    scope: String,
+) -> Result<recallcard::desktop::ImportJobStatus, String> {
+    execute(state.service.clone(), move |s| {
+        s.resume_import_job(&session_id, &job_id, &scope)
+    })
+    .await
+}
+#[tauri::command]
+async fn list_import_jobs(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> Result<Vec<recallcard::desktop::ImportJobStatus>, String> {
+    execute(state.service.clone(), move |s| {
+        s.list_import_jobs(&session_id, &scope)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn vault_status(
     state: State<'_, AppState>,
@@ -341,9 +486,16 @@ async fn prepare_continuation(
     scope: String,
     conversation_ref: String,
     goal: String,
+    branch_ref: Option<String>,
 ) -> Result<Value, String> {
     execute(state.service.clone(), move |s| {
-        s.continuation(&session_id, &scope, &conversation_ref, &goal)
+        s.continuation_branch(
+            &session_id,
+            &scope,
+            &conversation_ref,
+            &goal,
+            branch_ref.as_deref(),
+        )
     })
     .await
 }
@@ -726,6 +878,14 @@ fn main() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             choose_vault,
+            open_default_workspace,
+            open_deepseek,
+            pick_import_files,
+            start_import_job,
+            import_job_status,
+            cancel_import_job,
+            resume_import_job,
+            list_import_jobs,
             write_clipboard,
             cancel_previews,
             vault_status,

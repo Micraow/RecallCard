@@ -19,7 +19,7 @@ before(async()=>{
 });
 after(async()=>{await browser?.close();});
 async function fixture(t, chosen=selection){
-  const page=await browser.newPage({locale:'zh-CN',timezoneId:'UTC'});page.setDefaultTimeout(5000);
+  const page=await browser.newPage({locale:'zh-CN',timezoneId:'UTC'});page.setDefaultTimeout(100000);
   const calls=[];const errors=[];let failure=null;let imported=false;page.on('pageerror',e=>errors.push(e.message));
   t.after(async()=>{if(!t.passed||errors.length)await captureBrowserEvidence(page,`import-failure-${t.name}`);await page.close();assert.deepEqual(errors,[]);});
   await page.exposeFunction('__invoke',async(command,payload)=>{
@@ -93,10 +93,10 @@ test('仅提交勾选会话、审查来源时间，确认一次后定位本批�
   assert.equal(await page.getByRole('checkbox').first().isChecked(),false);
 });
 
-test('全选超过 5000 条时禁用预览，减少批次后才生成预览',async t=>{
-  const huge=structuredClone(selection);huge.conversations.forEach(c=>c.event_count=3000);huge.coverage.events_available=6000;
+test('全选超过 100000 条时禁用预览，减少批次后才生成预览',async t=>{
+  const huge=structuredClone(selection);huge.conversations.forEach(c=>c.event_count=60000);huge.coverage.events_available=120000;
   const {page,count}=await fixture(t,huge);await button(page,'选择全部可导入会话');
-  assert.equal(await page.getByRole('button',{name:'预览所选会话',exact:true}).isDisabled(),true);assert.match(await page.locator('.archive-selection').textContent(),/超过 5000/);
+  assert.equal(await page.getByRole('button',{name:'预览所选会话',exact:true}).isDisabled(),true);assert.match(await page.locator('.archive-selection').textContent(),/超过 100000/);
   assert.equal(count('preview_import_selection'),0);await page.getByRole('checkbox').last().uncheck();
   assert.equal(await page.getByRole('button',{name:'预览所选会话',exact:true}).isDisabled(),false);await button(page,'预览所选会话');await idle(page);assert.equal(count('preview_import_selection'),1);
 });

@@ -165,7 +165,31 @@ class PreflightTest(unittest.TestCase):
         text = text.replace(marker, "")
         text = text.replace("        background_evidence = self.exercise_background_selection", marker + "        background_evidence = self.exercise_background_selection")
         path.write_text(text)
-        with self.assertRaisesRegex(preflight.PreflightError, "最后一个"):
+        with self.assertRaisesRegex(preflight.PreflightError, "最后两个流程"):
+            preflight.check_native_order(self.root)
+
+    def test_default_workspace_must_be_present_and_first(self):
+        path = self.copy("desktop/tests/native_smoke.py")
+        original = path.read_text()
+        marker = "        default_workspace_evidence = self.exercise_default_workspace()"
+        self.assertEqual(original.count(marker), 1)
+        path.write_text(original.replace(marker, ""))
+        with self.assertRaisesRegex(preflight.PreflightError, "缺少关键流程"):
+            preflight.check_native_order(self.root)
+        path.write_text(original.replace(marker + "\n", "").replace("        self.exercise_zip_import(archive)", "        self.exercise_zip_import(archive)\n" + marker))
+        with self.assertRaisesRegex(preflight.PreflightError, "第一个"):
+            preflight.check_native_order(self.root)
+
+    def test_deepseek_flow_cannot_be_omitted_or_repeated(self):
+        path = self.copy("desktop/tests/native_smoke.py")
+        original = path.read_text()
+        marker = "        deepseek_evidence = self.exercise_deepseek_import()"
+        self.assertEqual(original.count(marker), 1)
+        path.write_text(original.replace(marker, ""))
+        with self.assertRaisesRegex(preflight.PreflightError, "缺少关键流程"):
+            preflight.check_native_order(self.root)
+        path.write_text(original.replace(marker, marker + "\n" + marker))
+        with self.assertRaisesRegex(preflight.PreflightError, "重复调用流程"):
             preflight.check_native_order(self.root)
 
     def test_native_flow_cannot_hide_in_conditional(self):

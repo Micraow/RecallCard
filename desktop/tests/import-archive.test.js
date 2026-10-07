@@ -6,7 +6,9 @@ test('ZIP 选择按原始会话编号计数，超限和未知编号不能预览'
   const selection = { conversations: [{ source_id: 'one', event_count: 3000 }, { source_id: 'two', event_count: 2500 }] };
   assert.deepEqual(importSelectionStats(selection, []), { conversations: 0, events: 0, valid: false });
   assert.deepEqual(importSelectionStats(selection, ['one','one']), { conversations: 1, events: 3000, valid: true });
-  assert.equal(importSelectionStats(selection, ['one','two']).valid, false);
+  assert.equal(importSelectionStats(selection, ['one','two']).valid, true);
+  assert.equal(importSelectionStats({ conversations: [{ source_id: 'large', event_count: 100001 }] }, ['large']).valid, false);
+  assert.equal(importSelectionStats({ conversations: [{ source_id: 'same', selection_key: 'deepseek:same', event_count: 2 }, { source_id: 'same', selection_key: 'chatgpt:same', event_count: 3 }] }, ['deepseek:same']).events, 2);
   assert.equal(importSelectionStats(selection, ['one','missing']).valid, false);
 });
 test('覆盖范围明确显示未收集的隐藏推理、附件及跳过 JSON', () => {

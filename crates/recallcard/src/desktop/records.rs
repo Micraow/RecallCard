@@ -200,17 +200,18 @@ impl DesktopSession {
                     && records.events.contains_key(&format!("event:{}", event.id))
             })
             .collect();
-        let (events, _) = crate::conversation::ordered_events(events);
-        let index = events
+        let branches = super::branches::ConversationBranches::new(events)?;
+        let index = branches
+            .order()
             .iter()
-            .position(|candidate| candidate.id == event.id)
+            .position(|index| branches.events[*index].id == event.id)
             .ok_or("会话记录已经变化，请重新检索")?;
         let mut location = event_fields(event);
         location["ref"] = json!(reference);
         location["message_index"] = json!(index);
         // 直接以目标开页，不能以 index/20 猜页：长正文会提前耗尽单页预算。
         location["offset"] = json!(index);
-        location["total"] = json!(events.len());
+        location["total"] = json!(branches.events.len());
         Ok(location)
     }
 }
