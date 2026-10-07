@@ -1,5 +1,7 @@
 # RecallCard 桌面 0.4：找到原话，带走背景
 
+[下载0.4.0安装包](https://github.com/Micraow/RecallCard/actions/runs/37623800674/artifacts/11482734288)。程序提交41e70dd，标准Linux真实窗口28步通过；ZIP内含CLI和扩展0.3.1。
+
 打开应用，创建资料库并选择一个空文件夹。已有资料库可以直接打开。不用先配置账号、API、向量或同步。
 
 ## 先完成一次接续
@@ -40,6 +42,6 @@
 
 Arch Linux 优先使用 AppImage，Ubuntu 可安装 deb。便携 ZIP 解压后运行「运行桌面版.sh」，系统需要 Git、GTK 3 和 WebKitGTK 4.1。不要混用不同提交号的程序。
 
-云端标准 Linux 与用户自己的 Arch/KDE Wayland 是不同环境。真实登录态网页和已安装扩展的兼容性，以实际连接结果为准；浏览器禁止安装时不修改安全策略。
+[验收记录](https://github.com/Micraow/RecallCard/actions/runs/37623800674)覆盖程序窗口，未执行deb安装事务。云端标准 Linux 与用户自己的 Arch/KDE Wayland 是不同环境。真实登录态网页和已安装扩展的兼容性，以实际连接结果为准；浏览器禁止安装时不修改安全策略。
 
 [背景选择与边界](desktop-background-v0.4.md) · [浏览器保存与导出](browser-conversations-v0.3.md) · [整理任务](manual-web-dream-task.md)
