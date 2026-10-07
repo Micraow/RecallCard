@@ -288,6 +288,7 @@ fn run(cli: Cli) -> Result<Value> {
             )?),
         },
         Command::Read { id, scope } => {
+            let _read_guard = vault.read_guard()?;
             let (kind, record_id, revision) = parse_ref(&id)?;
             if kind == "view" {
                 return Context::new(&vault, Access::new(scope)?).read(ReadArgs {
@@ -305,6 +306,7 @@ fn run(cli: Cli) -> Result<Value> {
             vault.read(record_id)
         }
         Command::Sources { id } => {
+            let _read_guard = vault.read_guard()?;
             let (kind, record_id, revision) = parse_ref(&id)?;
             if kind == "view" {
                 return Err("sources 接受 Event/Memory 引用；View 请使用 read --scope".into());

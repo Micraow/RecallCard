@@ -183,3 +183,25 @@ fn cli_import_accepts_stdin_and_rejects_oversized_files_before_writing() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("16 MiB"));
     assert_eq!(vault.events().unwrap().len(), 1);
 }
+
+#[test]
+fn cli_read_and_sources_refuse_an_active_writer_instead_of_mixing_revisions() {
+    let (_dir, vault) = setup();
+    let event = event(&vault, "a", "first");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(vault.state_dir().unwrap().join("write.lock"))
+        .unwrap();
+    file.try_lock().unwrap();
+    for command in ["read", "sources"] {
+        let output = run(&vault, &[command, &format!("event:{}", event.id)], None);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("正在更新"));
+        assert!(output.stdout.is_empty());
+    }
+    file.unlock().unwrap();
+    assert_eq!(ok(run(&vault, &["read", &event.id], None))["id"], event.id);
+}
