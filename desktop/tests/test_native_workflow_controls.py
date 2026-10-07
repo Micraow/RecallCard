@@ -554,6 +554,7 @@ class NativeControlsTest(unittest.TestCase):
         smoke = object.__new__(module.NativeSmoke)
         smoke.temporary = Path(directory); paths = smoke.create_deepseek_fixtures()
         smoke.driver = Mock(); smoke.dialog_count = 0; smoke.capture = Mock(); smoke.describe_dialog = Mock()
+        smoke.navigate_file_folder = Mock()
         native = {"open": True}
         smoke.dialog_windows = Mock(side_effect=lambda title: ["42"] if native["open"] else [])
         smoke.accessible_dialog = Mock(return_value=object())
@@ -589,13 +590,13 @@ class NativeControlsTest(unittest.TestCase):
             with patch.dict(sys.modules, {"pyatspi": SimpleNamespace(DESKTOP_COORDS=0)}), patch.object(module, "run", side_effect=execute) as action, patch.object(module.time, "sleep"), patch.object(module, "wait_for", side_effect=self.immediate):
                 smoke.dialog_files(paths)
             self.assertEqual(order, ["visible", "selected", "open"])
-            typed = [call.args for call in action.call_args_list if call.args[1] == "type"]
-            self.assertEqual(typed, [("xdotool", "type", "--clearmodifiers", "--delay", "8", str(paths[0].parent) + "/")])
+            smoke.navigate_file_folder.assert_called_once_with(module.DEEPSEEK_DIALOG, "42", paths[0].parent)
+            self.assertFalse(any(call.args[1] == "type" for call in action.call_args_list))
             self.assertEqual(sum(call.args == ("xdotool", "click", "1") for call in action.call_args_list), 1)
-            self.assertEqual(sum(call.args == ("xdotool", "key", "--clearmodifiers", "ctrl+a") for call in action.call_args_list), 2)
+            self.assertEqual(sum(call.args == ("xdotool", "key", "--clearmodifiers", "ctrl+a") for call in action.call_args_list), 1)
             smoke.native_file_cells.assert_any_call(module.DEEPSEEK_DIALOG, {path.name for path in paths}, selected=True)
             approval.queryAction.return_value.doAction.assert_called_once_with(0)
-            smoke.driver.idle.assert_called_once(); smoke.describe_dialog.assert_not_called()
+            smoke.driver.idle.assert_called_once(); smoke.describe_dialog.assert_called_once_with(module.DEEPSEEK_DIALOG, "visible-files")
 
     @staticmethod
     def file_cell():
@@ -612,7 +613,7 @@ class NativeControlsTest(unittest.TestCase):
                         smoke.dialog_files(paths)
                 approval.queryAction.return_value.doAction.assert_not_called()
                 smoke.native_button.assert_not_called(); smoke.driver.idle.assert_not_called()
-                smoke.describe_dialog.assert_called_once_with(module.DEEPSEEK_DIALOG)
+                self.assertEqual(smoke.describe_dialog.call_args.args, (module.DEEPSEEK_DIALOG,))
                 self.assertLessEqual(sum(call.args == ("xdotool", "click", "1") for call in action.call_args_list), 1)
 
     def test_multiple_picker_rejected_open_is_never_replayed(self):
@@ -636,6 +637,67 @@ class NativeControlsTest(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "未批准"):
                     smoke.dialog_files(paths)
                 action.assert_not_called(); smoke.dialog_windows.assert_not_called()
+
+    def test_native_location_entry_requires_unique_visible_focused_editable_text(self):
+        api = SimpleNamespace(ROLE_TEXT=1, STATE_SHOWING=2, STATE_SENSITIVE=3, STATE_FOCUSED=4, STATE_EDITABLE=5)
+        def entry(states):
+            node = Mock(); node.getRole.return_value = api.ROLE_TEXT
+            node.getAttributes.return_value = ["placeholder-text:Location"]
+            node.getState.return_value.contains.side_effect = lambda state: state in states
+            return node
+        correct = entry({2, 3, 4, 5})
+        smoke = object.__new__(module.NativeSmoke); smoke.accessible_dialog = Mock(); smoke.accessible_nodes = Mock()
+        with patch.dict(sys.modules, {"pyatspi": api}):
+            for absent in [2, 3, 4, 5]:
+                smoke.accessible_nodes.return_value = [(entry({2, 3, 4, 5} - {absent}), 0)]
+                self.assertIsNone(smoke.native_location_entry(module.DEEPSEEK_DIALOG))
+            smoke.accessible_nodes.return_value = [(correct, 0)]
+            self.assertIs(smoke.native_location_entry(module.DEEPSEEK_DIALOG), correct)
+            search = entry({2, 3, 4, 5}); search.getAttributes.return_value = ["placeholder-text:Search"]
+            smoke.accessible_nodes.return_value = [(search, 0)]
+            self.assertIsNone(smoke.native_location_entry(module.DEEPSEEK_DIALOG))
+            smoke.accessible_nodes.return_value = [(correct, 0), (correct, 0)]
+            with self.assertRaisesRegex(AssertionError, "不唯一"):
+                smoke.native_location_entry(module.DEEPSEEK_DIALOG)
+
+    def test_native_folder_navigation_pastes_and_reads_back_before_one_return(self):
+        with tempfile.TemporaryDirectory() as directory:
+            smoke = object.__new__(module.NativeSmoke); smoke.artifacts = Path(directory); smoke.dialog_count = 1
+            smoke.capture = Mock(); smoke.describe_dialog = Mock(); node = Mock()
+            node.queryText.return_value.getText.return_value = directory + "/"
+            smoke.native_location_entry = Mock(return_value=node)
+            with patch.object(module, "run", return_value="42\n") as action, patch.object(module.subprocess, "run") as paste, patch.object(module, "wait_for", side_effect=self.immediate):
+                smoke.navigate_file_folder(module.DEEPSEEK_DIALOG, "42", Path(directory))
+            self.assertEqual(paste.call_count, 1); self.assertEqual(paste.call_args.kwargs['input'], directory + "/")
+            self.assertEqual(action.call_args_list[-1].args, ("xdotool", "key", "--clearmodifiers", "Return"))
+            self.assertEqual(sum(call.args[-1] == "Return" for call in action.call_args_list), 1)
+            self.assertGreaterEqual(node.queryText.return_value.getText.call_count, 2)
+            self.assertFalse(any(call.args[-1] == "ctrl+l" for call in action.call_args_list), "已聚焦位置框不能被切换隐藏")
+            evidence = json.loads((smoke.artifacts / "dialog-01-location.json").read_text())
+            self.assertEqual(evidence, {"expected": directory + "/", "observed": directory + "/"})
+
+    def test_native_folder_mismatched_text_or_lost_focus_stops_without_return(self):
+        for text_ok, focused in [(False, True), (True, False)]:
+            with self.subTest(text_ok=text_ok, focused=focused), tempfile.TemporaryDirectory() as directory:
+                smoke = object.__new__(module.NativeSmoke); smoke.artifacts = Path(directory); smoke.dialog_count = 1
+                smoke.capture = Mock(); smoke.describe_dialog = Mock(); node = Mock()
+                node.queryText.return_value.getText.return_value = directory + "/" if text_ok else "/synthetic/wrong/"
+                smoke.native_location_entry = Mock(return_value=node)
+                with patch.object(module, "run", return_value="42\n" if focused else "99\n") as action, patch.object(module.subprocess, "run"), patch.object(module, "wait_for", side_effect=self.immediate):
+                    with self.assertRaises(AssertionError):
+                        smoke.navigate_file_folder(module.DEEPSEEK_DIALOG, "42", Path(directory))
+                self.assertFalse(any(call.args[-1] == "Return" for call in action.call_args_list))
+
+    def test_multiple_picker_closed_during_navigation_is_not_reopened_or_confirmed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            smoke, paths, approval, execute = self.multiple_picker(directory)
+            smoke.navigate_file_folder.side_effect = lambda *_: setattr(smoke.dialog_windows, 'side_effect', lambda _: [])
+            with patch.object(module, "run", side_effect=execute), patch.object(module, "wait_for", side_effect=self.immediate):
+                with self.assertRaisesRegex(AssertionError, "已经关闭"):
+                    smoke.dialog_files(paths)
+            smoke.navigate_file_folder.assert_called_once()
+            approval.queryAction.return_value.doAction.assert_not_called()
+            smoke.native_file_cells.assert_not_called(); smoke.driver.idle.assert_not_called()
 
 
 if __name__ == "__main__":

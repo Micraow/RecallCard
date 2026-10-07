@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "checked_at_utc": "2026-10-07T23:37:25.117945+00:00",
+  "application_commit": "12f4672fe0f3fe3fac0702c33998501950b01538",
+  "application_source_changed": false,
+  "local_gate_passed": true,
+  "full_acceptance_passed": false,
+  "checks": {
+    "preflight": 11,
+    "dom": 225,
+    "javascript_contracts": 111,
+    "native_driver_contracts": 52,
+    "preflight_contracts": 37,
+    "independent_review": "passed"
+  },
+  "prior_actual_run": {
+    "id": 37702406803,
+    "browser_passed": 72,
+    "browser_failed": 1,
+    "native_passed_checkpoints": 29,
+    "tauri_clippy": "passed",
+    "tauri_build": "passed",
+    "cli_build": "passed",
+    "native_failure": "原生多文件选择器在目录导航后已关闭；未到文件列表确认，旧证据未记录输入文字"
+  },
+  "reuse": {
+    "run_id": 37702406803,
+    "job_id": 113068726523,
+    "artifact_id": 11517704706,
+    "zip_sha256": "d1b0e8227384dde60b3c135c15ae49607a057735e581f57ae2d0d283dc2fe18b",
+    "gui_sha256": "43b173b96502e04b41ebf9057e892393b92075f6b6ead83b486aaca5a61c5569",
+    "cli_sha256": "8e58de814c9e47309aa61e800686d799389971005671fd6fb643026397c17a78",
+    "downloaded_and_independently_hashed": true,
+    "source_equality_required_in_ci": true
+  },
+  "source_sha256": {
+    ".github/workflows/desktop.yml": "f96ee0b77a3b2544271a5ab23329c846e1df8517f07d1266e640858cd1d669b1",
+    ".github/workflows/recheck-integrated.yml": "eca26eaf1c9c71e97f1a66153ca04379f9aca1a4efed427c187110dd6af030a8",
+    "desktop/tests/native_smoke.py": "e055cf7495fe44a9c1bd3704883b685e10daba4bc69af5ab45acf56c9812f28a",
+    "desktop/tests/test_native_workflow_controls.py": "594a3fe38d2b2379aa81af721ee487439e7625f40139bac958e0d140fa0b548d",
+    "desktop/tests/ui.test.mjs": "f84b00c4f303e764fbd87883b9a92b34c309d4353c9fa806d797366119d3c288",
+    "docs/ci.md": "5328df5cfe49f7a3decf81bdcb361dc66fa845e1cf5ef67216a8175645420f87",
+    "scripts/tests/test_preflight.py": "e9d9b7687f6378dbee4a09623bd170e61c5e233b5d5404653017f5740f353973"
+  }
+}

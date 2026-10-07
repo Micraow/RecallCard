@@ -884,7 +884,13 @@ for (const fails of [false, true]) {
     assert.equal(await searchHeader.evaluate(node => node.isConnected), true);
     assert.equal(await header.evaluate(node => node.isConnected), false, '主动搜索应正常更换背景页');
     assert.equal(await page.locator('#query').inputValue(), '迟到设置期间的新查找');
-    if (fails) await page.getByText('资料已打开，但暂时无法记住这个位置。下次仍可手动打开。', { exact: true }).waitFor();
+    if (fails) {
+      const notice = page.locator('#notice.error');
+      await notice.waitFor({ state: 'visible' });
+      const message = await notice.evaluate(node => [...node.childNodes].filter(child => child.nodeType === Node.TEXT_NODE).map(child => child.textContent).join(''));
+      assert.equal(message, '资料已打开，但暂时无法记住这个位置。下次仍可手动打开。');
+      assert.equal(await notice.getByRole('button', { name: '关闭提示', exact: true }).isVisible(), true);
+    }
     await captureBrowserEvidence(page, `scope-late-${fails ? 'failure' : 'success'}`);
     await assertNoWrite(native);
   });
