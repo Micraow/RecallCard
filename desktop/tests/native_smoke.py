@@ -136,7 +136,19 @@ class WebDriver:
     def type(self, selector, value):
         element = self.find(selector)
         self.command("POST", f"/element/{element}/clear", {})
-        self.command("POST", f"/element/{element}/value", {"text": value})
+        if "\n" in value or "\r" in value:
+            # WebKit 的 Send Keys 对换行可能按控制键处理；多行结果按用户的真实粘贴流程输入。
+            # 不给 DOM 赋值，也不调用应用业务方法。只粘贴一次，之后逐字核对输入框。
+            subprocess.run(["xclip", "-selection", "clipboard", "-i"], input=value,
+                           text=True, check=True, timeout=5,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.click(selector)
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+v"], check=True, timeout=5)
+        else:
+            self.command("POST", f"/element/{element}/value", {"text": value})
+        expected = value.replace("\r\n", "\n").replace("\r", "\n")
+        wait_for(lambda: self.observe(f"return document.querySelector({json.dumps(selector)}).value") == expected,
+                 "输入框完整保留预期文字与换行", timeout=5)
 
     def select(self, selector, value):
         # 使用 WebDriver 点击真实 option，让应用收到正常 change 事件。
