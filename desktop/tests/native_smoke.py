@@ -246,9 +246,21 @@ class NativeSmoke:
                     self.describe_dialog(title)
         wait_for(lambda: not self.dialog_windows(title), f"关闭原生窗口：{title}")
         if create:
-            wait_for(lambda: self.accessible_dialog("创建资料库"), "创建确认窗口")
-            approval = wait_for(lambda: self.native_button("创建资料库", "创建资料库"), "创建确认按钮")
-            assert approval.queryAction().doAction(0)
+            # rfd 的 GtkMessageDialog 在部分系统未以窗口标题暴露 AT-SPI 对象。
+            # 已核对固定版本截图和 rfd 按钮顺序：创建在左、取消在右。
+            # 对已识别的原生确认窗执行正常鼠标点击，随后仍校验真实资料库文件。
+            approval_window = wait_for(lambda: self.dialog_windows("创建资料库"), "创建确认窗口")[0]
+            run("xdotool", "windowactivate", "--sync", approval_window)
+            self.capture("create-confirmation", webview=False)
+            approval = self.native_button("创建资料库", "创建资料库")
+            if approval:
+                assert approval.queryAction().doAction(0)
+            else:
+                geometry = dict(line.split("=", 1) for line in run("xdotool", "getwindowgeometry", "--shell", approval_window).splitlines() if "=" in line)
+                width, height = int(geometry["WIDTH"]), int(geometry["HEIGHT"])
+                assert width >= 200 and height >= 120, "确认窗尺寸异常，停止点击"
+                run("xdotool", "mousemove", "--window", approval_window, str(width // 4), str(height - 18))
+                run("xdotool", "click", "1")
             wait_for(lambda: not self.dialog_windows("创建资料库"), "创建确认窗口关闭")
         self.driver.idle()
 
