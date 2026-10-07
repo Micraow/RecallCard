@@ -68,10 +68,10 @@ class NativeControlsTest(unittest.TestCase):
         driver.click = Mock(); value = '```json\n{"合成":true}\n```'; driver.observe = Mock(return_value=value)
         with patch.object(module.subprocess, "run") as process:
             driver.type("#result", value)
-            self.assertEqual(driver.command.call_args_list[0].args, ("POST", "/element/input/clear", {}))
-            self.assertEqual(driver.command.call_count, 1, "不再使用会丢失换行的 Send Keys")
+            driver.command.assert_not_called()
+            driver.find.assert_not_called()  # 点击自行定位；不在粘贴前保存旧输入框引用
             self.assertEqual(process.call_args_list[0].kwargs["input"], value)
-            self.assertEqual(process.call_args_list[1].args[0], ["xdotool", "key", "--clearmodifiers", "ctrl+v"])
+            self.assertEqual(process.call_args_list[1].args[0], ["xdotool", "key", "--clearmodifiers", "ctrl+a", "ctrl+v"])
             self.assertEqual(process.call_count, 2)
             driver.click.assert_called_once_with("#result")
             driver.observe.assert_called_once()
@@ -86,6 +86,18 @@ class NativeControlsTest(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "完整保留"):
                 driver.type("#result", '```json\n{}\n```')
             self.assertEqual(process.call_count, 2)
+
+    def test_controlled_input_replacement_does_not_reuse_an_element_handle(self):
+        driver = self.driver()
+        driver.find = Mock(side_effect=AssertionError("输入方法不得保存元素引用"))
+        driver.command = Mock(side_effect=AssertionError("不能清空后继续写过期元素"))
+        driver.click = Mock()  # 真实 click 自行定位并聚焦一次
+        driver.observe = Mock(side_effect=["旧节点的值", "work"])
+        with patch.object(module.subprocess, "run") as process:
+            driver.type("#import-scope", "work")
+            driver.click.assert_called_once_with("#import-scope")
+            self.assertEqual(driver.observe.call_count, 2)
+            self.assertEqual(process.call_count, 2, "重读节点不能再次粘贴")
 
     def test_search_contract_opens_each_visible_record_and_checks_full_reference(self):
         smoke = object.__new__(module.NativeSmoke)

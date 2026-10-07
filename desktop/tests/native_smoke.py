@@ -134,18 +134,14 @@ class WebDriver:
             print(f"点击回执断开，但已观察到原生窗口：{title}；不重发点击", flush=True)
 
     def type(self, selector, value):
-        element = self.find(selector)
-        self.command("POST", f"/element/{element}/clear", {})
-        if "\n" in value or "\r" in value:
-            # WebKit 的 Send Keys 对换行可能按控制键处理；多行结果按用户的真实粘贴流程输入。
-            # 不给 DOM 赋值，也不调用应用业务方法。只粘贴一次，之后逐字核对输入框。
-            subprocess.run(["xclip", "-selection", "clipboard", "-i"], input=value,
-                           text=True, check=True, timeout=5,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.click(selector)
-            subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+v"], check=True, timeout=5)
-        else:
-            self.command("POST", f"/element/{element}/value", {"text": value})
+        # 使用真实聚焦、全选和粘贴。WebDriver clear 会提前派发 change，
+        # 使受控输入框重建；Send Keys 还可能把换行当控制键吞掉。
+        # 不复用旧元素引用，不给 DOM 赋值，也不调用应用业务方法。
+        subprocess.run(["xclip", "-selection", "clipboard", "-i"], input=value,
+                       text=True, check=True, timeout=5,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.click(selector)
+        subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a", "ctrl+v"], check=True, timeout=5)
         expected = value.replace("\r\n", "\n").replace("\r", "\n")
         wait_for(lambda: self.observe(f"return document.querySelector({json.dumps(selector)}).value") == expected,
                  "输入框完整保留预期文字与换行", timeout=5)
