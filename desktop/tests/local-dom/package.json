@@ -6,7 +6,7 @@
     "test": "node --experimental-vm-modules --test --test-isolation=none --test-concurrency=1 *.test.mjs"
   },
   "engines": {
-    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
+    "node": "^24.19.0 || >=26.0.0"
   },
   "devDependencies": {
     "jsdom": "30.1.2"

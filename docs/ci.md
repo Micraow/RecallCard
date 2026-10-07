@@ -41,3 +41,9 @@ Linux 安装包工作流只在手动启动或 `validate/desktop-*` 分支上执�
 云电脑已经能编译 Tauri，但其系统未安装标准路径 WebKit 辅助进程且没有 sudo；因此这一次标准 Linux 运行环境与安装包验收保留在 Actions。不能把本地未执行的原生检查标成通过，也不会为每次细小文案改动重新跑全矩阵。
 
 打包安排参考用户提供的 [Nexus package.yml](https://github.com/Micraow/nexus/blob/main/.github/workflows/package.yml) 和 [MoonBridge-GUI release.yml](https://github.com/Micraow/MoonBridge-GUI/blob/main/.github/workflows/release.yml) 的系统基线与产物组织，没有复制发布、跨仓库同步、更新服务或 AUR 步骤。
+
+## 0.4 首轮测试环境修正
+
+验证提交 `1baa4dc` 的运行 [37613355691](https://github.com/Micraow/RecallCard/actions/runs/37613355691) 在进入应用编译前失败：Node 22 报 `bad option: --test-isolation=none`。本地 Node 24.19.0 的55项DOM已通过，但新增工作流步骤没有同步运行版本。这是测试环境声明遗漏。安装包工作流现固定24.19.0，DOM包根级engines与说明一起收紧；依赖本身的引擎声明保持原样。
+
+参数依据：[Node 24.19.0 官方命令行说明](https://nodejs.org/download/release/v24.19.0/docs/api/cli.html#--test-isolationmode)。本次不重新编译已经通过的程序，因为该轮尚未构建应用；后续仍需完整执行产品验证，不能把版本修正本身算成验收通过。
