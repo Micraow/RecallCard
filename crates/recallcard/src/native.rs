@@ -132,9 +132,16 @@ pub fn prepare_install(
                 .into(),
         );
     }
-    crate::vault::reject_symlink(output)?;
+    // 用户指定的安装根允许 macOS /var 等系统父目录别名；根本身不能是链接。
+    match fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.is_symlink() => return Err("安装根目录不能是符号链接".into()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
     fs::create_dir_all(output).map_err(|e| e.to_string())?;
     let output = fs::canonicalize(output).map_err(|e| e.to_string())?;
+    crate::vault::reject_symlink(&output)?;
     let script = output.join("recallcard-native-host");
     let manifest = output.join("com.recallcard.host.json");
     if script.exists() || manifest.exists() {

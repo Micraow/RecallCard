@@ -586,6 +586,8 @@ pub(crate) fn reject_symlink(path: &Path) -> Result<()> {
     Ok(())
 }
 fn sync_parent(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     File::open(path.parent().ok_or("没有父目录")?)
         .map_err(err)?
