@@ -34,6 +34,19 @@ class NativeControlsTest(unittest.TestCase):
         driver.click.assert_called_once_with('#navigation [data-workspace="memories"]')
         driver.button.assert_called_once_with("整理记忆")
 
+    def test_background_scope_change_requires_reset_tab_then_one_visible_reopen(self):
+        driver = self.driver(); driver.select = Mock(); driver.observe = Mock(return_value="true")
+        driver.click = Mock(); driver.idle = Mock()
+        driver.select_background_scope("work")
+        contract = module.UI_CONTRACTS["scope_background"]
+        driver.select.assert_called_once_with(contract["scope_selector"], "work")
+        driver.click.assert_called_once_with(contract["background_tab"])
+        driver.idle.assert_called_once()
+        driver.observe.return_value = "false"; driver.click.reset_mock()
+        with self.assertRaises(AssertionError):
+            driver.select_background_scope("personal")
+        driver.click.assert_not_called()
+
     def test_vault_badge_checks_visible_dom_and_records_rendered_text_difference(self):
         driver = self.driver(); driver.observe = Mock(return_value={'text': '合成资料库', 'visible': True})
         driver.text = Mock(return_value='')

@@ -222,6 +222,14 @@ class WebDriver:
             self.button(label)
         self.idle()
 
+    def select_background_scope(self, scope):
+        # 切范围清空旧选择并回到全部记忆；通过可见页签重新打开新范围背景。
+        contract = UI_CONTRACTS["scope_background"]
+        self.select(contract["scope_selector"], scope)
+        assert self.observe(f"return document.querySelector({json.dumps(contract['reset_tab'])}).getAttribute('aria-pressed')") == "true"
+        self.click(contract["background_tab"])
+        self.idle()
+
     def open_continuation(self):
         self.click('[data-action="open-continuation"]')
         self.idle()
@@ -850,7 +858,7 @@ class NativeSmoke:
         personal_bootstrap = self.mcp_tool(server, "bootstrap", {})
         assert personal_bootstrap["refs"] == [reference(labeled)]
         assert personal_text.endswith(personal_bootstrap["stable_text"])
-        browser.select('select[aria-label="资料范围"]', "work")
+        browser.select_background_scope("work")
         assert not browser.observe("return !!document.querySelector('.background-candidate')")
         work_text = shown()
         assert original["content"] not in work_text and memory_id not in work_text
@@ -865,7 +873,7 @@ class NativeSmoke:
         assert original["content"] not in work_bootstrap["stable_text"] and memory_id not in work_bootstrap["stable_text"]
         assert self.mcp_tool(server, "bootstrap", {}) == personal_bootstrap, "切换 GUI 范围不能改变已生成的个人 MCP 授权"
         browser.navigate("随身背景")
-        browser.select('select[aria-label="资料范围"]', "personal")
+        browser.select_background_scope("personal")
         assert checked() and shown() == personal_text
         assert current_memory() == labeled and self.events() == original_events
         self.checkpoint("随身背景普通标签保留成员且个人工作范围隔离")
