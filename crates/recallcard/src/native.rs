@@ -28,6 +28,8 @@ pub struct LauncherConfig {
     vault: PathBuf,
     scopes: Vec<String>,
     extension_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ipc_endpoint: Option<PathBuf>,
 }
 
 /// 纯配置校验，不读取 Vault，不注册浏览器，也不修改文件。
@@ -115,12 +117,19 @@ fn run_launcher(executable: &Path, arguments: Vec<OsString>) -> Result<()> {
     }
     reject_links(&config.vault)?;
     let vault = Vault::open(&config.vault)?;
-    serve_native(
-        &vault,
-        Access::new(config.scopes)?,
-        &config.extension_id,
-        origin,
-    )
+    let access = Access::new(config.scopes)?;
+    if let Some(endpoint) = config.ipc_endpoint {
+        let client =
+            crate::ipc::Client::new(&vault, &access, endpoint, std::time::Duration::from_secs(5))?;
+        return serve_native_service_io(
+            |name, args| client.invoke(name, args),
+            &config.extension_id,
+            origin,
+            std::io::stdin().lock(),
+            std::io::stdout().lock(),
+        );
+    }
+    serve_native(&vault, access, &config.extension_id, origin)
 }
 
 fn metadata_is_link(metadata: &fs::Metadata) -> bool {
@@ -246,13 +255,29 @@ pub fn serve_native_io<R: Read, W: Write>(
     access: Access,
     extension: &str,
     origin: &str,
+    reader: R,
+    writer: W,
+) -> Result<()> {
+    let context = Context::new(vault, access);
+    serve_native_service_io(
+        |name, args| invoke(&context, name, args),
+        extension,
+        origin,
+        reader,
+        writer,
+    )
+}
+
+pub fn serve_native_service_io<R: Read, W: Write>(
+    service: impl Fn(&str, Value) -> Result<Value>,
+    extension: &str,
+    origin: &str,
     mut reader: R,
     mut writer: W,
 ) -> Result<()> {
     if origin != extension_origin(extension)? {
         return Err("Native Messaging 来源扩展不在允许名单".into());
     }
-    let context = Context::new(vault, access);
     let mut cache: BTreeMap<String, (String, Value)> = BTreeMap::new();
     loop {
         let mut prefix = [0u8; 4];
@@ -295,8 +320,7 @@ pub fn serve_native_io<R: Read, W: Write>(
                     } else if cache.len() >= 120 {
                         json!({"ok":false,"error":"本连接请求达到上限，请重新连接"})
                     } else {
-                        let response = match invoke(
-                            &context,
+                        let response = match service(
                             &request.action,
                             request.arguments.unwrap_or_else(|| json!({})),
                         ) {
@@ -330,8 +354,26 @@ pub fn prepare_install(
     extension: &str,
     output: &Path,
 ) -> Result<Value> {
+    prepare_install_with_ipc(vault, scopes, extension, output, None)
+}
+
+pub fn prepare_install_with_ipc(
+    vault: &Vault,
+    scopes: Vec<String>,
+    extension: &str,
+    output: &Path,
+    ipc_endpoint: Option<PathBuf>,
+) -> Result<Value> {
     let origin = extension_origin(extension)?;
     let access = Access::new(scopes)?;
+    if let Some(endpoint) = &ipc_endpoint {
+        crate::ipc::Client::new(
+            vault,
+            &access,
+            endpoint.clone(),
+            std::time::Duration::from_secs(5),
+        )?;
+    }
     let vault_root = fs::canonicalize(vault.root()).map_err(|e| e.to_string())?;
     reject_links(&vault_root)?;
     reject_install_root_link(output)?;
@@ -370,6 +412,7 @@ pub fn prepare_install(
         vault: vault_root,
         scopes: access.scopes(),
         extension_id: extension.into(),
+        ipc_endpoint,
     };
     let config_bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
     parse_launcher_config(&config_bytes)?;

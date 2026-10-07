@@ -4,7 +4,7 @@
 
 `python/recallcard_worker` 使用 Python 3.10 及以上标准库，不安装 SDK、不下载模型、不扫描 Vault，也不修改 Event、Memory 或 Dream receipt。Rust 的捕获、文本检索、Bootstrap、手动 Dream 与离线重建无需 Python、API key 或网络。
 
-当前提供一个 OpenAI-compatible HTTPS Embeddings 适配器、增量派生缓存、余弦检索和 RRF 融合。Rust 提供 `embedding-export` 显式导出语料；worker 是独立可选入口，尚未自动接入 Rust 的 `search`/MCP 检索路径。不要把存在此 worker 写成默认搜索已经支持语义召回。
+当前提供一个 OpenAI-compatible HTTPS Embeddings 适配器、增量派生缓存、余弦检索和 RRF 融合。Rust 提供 `embedding-export` 显式导出语料，并通过可信启动配置可选接入 `search`/MCP/daemon：受监督子进程查询已有兼容索引，重新对照正本后融合文本与向量候选。默认搜索仍完全离线且不启用 worker；查询文本外发需要与 corpus 分开的批准。配置、降级和进程边界见 [可选受监督语义检索](semantic-search-v0.3.md)。
 
 本轮验证全部使用虚构材料、内存 fake transport 和离线子进程。没有向真实供应商发送任何数据，没有调用付费模型，没有验证某家中转服务的实际兼容性、召回质量或账单。
 

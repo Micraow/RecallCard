@@ -46,10 +46,19 @@ pub fn serve_mcp(vault: &Vault, access: Access) -> Result<()> {
 pub fn serve_mcp_io<R: BufRead, W: Write>(
     vault: &Vault,
     access: Access,
+    reader: R,
+    writer: W,
+) -> Result<()> {
+    let context = Context::new(vault, access);
+    serve_mcp_service_io(|name, args| invoke(&context, name, args), reader, writer)
+}
+
+/// 传输与本机读取后端分离；后端由可信启动配置提供，不由 MCP 参数选择。
+pub fn serve_mcp_service_io<R: BufRead, W: Write>(
+    service: impl Fn(&str, Value) -> Result<Value>,
     mut reader: R,
     mut writer: W,
 ) -> Result<()> {
-    let context = Context::new(vault, access);
     let mut initialized = false;
     let mut ready = false;
     while let Some(line) = read_line_bounded(&mut reader, 1024 * 1024)? {
@@ -115,8 +124,7 @@ pub fn serve_mcp_io<R: BufRead, W: Write>(
             ),
             "tools/list" => json!({"jsonrpc":"2.0","id":id,"result":{"tools":tool_definitions()}}),
             "tools/call" => {
-                let result = invoke(
-                    &context,
+                let result = service(
                     params["name"].as_str().unwrap_or(""),
                     params
                         .get("arguments")
