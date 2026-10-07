@@ -3,11 +3,14 @@
 //! 宿主应把整个服务放在互斥锁内，每条命令持锁到结束；切换 Vault 会废弃所有旧会话
 //! 和审查令牌。预览只读；确认命令只接受保存在本机内存中的预览编号，不接受替代路径
 //! 或替代内容。错误不转发解析器、操作系统或 Git 输出中的文件正文、秘密和路径。
+mod memory;
+pub use memory::{MemoryEdit, MemoryReview};
+
 use crate::{
     capture::redact_event,
     context::{truncate_utf8, BootstrapArgs, Context, ReadArgs, SearchArgs},
     dream::{DreamJob, DreamReceipt, DreamResult, DreamReview},
-    import::{import_text, parse_text},
+    import_bundle::{self, ConversationSummary, ImportCoverage, ParsedImport},
     model::{hash, validate_scope, EventInput, Origin, Result, Role},
     policy::Access,
     vault::reject_symlink,
@@ -47,11 +50,13 @@ pub struct VaultInfo {
 pub struct ImportSample {
     pub role: Role,
     pub origin: Origin,
+    pub source: crate::model::Source,
+    pub occurred_at: Option<chrono::DateTime<Utc>>,
     pub content: String,
     pub redacted: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ImportPreview {
     pub preview_id: String,
     pub session_id: String,
@@ -65,6 +70,28 @@ pub struct ImportPreview {
     pub samples: Vec<ImportSample>,
     pub truncated: bool,
     pub warning: String,
+    pub coverage: ImportCoverage,
+    pub conversations: Vec<ConversationSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportSelection {
+    pub selection_id: String,
+    pub session_id: String,
+    pub file_name: String,
+    pub file_hash: String,
+    pub byte_count: usize,
+    pub scope: String,
+    pub coverage: ImportCoverage,
+    pub conversations: Vec<ConversationSummary>,
+}
+
+/// 普通文件保留原预览结构；ZIP 先返回会话清单，选择后才生成确认令牌。
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum ImportFilePreview {
+    Selection(ImportSelection),
+    Preview(ImportPreview),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,8 +118,10 @@ pub struct DreamPreview {
 pub struct DesktopSession {
     selected: Option<SelectedVault>,
     pending_import: Option<PendingImport>,
+    pending_import_selection: Option<PendingImportSelection>,
     pending_dream: Option<PendingDream>,
     pending_note: Option<PendingNote>,
+    pending_memory: Option<memory::PendingMemory>,
 }
 
 pub type SessionService = DesktopSession;
@@ -109,11 +138,22 @@ struct PendingImport {
     file: FileSnapshot,
     format: String,
     scope: String,
+    selected_source_ids: Option<BTreeSet<String>>,
 }
 
+struct PendingImportSelection {
+    selection_id: String,
+    file: FileSnapshot,
+    scope: String,
+}
+
+enum DreamInput {
+    File(FileSnapshot),
+    Text(Box<DreamResult>),
+}
 struct PendingDream {
     preview_id: String,
-    file: FileSnapshot,
+    input: DreamInput,
     scope: String,
     result_hash: String,
 }
@@ -179,8 +219,10 @@ impl DesktopSession {
     pub fn close_vault(&mut self) {
         self.selected = None;
         self.pending_import = None;
+        self.pending_import_selection = None;
         self.pending_dream = None;
         self.pending_note = None;
+        self.pending_memory = None;
     }
 
     pub fn status(&self, session_id: &str) -> Result<VaultInfo> {
@@ -303,6 +345,7 @@ impl DesktopSession {
     ) -> Result<NotePreview> {
         self.vault(session_id)?;
         self.pending_note = None;
+        self.pending_memory = None;
         check_scope(scope)?;
         if content.trim().is_empty() {
             return Err("请输入或粘贴一段想保存的内容".into());
@@ -352,7 +395,54 @@ impl DesktopSession {
             .capture(pending.input.clone())
             .map_err(|_| "笔记保存未完成，请检查资料库后重试".to_owned())?;
         self.pending_note = None;
+        self.pending_memory = None;
         Ok(json!({"ref": format!("event:{}", event.id), "event": event}))
+    }
+
+    /// 原生文件选择入口。ZIP 不自动全选，必须先审查会话清单和覆盖范围。
+    pub fn select_import_file(
+        &mut self,
+        session_id: &str,
+        format: &str,
+        path: &Path,
+        scope: &str,
+    ) -> Result<ImportFilePreview> {
+        self.vault(session_id)?;
+        self.pending_import = None;
+        self.pending_import_selection = None;
+        check_scope(scope)?;
+        validate_import_format(format)?;
+        let limit = if matches!(format, "auto" | "chatgpt-export") {
+            import_bundle::MAX_ARCHIVE_BYTES
+        } else {
+            IMPORT_LIMIT
+        };
+        let (file, bytes) = bounded_bytes(path, limit)?;
+        if import_bundle::is_zip(&bytes) {
+            if !matches!(format, "auto" | "chatgpt-export") {
+                return Err("ZIP 备份请选择 ChatGPT 或自动识别格式".into());
+            }
+            let summary =
+                import_bundle::inspect_archive(&bytes, scope).map_err(|_| archive_error())?;
+            let selection = ImportSelection {
+                selection_id: token(),
+                session_id: session_id.into(),
+                file_name: file_name(&file.path),
+                file_hash: file.hash.clone(),
+                byte_count: file.bytes,
+                scope: scope.into(),
+                coverage: summary.coverage,
+                conversations: summary.conversation_summaries,
+            };
+            self.pending_import_selection = Some(PendingImportSelection {
+                selection_id: selection.selection_id.clone(),
+                file,
+                scope: scope.into(),
+            });
+            return Ok(ImportFilePreview::Selection(selection));
+        }
+        self.preview_import_bytes(session_id, format, scope, file, &bytes)
+            .map(ImportFilePreview::Preview)
     }
 
     pub fn preview_import(
@@ -364,33 +454,103 @@ impl DesktopSession {
     ) -> Result<ImportPreview> {
         self.vault(session_id)?;
         self.pending_import = None;
+        self.pending_import_selection = None;
         check_scope(scope)?;
-        if ![
-            "manual-jsonl",
-            "chatgpt-export",
-            "claude-code",
-            "recallcard-conversation",
-            "auto",
-        ]
-        .contains(&format)
-        {
-            return Err("请选择会话来源或自动识别".into());
+        validate_import_format(format)?;
+        let (file, bytes) = bounded_bytes(path, IMPORT_LIMIT)?;
+        if import_bundle::is_zip(&bytes) {
+            return Err("ZIP 备份需要先查看会话清单并选择本批会话".into());
         }
-        let (file, text) = bounded_file(path, IMPORT_LIMIT)?;
-        let detected;
+        self.preview_import_bytes(session_id, format, scope, file, &bytes)
+    }
+
+    fn preview_import_bytes(
+        &mut self,
+        session_id: &str,
+        format: &str,
+        scope: &str,
+        file: FileSnapshot,
+        bytes: &[u8],
+    ) -> Result<ImportPreview> {
+        if bytes.len() > IMPORT_LIMIT {
+            return Err("单个 JSON / JSONL 文件上限 16 MiB，请分批处理".into());
+        }
         let format = if format == "auto" {
-            detected = detect_import_format(&text)?;
-            detected.as_str()
+            detect_import_format(
+                std::str::from_utf8(bytes).map_err(|_| "文件不是有效 UTF-8 文本")?,
+            )?
         } else {
-            format
+            format.into()
         };
-        let mut events = parse_text(format, &text, scope)
+        let parsed = import_bundle::parse_import_bytes(&format, bytes, scope)
             .map_err(|_| "导入文件无效：请检查格式、范围和 5000 条事件上限".to_owned())?;
-        if events.is_empty() {
-            return Err("此文件没有可导入的消息；不会收集隐藏推理".into());
+        self.prepare_import_preview(session_id, &format, scope, file, parsed, None)
+    }
+
+    /// 选择只接受清单令牌和原始会话编号，不能传入路径或替代文件内容。
+    pub fn preview_import_selection(
+        &mut self,
+        session_id: &str,
+        selection_id: &str,
+        source_ids: &[String],
+    ) -> Result<ImportPreview> {
+        self.vault(session_id)?;
+        self.pending_import = None;
+        let pending = self
+            .pending_import_selection
+            .take()
+            .filter(|p| p.selection_id == selection_id)
+            .ok_or("会话清单已失效，请重新选择备份文件")?;
+        let (file, bytes) = checked_bytes(&pending.file, import_bundle::MAX_ARCHIVE_BYTES)?;
+        let selected: BTreeSet<String> = source_ids.iter().cloned().collect();
+        let scope = pending.scope.clone();
+        // 文件未改变时允许调整批次；文件核对失败会永久废弃本次清单。
+        self.pending_import_selection = Some(pending);
+        if selected.is_empty() {
+            return Err("请至少选择一个有消息的会话，再生成导入预览".into());
         }
-        // 与 capture 使用相同的脱敏函数。所有记录均先验证，界面不显示原始秘密。
-        for event in &mut events {
+        let parsed =
+            import_bundle::parse_archive_selected(&bytes, &scope, &selected).map_err(|_| {
+                "无法预览本批会话：请确认会话来自当前清单，且所选消息合计不超过 5000 条".to_owned()
+            })?;
+        self.prepare_import_preview(
+            session_id,
+            "chatgpt-export",
+            &scope,
+            file,
+            parsed,
+            Some(selected),
+        )
+    }
+
+    /// 返回会话选择时立即撤销旧写入令牌；下一次预览仍须重新核对文件。
+    pub fn return_import_selection(&mut self, session_id: &str, selection_id: &str) -> Result<()> {
+        self.vault(session_id)?;
+        self.pending_import = None;
+        if !self
+            .pending_import_selection
+            .as_ref()
+            .is_some_and(|p| p.selection_id == selection_id)
+        {
+            return Err("会话清单已失效，请重新选择备份文件".into());
+        }
+        Ok(())
+    }
+
+    fn prepare_import_preview(
+        &mut self,
+        session_id: &str,
+        format: &str,
+        scope: &str,
+        file: FileSnapshot,
+        mut parsed: ParsedImport,
+        selected_source_ids: Option<BTreeSet<String>>,
+    ) -> Result<ImportPreview> {
+        let events = &mut parsed.events;
+        if events.is_empty() {
+            return Err("此文件或所选会话没有可导入的消息；不会收集隐藏推理".into());
+        }
+        for event in events.iter_mut() {
             redact_event(event).map_err(|_| "导入记录无法安全处理，请检查原始文件".to_owned())?;
         }
         let mut truncated = events.len() > SAMPLE_COUNT;
@@ -403,9 +563,20 @@ impl DesktopSession {
                 ImportSample {
                     role: event.role.clone(),
                     origin: event.origin.clone(),
+                    source: event.source.clone(),
+                    occurred_at: event.occurred_at,
                     content: truncate_utf8(&text, 1200),
                     redacted: event.capture.redacted,
                 }
+            })
+            .collect();
+        let conversations = parsed
+            .conversation_summaries
+            .into_iter()
+            .filter(|c| {
+                selected_source_ids
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&c.source_id))
             })
             .collect();
         let preview = ImportPreview {
@@ -421,33 +592,54 @@ impl DesktopSession {
             samples,
             truncated,
             warning: "仅显示最多 6 条脱敏样本；秘密检测是启发式的，请检查原文件。确认后追加 Event，不自动生成 Memory；中断后可重新导入，已写事件不回滚。".into(),
+            coverage: parsed.coverage,
+            conversations,
         };
         self.pending_import = Some(PendingImport {
             preview_id: preview.preview_id.clone(),
             file,
             format: format.into(),
             scope: scope.into(),
+            selected_source_ids,
         });
         Ok(preview)
     }
 
-    /// 只有用户确认预览后才能调用；读取并核对原文件，不信任前端替换的内容。
+    /// 只有用户确认预览后才能调用；核对完整二进制文件和此前选定的会话。
     pub fn confirm_import(&mut self, session_id: &str, preview_id: &str) -> Result<Value> {
         self.vault(session_id)?;
-        let pending = self
+        if !self
             .pending_import
             .as_ref()
-            .filter(|p| p.preview_id == preview_id)
-            .ok_or("导入预览已失效，请重新选择并审查文件")?;
-        let (_, text) = checked_file(&pending.file, IMPORT_LIMIT)?;
-        let result = import_text(
-            self.vault(session_id)?,
-            &pending.format,
-            &text,
-            &pending.scope,
-        )
-        .map_err(|_| "导入未完成，请检查资料库后重新预览；已写入的事件可安全去重".to_owned())?;
-        self.pending_import = None;
+            .is_some_and(|p| p.preview_id == preview_id)
+        {
+            return Err("导入预览已失效，请重新选择并审查文件".into());
+        }
+        let pending = self.pending_import.take().unwrap();
+        let (_, bytes) = match checked_bytes(&pending.file, import_bundle::MAX_ARCHIVE_BYTES) {
+            Ok(file) => file,
+            Err(error) => {
+                self.pending_import_selection = None;
+                return Err(error);
+            }
+        };
+        let parsed = if let Some(ids) = &pending.selected_source_ids {
+            import_bundle::parse_archive_selected(&bytes, &pending.scope, ids)
+        } else {
+            import_bundle::parse_import_bytes(&pending.format, &bytes, &pending.scope)
+        }
+        .map_err(|_| "导入源核对失败，请重新选择并审查文件".to_owned())?;
+        let vault = self.vault(session_id)?;
+        let result = (|| {
+            let before = vault.events()?.len();
+            let mut refs = Vec::new();
+            for event in parsed.events {
+                refs.push(format!("event:{}", vault.capture(event)?.id));
+            }
+            let after = vault.events()?.len();
+            Ok::<_, String>(json!({"ok":true, "events_added":after.saturating_sub(before), "events_seen":refs.len(), "refs":refs, "coverage":parsed.coverage}))
+        })().map_err(|_| "导入未完成，请检查资料库后重新预览；已写入的事件可安全去重".to_owned())?;
+        // 成功后保留只读清单以便继续下一批，写入令牌已消费。
         Ok(result)
     }
 
@@ -508,7 +700,72 @@ impl DesktopSession {
         };
         self.pending_dream = Some(PendingDream {
             preview_id: preview.preview_id.clone(),
-            file,
+            input: DreamInput::File(file),
+            scope: scope.into(),
+            result_hash: preview.review.result_hash.clone(),
+        });
+        Ok(preview)
+    }
+
+    /// 软件准备完整整理任务，用户只需复制发送并带回模型结果。
+    pub fn prepare_dream_task(
+        &self,
+        session_id: &str,
+        scope: &str,
+        source_refs: &[String],
+        memory_refs: &[String],
+    ) -> Result<Value> {
+        let job = self.export_dream(session_id, scope, source_refs, memory_refs)?;
+        let text = crate::dream_task::render_task(&job)?;
+        Ok(
+            json!({"job_id":job.job_id,"input_hash":job.input_hash,"scope":scope,"source_count":job.source_refs.len(),"memory_count":job.memory_read_set.len(),"byte_count":text.len(),"text":text,
+            "sources":job.source_refs.iter().map(|s|json!({"ref":s.reference,"role":s.event.data.role,"text":truncate_utf8(&s.event.data.text(),1200),"truncated":s.event.data.text().len()>1200,"occurred_at":s.event.data.occurred_at})).collect::<Vec<_>>()}),
+        )
+    }
+
+    pub fn review_dream_text(
+        &mut self,
+        session_id: &str,
+        scope: &str,
+        text: &str,
+    ) -> Result<DreamPreview> {
+        self.vault(session_id)?;
+        self.pending_dream = None;
+        check_scope(scope)?;
+        let result = crate::dream_task::parse_result_text(text)?;
+        if result.proposals.iter().any(|p| p.scope != scope) {
+            return Err("整理结果属于其他资料范围，请检查来源任务".into());
+        }
+        let review = self
+            .vault(session_id)?
+            .dream_review(&result)
+            .map_err(|_| "整理结果核对未通过：请确认来自本次任务，来源和旧记忆没有改变")?;
+        if review.changes.iter().any(|c| {
+            [&c.before, &c.after]
+                .into_iter()
+                .flatten()
+                .any(|m| m.data.scope != scope)
+        }) {
+            return Err("整理结果包含当前范围以外的记忆".into());
+        }
+        if serde_json::to_vec(&review)
+            .map_err(|_| health_error())?
+            .len()
+            > 4 * DREAM_LIMIT
+        {
+            return Err("结果较大，请减少来源后分批整理".into());
+        }
+        let preview = DreamPreview {
+            preview_id: token(),
+            session_id: session_id.into(),
+            file_name: "粘贴的整理结果".into(),
+            file_hash: hash(text.as_bytes()),
+            scope: scope.into(),
+            review,
+        };
+        self.pending_dream = Some(PendingDream {
+            preview_id: preview.preview_id.clone(),
+            input: DreamInput::Text(Box::new(result)),
             scope: scope.into(),
             result_hash: preview.review.result_hash.clone(),
         });
@@ -527,9 +784,14 @@ impl DesktopSession {
             .pending_dream
             .as_ref()
             .filter(|p| p.preview_id == preview_id)
-            .ok_or("Dream 审查已失效，请重新选择并审查结果文件")?;
-        let (_, text) = checked_file(&pending.file, DREAM_LIMIT)?;
-        let result = parse_dream(&text, &pending.scope)?;
+            .ok_or("Dream 审查已失效，请重新粘贴或选择结果并审查")?;
+        let result = match &pending.input {
+            DreamInput::File(file) => {
+                let (_, text) = checked_file(file, DREAM_LIMIT)?;
+                parse_dream(&text, &pending.scope)?
+            }
+            DreamInput::Text(result) => result.as_ref().clone(),
+        };
         let vault = self.vault(session_id)?;
         let review = vault
             .dream_review(&result)
@@ -553,8 +815,10 @@ impl DesktopSession {
     pub fn cancel_previews(&mut self, session_id: &str) -> Result<()> {
         self.vault(session_id)?;
         self.pending_import = None;
+        self.pending_import_selection = None;
         self.pending_dream = None;
         self.pending_note = None;
+        self.pending_memory = None;
         Ok(())
     }
 
@@ -938,6 +1202,20 @@ fn checked_file(expected: &FileSnapshot, limit: usize) -> Result<(FileSnapshot, 
 }
 
 fn bounded_file(path: &Path, limit: usize) -> Result<(FileSnapshot, String)> {
+    let (snapshot, bytes) = bounded_bytes(path, limit)?;
+    let text = String::from_utf8(bytes).map_err(|_| "文件不是有效 UTF-8 文本")?;
+    Ok((snapshot, text))
+}
+
+fn checked_bytes(expected: &FileSnapshot, limit: usize) -> Result<(FileSnapshot, Vec<u8>)> {
+    let (current, bytes) = bounded_bytes(&expected.path, limit).map_err(|_| STALE_FILE)?;
+    if &current != expected {
+        return Err(STALE_FILE.into());
+    }
+    Ok((current, bytes))
+}
+
+fn bounded_bytes(path: &Path, limit: usize) -> Result<(FileSnapshot, Vec<u8>)> {
     reject_selected_file_symlinks(path).map_err(|_| "不支持符号链接，请选择本地普通文件")?;
     let path = fs::canonicalize(path).map_err(|_| "无法读取所选文件，请重新选择")?;
     let metadata = fs::metadata(&path).map_err(|_| "无法检查所选文件")?;
@@ -972,15 +1250,14 @@ fn bounded_file(path: &Path, limit: usize) -> Result<(FileSnapshot, String)> {
         return Err(STALE_FILE.into());
     }
     let digest = hash(&bytes);
-    let text = String::from_utf8(bytes).map_err(|_| "文件不是有效 UTF-8 文本")?;
     Ok((
         FileSnapshot {
             path,
             identity,
             hash: digest,
-            bytes: text.len(),
+            bytes: bytes.len(),
         },
-        text,
+        bytes,
     ))
 }
 
@@ -989,9 +1266,10 @@ fn detect_import_format(text: &str) -> Result<String> {
         if value["schema"] == "recallcard.conversation/1" {
             return Ok("recallcard-conversation".into());
         }
-        if value
-            .as_array()
-            .is_some_and(|a| a.iter().all(|v| v["mapping"].is_object()))
+        if value["mapping"].is_object()
+            || value
+                .as_array()
+                .is_some_and(|a| a.iter().all(|v| v["mapping"].is_object()))
         {
             return Ok("chatgpt-export".into());
         }
@@ -1008,5 +1286,25 @@ fn detect_import_format(text: &str) -> Result<String> {
             return Ok("manual-jsonl".into());
         }
     }
-    Err("未识别出支持的对话文件。请选择扩展导出的 JSON、ChatGPT conversations.json 或 Claude Code JSONL".into())
+    Err("未识别出支持的对话文件。请选择扩展导出的 JSON、ChatGPT 会话 JSON / ZIP 或 Claude Code JSONL".into())
+}
+
+fn validate_import_format(format: &str) -> Result<()> {
+    if [
+        "manual-jsonl",
+        "chatgpt-export",
+        "claude-code",
+        "recallcard-conversation",
+        "auto",
+    ]
+    .contains(&format)
+    {
+        Ok(())
+    } else {
+        Err("请选择会话来源或自动识别".into())
+    }
+}
+
+fn archive_error() -> String {
+    "ZIP 备份无法安全读取：请检查格式；压缩包上限 64 MiB，单个 JSON 上限 16 MiB，展开内容上限 128 MiB，最多 2048 项。不会解压到磁盘或写入资料库。".into()
 }

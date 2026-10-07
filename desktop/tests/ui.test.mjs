@@ -41,11 +41,18 @@ const dreamPreview = {
     } }],
   },
 };
+const dreamTask = {
+  job_id: 'synthetic-job', input_hash: 'a'.repeat(64), scope: 'personal',
+  source_count: 1, memory_count: 0, byte_count: 125,
+  text: '合成完整任务：保持用户原话与助手建议的区别。\nrecallcard.dream-job/1\n原始事件完整正文。',
+  sources: [{ ref: eventRef, role: 'user', text: event.content, occurred_at: null }],
+};
+const inlineResult = JSON.stringify({ schema: 'recallcard.dream-result/1', job_id: 'synthetic-job', input_hash: 'a'.repeat(64), proposals: [{ operation: 'noop', scope: 'personal' }] });
 
 let browser;
 const assets = new Map();
 before(async () => {
-  for (const name of ['index.html', 'app.js', 'model.js', 'styles.css']) {
+  for (const name of ['index.html', 'app.js', 'model.js', 'memory-management.js', 'styles.css']) {
     assets.set(`/${name}`, await readFile(new URL(`../ui/${name}`, import.meta.url)));
   }
   browser = await chromium.launch(process.env.RECALLCARD_CHROMIUM_PATH
@@ -67,7 +74,7 @@ async function fixture(t) {
   const defaultResponse = (command, payload) => {
     switch (command) {
       case 'choose_vault': case 'vault_status': return vault;
-      case 'cancel_previews': case 'write_clipboard': return null;
+      case 'cancel_previews': return null;
       case 'preview_note': return { preview_id: 'synthetic-note', session_id: vault.session_id, scope: payload.scope, content: payload.content, redacted: false };
       case 'confirm_note': return { ref: eventRef, event };
       case 'browse_records': case 'search_records': return {
@@ -87,6 +94,9 @@ async function fixture(t) {
       case 'pick_import': return importPreview;
       case 'confirm_import': return { events_added: 2, events_seen: 2 };
       case 'pick_dream': return dreamPreview;
+      case 'prepare_dream_task': return dreamTask;
+      case 'review_dream_text': return { ...dreamPreview, file_name: '粘贴的整理结果' };
+      case 'write_clipboard': return null;
       case 'apply_dream': return { changes: [{ id: memory.id, revision: 2 }] };
       case 'export_dream': return '/synthetic/dream-job.json';
       default: throw new Error(`测试没有定义原生命令：${command}`);
@@ -136,6 +146,7 @@ async function fixture(t) {
 
 async function clickButton(page, name) {
   if (name === '选择文件并预览' && !await page.locator('#file-import-details').evaluate(node => node.open)) await page.locator('#file-import-details > summary').click();
+  if (['选择结果并审阅', '导出本次来源包'].includes(name) && !await page.locator('#dream-file-options').evaluate(node => node.open)) await page.locator('#dream-file-options > summary').click();
   return page.getByRole('button', { name, exact: true }).click();
 }
 async function idle(page) {
@@ -164,6 +175,20 @@ async function previewDream(page) {
 }
 async function selectRecord(page, reference) {
   await page.locator('.result-card').filter({ hasText: reference }).click();
+  await idle(page);
+}
+async function generateDreamTask(page) {
+  await navigate(page, '查找与阅读');
+  await selectRecord(page, eventRef);
+  await clickButton(page, '选择这条资料');
+  await idle(page);
+  await navigate(page, '整理记忆');
+  await clickButton(page, '生成完整整理任务');
+  await idle(page);
+}
+async function reviewInlineDream(page, text = inlineResult) {
+  await page.getByRole('textbox', { name: 'AI整理结果', exact: true }).fill(text);
+  await clickButton(page, '检查并预览结果');
   await idle(page);
 }
 async function assertNoWrite(native) {
@@ -369,6 +394,7 @@ test('切换范围清除选中来源、阅读结果与两类预览，并以新�
   await clickButton(page, '选择这条资料');
   await previewImport(page);
   await previewDream(page);
+  await page.locator('#dream-file-options > summary').click();
   assert.equal(await page.getByRole('button', { name: '导出本次来源包', exact: true }).count(), 1);
   await page.getByRole('combobox', { name: '资料范围', exact: true }).selectOption('work');
   await idle(page);
@@ -477,6 +503,173 @@ test('浏览器写入许可默认关闭，配置不冒充真实连接成功',asy
   await clickButton(page,'连接此浏览器');await idle(page);assert.equal(native.matching('install_browser_connection')[0].payload.allowCapture,false);
   assert.match(await page.locator('#content').textContent(),/请回到扩展检查连接/);
   await clickButton(page,'生成客户端配置');await idle(page);assert.match(await page.getByRole('textbox',{name:'MCP客户端配置'}).inputValue(),/personal/);
+});
+
+test('整理任务由当前来源生成，复制前重新校验，再写入原生剪贴板', async t => {
+  const { page, native } = await fixture(t);
+  await openVault(page);
+  await generateDreamTask(page);
+  assert.equal(await page.locator('#dream-file-options').evaluate(node => node.open), false);
+  assert.equal(await page.locator('textarea[aria-label="完整整理任务"]').inputValue(), dreamTask.text);
+  assert.match(await page.locator('#content').textContent(), /用户原话/);
+  assert.match(await page.locator('#content').textContent(), /时间未知/);
+  assert.deepEqual(native.matching('prepare_dream_task')[0].payload, {
+    sessionId: vault.session_id, scope: 'personal', sourceRefs: [eventRef], memoryRefs: [],
+  });
+  assert.equal(native.count('write_clipboard'), 0);
+  const release = native.holdNext('prepare_dream_task');
+  await clickButton(page, '复制整理任务');
+  await page.waitForFunction(() => document.querySelector('#operation').textContent.includes('正在重新核对任务'));
+  assert.equal(native.count('write_clipboard'), 0);
+  assert.equal(await page.locator('#switch-vault').isDisabled(), true);
+  release(dreamTask);
+  await idle(page);
+  assert.equal(native.count('prepare_dream_task'), 2);
+  assert.deepEqual(native.matching('write_clipboard')[0].payload, { text: dreamTask.text });
+  assert.ok(native.calls.findLastIndex(call => call.command === 'prepare_dream_task') < native.calls.findIndex(call => call.command === 'write_clipboard'));
+  await assertNoWrite(native);
+});
+
+test('来源或旧记忆变化以及重新核对失败都阻止复制并撤销旧审查', async t => {
+  for (const fails of [false, true]) {
+    const { page, native } = await fixture(t);
+    await openVault(page);
+    await generateDreamTask(page);
+    await reviewInlineDream(page);
+    if (fails) native.failNext('prepare_dream_task', '来源已撤回，请重新选择');
+    else native.next('prepare_dream_task', { ...dreamTask, text: '来源已经改变的新任务' });
+    await clickButton(page, '复制整理任务');
+    await idle(page);
+    assert.equal(native.count('write_clipboard'), 0);
+    assert.equal(await page.getByRole('button', { name: '复制整理任务', exact: true }).count(), 0);
+    assert.equal(await page.locator('.changes').count(), 0);
+    assert.match(await page.locator('#notice').textContent(), fails ? /来源已撤回/ : /来源或记忆已经改变/);
+    assert.equal(await page.locator('#switch-vault').isEnabled(), true);
+    await assertNoWrite(native);
+  }
+});
+
+test('阅读区增减来源立即废弃任务、粘贴正文与审查，包括原生取消失败', async t => {
+  for (const fails of [false, true]) {
+    const { page, native } = await fixture(t);
+    await openVault(page);
+    await generateDreamTask(page);
+    await reviewInlineDream(page);
+    await navigate(page, '查找与阅读');
+    await selectRecord(page, memoryRef);
+    const cancellations = native.count('cancel_previews');
+    if (fails) native.failNext('cancel_previews', '无法取消，请重新审查');
+    await clickButton(page, '选择这条资料');
+    await idle(page);
+    assert.equal(native.count('cancel_previews'), cancellations + 1);
+    await navigate(page, '整理记忆');
+    assert.equal(await page.getByRole('button', { name: '复制整理任务', exact: true }).count(), 0);
+    assert.equal(await page.locator('.changes').count(), 0);
+    assert.equal(await page.getByRole('textbox', { name: 'AI整理结果', exact: true }).inputValue(), '');
+    assert.equal(await page.getByRole('button', { name: '移除', exact: true }).count(), fails ? 1 : 2);
+    await assertNoWrite(native);
+  }
+});
+
+test('粘贴完整结果先审查，返回修改和取消确认不发布，受保护批准仅用于本次确认', async t => {
+  const { page, native } = await fixture(t);
+  await openVault(page);
+  await generateDreamTask(page);
+  const fenced = `\`\`\`json\n${inlineResult}\n\`\`\``;
+  await reviewInlineDream(page, fenced);
+  assert.deepEqual(native.matching('review_dream_text')[0].payload, {
+    sessionId: vault.session_id, scope: 'personal', text: fenced,
+  });
+  assert.equal(native.count('pick_dream'), 0);
+  await page.locator('#protected-approval').check();
+  await clickButton(page, '返回修改结果');
+  await idle(page);
+  assert.equal(await page.getByRole('textbox', { name: 'AI整理结果', exact: true }).inputValue(), fenced);
+  assert.equal(await page.locator('.changes').count(), 0);
+  await reviewInlineDream(page, fenced);
+  assert.equal(await page.locator('#protected-approval').isChecked(), false);
+  await clickButton(page, '保存这些记忆');
+  assert.equal(await page.locator('#modal').evaluate(node => node.open), false);
+  await page.locator('#protected-approval').check();
+  await clickButton(page, '保存这些记忆');
+  await page.locator('#modal').getByRole('button', { name: '取消', exact: true }).click();
+  await assertNoWrite(native);
+  await clickButton(page, '保存这些记忆');
+  const release = native.holdNext('apply_dream');
+  await page.locator('#modal').getByRole('button', { name: '确认保存', exact: true }).evaluate(button => { button.click(); button.click(); });
+  await page.waitForFunction(() => document.querySelector('#operation').textContent.includes('正在保存记忆'));
+  assert.equal(native.count('apply_dream'), 1);
+  assert.deepEqual(native.matching('apply_dream')[0].payload, {
+    sessionId: vault.session_id, previewId: dreamPreview.preview_id, approveProtected: true,
+  });
+  release({ changes: [{ id: memory.id, revision: 2 }] });
+  await idle(page);
+  assert.match(await page.locator('#notice').textContent(), /已保存 1 条记忆变更/);
+  assert.equal(await page.locator('.changes').count(), 0);
+});
+
+test('半截结果报错保留输入供修正，文件选择取消不恢复旧审查', async t => {
+  const { page, native } = await fixture(t);
+  await openVault(page);
+  await generateDreamTask(page);
+  const partial = inlineResult.slice(0, -1);
+  native.failNext('review_dream_text', '结果不完整，请复制完整 JSON 或完整代码块');
+  await reviewInlineDream(page, partial);
+  assert.match(await page.locator('#notice').textContent(), /结果不完整/);
+  assert.equal(await page.getByRole('textbox', { name: 'AI整理结果', exact: true }).inputValue(), partial);
+  assert.equal(await page.locator('.changes').count(), 0);
+  await reviewInlineDream(page);
+  native.next('pick_dream', null);
+  await clickButton(page, '选择结果并审阅');
+  await idle(page);
+  assert.equal(await page.locator('.changes').count(), 0);
+  assert.equal(await page.getByRole('button', { name: '保存这些记忆', exact: true }).count(), 0);
+  await assertNoWrite(native);
+});
+
+test('任务生成与剪贴板失败可以重试，报错不显示复制成功', async t => {
+  const { page, native } = await fixture(t);
+  await openVault(page);
+  await generateDreamTask(page);
+  native.failNext('write_clipboard', '合成系统剪贴板不可用');
+  await clickButton(page, '复制整理任务');
+  await idle(page);
+  assert.match(await page.locator('#notice').textContent(), /剪贴板/);
+  assert.doesNotMatch(await page.locator('#notice').textContent(), /已复制/);
+  assert.equal(await page.getByRole('button', { name: '复制整理任务', exact: true }).isEnabled(), true);
+  native.failNext('prepare_dream_task', '任务超过限制，请减少来源');
+  await clickButton(page, '生成完整整理任务');
+  await idle(page);
+  assert.equal(await page.getByRole('button', { name: '复制整理任务', exact: true }).count(), 0);
+  assert.match(await page.locator('#notice').textContent(), /任务超过限制/);
+  await clickButton(page, '生成完整整理任务');
+  await idle(page);
+  assert.equal(await page.getByRole('button', { name: '复制整理任务', exact: true }).isEnabled(), true);
+  await assertNoWrite(native);
+});
+
+test('范围和资料库切换清除完整任务、结果输入和确认权', async t => {
+  const { page, native } = await fixture(t);
+  await openVault(page);
+  await generateDreamTask(page);
+  await reviewInlineDream(page);
+  await page.getByRole('combobox', { name: '资料范围', exact: true }).selectOption('work');
+  await idle(page);
+  assert.equal(await page.locator('textarea[aria-label="完整整理任务"], .changes').count(), 0);
+  assert.equal(await page.getByRole('textbox', { name: 'AI整理结果', exact: true }).inputValue(), '');
+  await page.getByRole('combobox', { name: '资料范围', exact: true }).selectOption('personal');
+  await idle(page);
+  await generateDreamTask(page);
+  await reviewInlineDream(page);
+  await clickButton(page, '切换资料库');
+  native.next('choose_vault', { ...vault, session_id: 'second-session', display_name: '第二个合成资料库' });
+  await page.locator('#modal').getByRole('button', { name: '打开已有资料库', exact: true }).click();
+  await idle(page);
+  await navigate(page, '整理记忆');
+  assert.equal(await page.locator('textarea[aria-label="完整整理任务"], .changes').count(), 0);
+  assert.equal(await page.getByRole('textbox', { name: 'AI整理结果', exact: true }).inputValue(), '');
+  assert.equal(await page.getByRole('button', { name: '移除', exact: true }).count(), 0);
+  await assertNoWrite(native);
 });
 
 test('交接预览后资料撤回或改变，复制前重新核对并废弃旧正文',async t=>{

@@ -265,6 +265,15 @@ impl Vault {
         input: MemoryInput,
     ) -> Result<Memory> {
         let _lock = self.lock()?;
+        self.update_memory_locked(id, expected_revision, input)
+    }
+    /// 调用方必须持有资料库写锁，用于审查快照与写入之间保持原子性。
+    pub(crate) fn update_memory_locked(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        input: MemoryInput,
+    ) -> Result<Memory> {
         let mut memory = self.memory(id)?;
         self.validate_evidence(&input)?;
         if memory.revision != expected_revision {

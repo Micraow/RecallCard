@@ -272,8 +272,26 @@ fn run(cli: Cli) -> Result<Value> {
             file,
             scope,
         } => {
-            let text = input_text(&file)?;
-            recallcard::import::import_text(&vault, &format, &text, &scope)
+            let parsed = if file == "-" {
+                let text = input_text(&file)?;
+                recallcard::import_bundle::parse_import_bytes(&format, text.as_bytes(), &scope)?
+            } else {
+                recallcard::import_bundle::read_import_file(
+                    std::path::Path::new(&file),
+                    &format,
+                    &scope,
+                )?
+            };
+            let before = vault.events()?.len();
+            let mut refs = Vec::new();
+            for event in parsed.events {
+                refs.push(format!("event:{}", vault.capture(event)?.id));
+            }
+            let after = vault.events()?.len();
+            Ok(
+                json!({"ok":true,"events_added":after.saturating_sub(before),"events_seen":refs.len(),"refs":refs,"coverage":parsed.coverage,
+                "note":"仅导入显式提供的文件；导入中断可安全重复运行，已写原始事件不回滚"}),
+            )
         }
         Command::NativeInstall {
             capture_scope,

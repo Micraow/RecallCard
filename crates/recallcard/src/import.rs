@@ -41,7 +41,9 @@ pub(crate) fn parse_text(format: &str, text: &str, scope: &str) -> Result<Vec<Ev
             ),
         };
     if inputs.len() > 5000 {
-        return Err("单次最多导入 5000 个事件".into());
+        return Err(
+            "单批最多导入 5000 个事件；请在备份预览中选择较少会话，或将过长会话分批导出".into(),
+        );
     }
     for input in &inputs {
         input.validate()?;
@@ -178,94 +180,186 @@ fn claude_code(text: &str, scope: &str) -> Result<Vec<EventInput>> {
 }
 fn chatgpt_export(text: &str, scope: &str) -> Result<Vec<EventInput>> {
     let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let conversations = value
-        .as_array()
-        .ok_or("ChatGPT 官方导出必须是 conversation 数组")?;
-    let mut out = Vec::new();
+    let conversations: Vec<&Value> = match &value {
+        Value::Array(items) => items.iter().collect(),
+        Value::Object(_) => vec![&value],
+        _ => return Err("ChatGPT 导出必须是 conversation 对象或数组".into()),
+    };
+    let mut events = Vec::new();
+    let mut seen = BTreeSet::new();
     for conv in conversations {
-        let session = conv["id"]
-            .as_str()
-            .or_else(|| conv["conversation_id"].as_str())
-            .ok_or("ChatGPT 对话缺少编号")?;
-        let mapping = conv["mapping"]
-            .as_object()
-            .ok_or("ChatGPT 对话缺少 mapping")?;
-        let mut node = conv["current_node"]
-            .as_str()
-            .ok_or("ChatGPT 对话缺少 current_node，无法可靠选择分支")?;
-        let mut chain = Vec::new();
-        let mut seen = BTreeSet::new();
-        loop {
-            if !seen.insert(node.to_owned()) {
-                return Err("ChatGPT 分支包含循环引用".into());
+        for event in parse_chatgpt_conversation(conv, scope)?.events {
+            if seen.insert(event.id()?) {
+                events.push(event);
             }
-            let item = mapping.get(node).ok_or("ChatGPT 分支引用缺失节点")?;
-            chain.push(item);
-            match item["parent"].as_str() {
-                Some(parent) => node = parent,
-                None => break,
-            }
-        }
-        chain.reverse();
-        for item in chain {
-            let message = &item["message"];
-            if message.is_null() {
-                continue;
-            }
-            if message["metadata"]["is_visually_hidden_from_conversation"] == true
-                || message["channel"] == "analysis"
-            {
-                continue;
-            }
-            let role = match message["author"]["role"].as_str() {
-                Some("user") => Role::User,
-                Some("assistant") => Role::Assistant,
-                Some("tool") => Role::Tool,
-                _ => continue,
-            };
-            let ctype = message["content"]["content_type"].as_str().unwrap_or("");
-            if ["thoughts", "reasoning_recap"].contains(&ctype) {
-                continue;
-            }
-            let content = message["content"]["parts"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .or_else(|| message["content"]["text"].as_str().map(str::to_owned))
-                .unwrap_or_default();
-            if content.trim().is_empty() {
-                continue;
-            }
-            let id = message["id"].as_str().ok_or("ChatGPT 消息缺少编号")?;
-            let time = message["create_time"].as_f64().and_then(|s| {
-                if s.is_finite() {
-                    DateTime::from_timestamp(s.floor() as i64, ((s - s.floor()) * 1e9) as u32)
-                } else {
-                    None
-                }
-            });
-            let origin = match role {
-                Role::User => Origin::UserInput,
-                Role::Assistant => Origin::AssistantOutput,
-                _ => Origin::ToolOutput,
-            };
-            out.push(input(
-                "chatgpt-export",
-                session,
-                id,
-                role,
-                origin,
-                content,
-                time,
-                scope,
-                "message",
-                json!({"branch":"current_node","citations":message["metadata"]["citations"]}),
-            )?);
         }
     }
+    Ok(events)
+}
+
+/// 只包括当前分支；不会把丢失的时间替换成导入时间。
+#[derive(Debug, Default, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct ChatgptCoverage {
+    pub selected_branch_messages: usize,
+    pub other_branch_messages_skipped: usize,
+    pub hidden_reasoning_messages_skipped: usize,
+    pub unsupported_messages_skipped: usize,
+    pub empty_messages_skipped: usize,
+    pub unsupported_content_parts_skipped: usize,
+}
+
+pub(crate) struct ChatgptConversation {
+    pub source_id: String,
+    pub title: Option<String>,
+    pub events: Vec<EventInput>,
+    pub coverage: ChatgptCoverage,
+}
+
+pub(crate) fn chatgpt_source_id(conv: &Value) -> Result<&str> {
+    conv["id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| {
+            conv["conversation_id"]
+                .as_str()
+                .filter(|id| !id.trim().is_empty())
+        })
+        .ok_or_else(|| "ChatGPT 对话缺少编号".into())
+}
+
+pub(crate) fn parse_chatgpt_conversation(conv: &Value, scope: &str) -> Result<ChatgptConversation> {
+    let session = chatgpt_source_id(conv)?;
+    let mapping = conv["mapping"]
+        .as_object()
+        .ok_or("ChatGPT 对话缺少 mapping")?;
+    let mut node = conv["current_node"]
+        .as_str()
+        .ok_or("ChatGPT 对话缺少 current_node，无法可靠选择分支")?;
+    let mut chain = Vec::new();
+    let mut seen = BTreeSet::new();
+    loop {
+        if !seen.insert(node) {
+            return Err("ChatGPT 分支包含循环引用".into());
+        }
+        let item = mapping.get(node).ok_or("ChatGPT 分支引用缺失节点")?;
+        if !item.is_object() {
+            return Err("ChatGPT 分支节点必须是对象".into());
+        }
+        chain.push(item);
+        match item.get("parent") {
+            Some(Value::String(parent)) if !parent.is_empty() => node = parent,
+            Some(Value::Null) => break,
+            _ => return Err("ChatGPT 分支 parent 必须是节点编号或 null".into()),
+        }
+    }
+    chain.reverse();
+    let mut out = ChatgptConversation {
+        source_id: session.into(),
+        title: conv["title"].as_str().map(str::to_owned),
+        events: Vec::new(),
+        coverage: ChatgptCoverage::default(),
+    };
+    out.coverage.other_branch_messages_skipped = mapping
+        .iter()
+        .filter(|(id, item)| !seen.contains(id.as_str()) && !item["message"].is_null())
+        .count();
+    for item in chain {
+        let message = &item["message"];
+        if message.is_null() {
+            continue;
+        }
+        out.coverage.selected_branch_messages += 1;
+        let metadata = &message["metadata"];
+        let ctype = message["content"]["content_type"].as_str().unwrap_or("");
+        // 某些第三方备份将 analysis 的 channel 清空，但保留 reasoning_status。
+        // 先过滤再解释角色，工具消息也绝不能绕过这条边界。
+        if metadata["is_visually_hidden_from_conversation"] == true
+            || message["is_visually_hidden_from_conversation"] == true
+            || metadata["is_thinking_preamble_message"] == true
+            || metadata["reasoning_status"] == "is_reasoning"
+            || ["analysis", "reasoning", "thoughts"]
+                .iter()
+                .any(|channel| message["channel"] == *channel || metadata["channel"] == *channel)
+            || [
+                "thoughts",
+                "reasoning_recap",
+                "reasoning",
+                "thinking",
+                "redacted_thinking",
+            ]
+            .contains(&ctype)
+        {
+            out.coverage.hidden_reasoning_messages_skipped += 1;
+            continue;
+        }
+        let role = match message["author"]["role"].as_str() {
+            Some("user") => Role::User,
+            Some("assistant") => Role::Assistant,
+            Some("tool") => Role::Tool,
+            _ => {
+                out.coverage.unsupported_messages_skipped += 1;
+                continue;
+            }
+        };
+        if !["text", "multimodal_text", "code", "execution_output"].contains(&ctype) {
+            out.coverage.unsupported_messages_skipped += 1;
+            continue;
+        }
+        let content = if let Some(parts) = message["content"]["parts"].as_array() {
+            out.coverage.unsupported_content_parts_skipped +=
+                parts.iter().filter(|part| !part.is_string()).count();
+            parts
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            message["content"]["text"].as_str().unwrap_or("").to_owned()
+        };
+        if content.trim().is_empty() {
+            out.coverage.empty_messages_skipped += 1;
+            continue;
+        }
+        let id = message["id"].as_str().ok_or("ChatGPT 消息缺少编号")?;
+        let time = chatgpt_time(&message["create_time"])?;
+        let origin = match role {
+            Role::User => Origin::UserInput,
+            Role::Assistant => Origin::AssistantOutput,
+            _ => Origin::ToolOutput,
+        };
+        let event = input(
+            "chatgpt-export",
+            session,
+            id,
+            role,
+            origin,
+            content,
+            time,
+            scope,
+            "message",
+            json!({"branch":"current_node", "conversation_title":out.title,
+                "citations":metadata["citations"]}),
+        )?;
+        event.validate()?;
+        out.events.push(event);
+    }
     Ok(out)
+}
+
+fn chatgpt_time(value: &Value) -> Result<Option<DateTime<Utc>>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let seconds = value
+        .as_f64()
+        .ok_or("ChatGPT create_time 必须是原始 Unix 时间或 null")?;
+    if !seconds.is_finite() || seconds < i64::MIN as f64 || seconds >= i64::MAX as f64 {
+        return Err("ChatGPT create_time 超出可表示范围".into());
+    }
+    DateTime::from_timestamp(
+        seconds.floor() as i64,
+        ((seconds - seconds.floor()) * 1e9) as u32,
+    )
+    .map(Some)
+    .ok_or_else(|| "ChatGPT create_time 超出可表示范围".into())
 }

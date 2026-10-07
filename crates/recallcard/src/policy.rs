@@ -46,11 +46,15 @@ pub struct Suppression {
 }
 impl Vault {
     pub fn suppress(&self, id: &str, reason: String) -> Result<Suppression> {
+        let _lock = self.lock()?;
+        self.suppress_locked(id, reason)
+    }
+    /// 调用方持有写锁；供桌面在同一快照中确认影响和写入规则。
+    pub(crate) fn suppress_locked(&self, id: &str, reason: String) -> Result<Suppression> {
         nonempty(&reason, "遗忘原因")?;
         if reason.len() > 4096 {
             return Err("遗忘原因不能超过 4096 字节".into());
         }
-        let _lock = self.lock()?;
         let refs = if id.starts_with("mem_") {
             self.memory(id)?.data.source_refs
         } else {
@@ -82,8 +86,12 @@ impl Vault {
         Ok(s)
     }
     pub fn restore(&self, id: &str) -> Result<Suppression> {
-        validate_record_id(id)?;
         let _lock = self.lock()?;
+        self.restore_locked(id)
+    }
+    /// 调用方持有写锁；不意味着其他规则同时撤销。
+    pub(crate) fn restore_locked(&self, id: &str) -> Result<Suppression> {
+        validate_record_id(id)?;
         let path = self
             .root()
             .join("control/suppressions")

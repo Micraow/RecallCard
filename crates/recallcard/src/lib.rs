@@ -11,7 +11,9 @@ pub mod transport;
 
 pub mod desktop;
 pub mod dream;
+pub mod dream_task;
 pub mod import;
+pub mod import_bundle;
 pub mod native;
 
 pub mod agent_hook;

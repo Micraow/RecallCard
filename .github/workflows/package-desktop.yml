@@ -39,7 +39,7 @@ jobs:
       - name: 浏览器保存与桌面跨端合同
         env:
           RECALLCARD_STATE_DIR: ${{ runner.temp }}/recallcard-product-state
-        run: cargo test --locked -j1 -p recallcard --test conversation --test desktop --test native --test context --test import
+        run: cargo test --locked -j1 --workspace
       - name: 构建正式桌面程序
         working-directory: desktop
         run: npm exec --yes --package=@tauri-apps/cli@2.12.1 -- tauri build --ci --no-bundle -- --locked

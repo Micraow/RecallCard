@@ -21,3 +21,15 @@ test('范围选项去重且不会由旧记录注入另一个 Vault', () => asser
 test('缺失与无效日期显式呈现未知', () => { assert.equal(displayDate(undefined), '时间未知'); assert.equal(displayDate('invalid'), '时间未知'); });
 
 test('切换资料库或范围后不保留旧交接正文和客户端配置',()=>{for(const change of [s=>activateVault(s,{session_id:'new',scopes:['work']}),s=>resetScope(s,'work')]){const s=newState();Object.assign(s,{conversations:[{}],conversation:{},conversationRows:[{}],continuation:{text:'private'},clientConfig:'old'});change(s);assert.deepEqual(s.conversations,[]);assert.deepEqual(s.conversationRows,[]);assert.equal(s.continuation,null);assert.equal(s.clientConfig,null);}});
+
+test('资料库与范围切换撤销完整整理任务、结果正文和待确认审查', () => {
+  for (const change of [s => activateVault(s, { session_id: 'new', scopes: ['work'] }), s => resetScope(s, 'work')]) {
+    const state = newState();
+    Object.assign(state, { dreamTask: { text: '旧范围完整原文' }, dreamResultText: '旧范围模型结果', dreamPreview: { preview_id: 'old' }, selectedRefs: ['event:old'] });
+    change(state);
+    assert.equal(state.dreamTask, null);
+    assert.equal(state.dreamResultText, '');
+    assert.equal(state.dreamPreview, null);
+    assert.deepEqual(state.selectedRefs, []);
+  }
+});

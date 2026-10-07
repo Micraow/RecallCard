@@ -76,7 +76,8 @@ def main():
     sums = ''.join(f'{sha(data)}  {name}\n' for name, (data, _) in sorted(files.items()))
     files['SHA256SUMS'] = (sums.encode(), False)
     archive = args.out/(stem+'.zip')
-    extension_archive = args.out/(f'RecallCard-extension-0.2.0-{args.commit[:7]}.zip')
+    extension_version = json.loads((ROOT/'extension/manifest.json').read_text())['version']
+    extension_archive = args.out/(f'RecallCard-extension-{extension_version}-{args.commit[:7]}.zip')
     write_zip(archive, files)
     write_zip(extension_archive, extension)
     checksum_file = args.out/(stem+'-SHA256SUMS.txt')
