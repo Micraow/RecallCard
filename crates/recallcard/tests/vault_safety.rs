@@ -803,6 +803,50 @@ fn concurrent_readers_only_observe_complete_memory_records() {
     assert_eq!(vault.memory(&memory.id).unwrap().revision, 21);
 }
 
+#[cfg(windows)]
+#[test]
+fn atomic_replace_recovers_after_windows_reader_releases_handle() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (_dir, vault) = vault();
+    let memory = user_memory(&vault);
+    // 模拟暂时不允许删除/重命名的第三方读者。
+    let reader = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1 | 2)
+        .open(record_path(&vault, "memories", &memory.id))
+        .unwrap();
+    std::thread::scope(|scope| {
+        let update = scope.spawn(|| {
+            let mut input = memory.data.clone();
+            input.content = "合成 Windows 短暂占用恢复".into();
+            vault.update_memory(&memory.id, 1, input).unwrap()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        drop(reader);
+        assert_eq!(update.join().unwrap().revision, 2);
+    });
+    assert_eq!(vault.memory(&memory.id).unwrap().revision, 2);
+}
+
+#[cfg(windows)]
+#[test]
+fn atomic_replace_persistent_windows_lock_preserves_old_record() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (_dir, vault) = vault();
+    let memory = user_memory(&vault);
+    let reader = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1 | 2)
+        .open(record_path(&vault, "memories", &memory.id))
+        .unwrap();
+    let mut input = memory.data.clone();
+    input.content = "合成不可写入内容".into();
+    assert!(vault.update_memory(&memory.id, 1, input).is_err());
+    assert_eq!(vault.memory(&memory.id).unwrap(), memory);
+    drop(reader);
+    assert_eq!(vault.memory(&memory.id).unwrap(), memory);
+}
+
 #[test]
 fn memory_markdown_round_trip_preserves_body_whitespace() {
     let (_dir, vault) = vault();
