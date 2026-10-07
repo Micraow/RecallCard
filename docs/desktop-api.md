@@ -24,10 +24,15 @@
 | `read` / `sources` | `session_id, scope, reference: &str` | Context 读取 JSON |
 | `preview_note` | `session_id, scope, content: &str` | `NotePreview` |
 | `confirm_note` | `session_id, preview_id: &str` | `{ref, event}` |
+| `select_import_file` | `session_id, format: &str, path: &Path, scope: &str` | `ImportFilePreview`（普通文件预览或 ZIP 清单） |
+| `preview_import_selection` | `session_id, selection_id: &str, source_ids: &[String]` | `ImportPreview` |
+| `return_import_selection` | `session_id, selection_id: &str` | 撤销写入预览，保留会话清单 |
 | `preview_import` | `session_id, format: &str, path: &Path, scope: &str` | `ImportPreview` |
 | `confirm_import` | `session_id, preview_id: &str` | 导入结果 JSON |
 | `export_dream` | `session_id, scope: &str, source_refs, memory_refs: &[String]` | `DreamJob` |
+| `prepare_dream_task` | `session_id, scope: &str, source_refs, memory_refs: &[String]` | 完整中文任务与来源卡片 JSON |
 | `review_dream` | `session_id: &str, path: &Path, scope: &str` | `DreamPreview` |
+| `review_dream_text` | `session_id, scope, text: &str` | `DreamPreview` |
 | `apply_dream` | `session_id, preview_id: &str, approve_protected: bool` | `DreamReceipt` |
 | `cancel_previews` | `session_id: &str` | 清除全部待确认预览 |
 
@@ -45,21 +50,31 @@
 
 ## 导入预览与确认
 
-仅支持 `manual-jsonl`、`chatgpt-export` 和 `claude-code`。单文件最多 16 MiB、5000 个事件；拒绝无内容导入、文件/任意父目录符号链接、目录、特殊设备及无效 UTF-8。macOS 仅允许根部 `/var`、`/tmp`、`/etc` 指向对应 `/private` 目录的确切系统别名，再核对规范路径与文件身份。解析函数与正式导入共用，不通过临时 Vault 做预览。
+支持 `manual-jsonl`、`chatgpt-export`、`claude-code`、`recallcard-conversation` 与 `auto`。普通 JSON / JSONL 上限 16 MiB、5000 个事件；ChatGPT 可读取官方会话数组或单会话对象。ZIP 上限 64 MiB，最多 2048 个条目，每个 JSON 上限 16 MiB，实际展开总量上限 128 MiB。ZIP 只在内存读取，不解压到磁盘；拒绝加密、异常路径、符号链接及其他不支持的压缩包结构。计数和限制以实际读取结果为准。
 
-`ImportPreview` 返回 `preview_id`、`session_id`、`file_name`、`format`、`scope`、`file_hash`、`byte_count`、`event_count`、`redacted_event_count`、`samples`、`truncated`、`warning`。样本最多 6 条、每条正文最多 1200 字节，经过正式 capture 使用的脱敏函数。秘密检测仍是启发式的，不能承诺原文件没有其他秘密。
+原生 `pick_import` 调用 `select_import_file`。普通文件返回 `ImportPreview`；ZIP 返回 `ImportSelection {selection_id, session_id, file_name, file_hash, byte_count, scope, coverage, conversations}`。界面先显示会话标题、用户/助手/工具数量及覆盖范围，默认不勾选。即使整个备份超过 5000 条，也可先看清单，再分批选择。`preview_import_selection` 仅接受会话令牌和原始 `source_ids`，不接受路径或正文；空选择、未知编号、所选消息超过 5000 条都不生成可写令牌。
 
-预览不会修改用户 Event、Memory 或产生导入副本。Rust 只保留原文件身份/摘要、格式、范围和随机预览编号；用户确认时重新有界读取原文件并检查身份及 SHA-256，再导入该份已核对的内容。前端不能替换路径、范围、格式或批准正文。新预览会替换旧预览，成功确认后消费编号。取消应调用 `cancel_previews`，并清空页面预览。
+`ImportPreview` 返回 `preview_id`、`session_id`、`file_name`、`format`、`scope`、`file_hash`、`byte_count`、`event_count`、`redacted_event_count`、`samples`、`truncated`、`warning`、`coverage` 和本批 `conversations`。样本最多 6 条、正文每条最多 1200 字节，并显示来源、角色和原始时间；无时间显示未知，不补成导入时间。正文经过正式 capture 使用的脱敏函数，秘密检测仍是启发式的。ZIP 的 coverage 保留整个原文件的跳过统计，界面明确注明包含未选会话；本批消息数和会话列表只包含选择项。
 
-导入沿用既有追加语义。执行中断可能已写入部分 Event；不回滚或删除，重新预览并确认可去重。它不生成 Memory。
+导入只收集 `current_node` 指定分支的可见文本。Markdown 副本、附件、不支持或损坏的 JSON、其他分支、空消息和隐藏推理均单独计数，不能把跳过内容说成已经导入。保留来源消息编号、原始时间、角色与顺序，重复消息版本去重。
+
+预览不修改 Event、Memory，也不产生导入副本。服务将原生选定文件的身份、完整二进制 SHA-256、大小、范围和所选会话绑定到令牌。列出清单 → 生成预览 → 确认写入，每个阶段重新有界读取、核对完整快照；即使仅修改被跳过的附件，或用相同字节的新文件替换，也会废弃批准。拒绝所选文件与父目录符号链接、目录和特殊设备。macOS 仅允许根部 `/var`、`/tmp`、`/etc` 指向对应 `/private` 目录的确切系统别名。解析与正式导入共用，无临时 Vault。
+
+前端不能替换路径、范围、格式或批准正文。返回选择调用 `return_import_selection` 立即撤销旧写入令牌；新预览替换旧预览。成功确认消费令牌，并保留只读清单供下一批使用。取消、切换范围与切换 Vault 清除清单和预览。文件核对失败会废弃令牌，恢复旧字节也不能继续旧批准。
+
+执行中断可能已写入部分 Event；不回滚或删除，重新预览并确认可去重。导入不自动生成 Memory。CLI 的 `import --format chatgpt-export --file backup.zip --scope personal` 同样使用有界二进制解析；`--file -` 仍接收 UTF-8 JSON / JSONL。CLI 单批超限时不会写入，用户可改用桌面会话选择分批导入。
 
 ## Dream 审查与发布
 
 导出只允许同一 scope 中 1–64 条 Event 和最多 32 条旧 Memory，总 Job 上限由 Dream 核心约束。核心在本机状态目录记录 Job；桌面壳另行通过保存对话框把完整 `DreamJob` 导出给用户，不外发。
 
+`prepare_dream_task` 复用导出登记，再调用 Rust 的 `dream_task::render_task` 生成最多 1 MiB 的完整中文任务。返回任务编号、输入摘要、范围、数量、字节数、完整 `text` 和来源卡片。卡片正文最多 1200 字节，超过时 `truncated=true`；完整任务中的来源不会截断。该接口不调用模型、不写剪贴板、不发布 Memory。界面在用户点复制时重新调用并核对完整任务字节，确认一致后才调用原生剪贴板命令。
+
 结果文件最多 1 MiB、1–32 条提议，所有提议必须属于界面所选 scope。`DreamPreview` 包含 `preview_id`、`session_id`、`file_name`、`file_hash`、`scope` 和完整 `review`。审查包含 before/after、证据、版本、诊断、`requires_protected_approval` 和 `can_apply`。完整差异超过 4 MiB 时拒绝并要求拆分；不会截断后继续允许发布。
 
-发布只接受服务保存的 `preview_id`。服务重新核对文件身份/字节摘要、结果摘要、当前来源、旧 Memory read-set、suppression 和冲突，再由核心执行有恢复记录的事务。`approve_protected` 必须来自独立、默认未勾选的用户确认控件，来源文件和模型输出不能替用户批准。审查失败或 `can_apply=false` 时不能发布。成功发布后消费预览编号；相同结果重新审查/确认仍由核心幂等处理。
+`review_dream_text` 接受同样有界的完整 JSON，或唯一完整的 `json` / `recallcard-dream-result` 代码块。严格解析后保留服务端 `DreamResult`，不使用临时结果文件。部分 JSON、聊天包裹、多对象/多围栏、未知或重复字段全部拒绝，失败也会撤销旧 Dream 预览。文本与文件审查互相替换，不能并存两个可确认的预览。
+
+发布只接受服务保存的 `preview_id`。文件流程重新核对文件身份/字节摘要，文本流程使用服务端保留的解析结果；二者都重新核对结果摘要、当前来源、旧 Memory read-set、suppression 和冲突，再由核心执行有恢复记录的事务。`approve_protected` 必须来自独立、默认未勾选的用户确认控件，来源文件和模型输出不能替用户批准。审查失败或 `can_apply=false` 时不能发布。成功发布后消费预览编号；相同结果重新审查/确认仍由核心幂等处理。
 
 ## 已验证边界
 

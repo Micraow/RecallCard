@@ -145,6 +145,84 @@ async fn read_sources(
     .await
 }
 #[tauri::command]
+async fn manage_memories(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    include_hidden: bool,
+    offset: usize,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.manage_memories(&session_id, &scope, include_hidden, offset)
+    })
+    .await
+}
+#[tauri::command]
+async fn managed_memory(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    id: String,
+) -> Result<recallcard::model::Memory, String> {
+    execute(state.service.clone(), move |s| {
+        s.managed_memory(&session_id, &scope, &id)
+    })
+    .await
+}
+#[tauri::command]
+async fn managed_memory_source(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    memory_id: String,
+    event_id: String,
+) -> Result<recallcard::model::Event, String> {
+    execute(state.service.clone(), move |s| {
+        s.managed_memory_source(&session_id, &scope, &memory_id, &event_id)
+    })
+    .await
+}
+#[tauri::command]
+async fn review_memory_edit(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    id: String,
+    revision: u64,
+    edit: recallcard::desktop::MemoryEdit,
+) -> Result<recallcard::desktop::MemoryReview, String> {
+    execute(state.service.clone(), move |s| {
+        s.review_memory_edit(&session_id, &scope, &id, revision, edit)
+    })
+    .await
+}
+#[tauri::command]
+async fn review_memory_visibility(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    id: String,
+    restore: bool,
+    reason: String,
+) -> Result<recallcard::desktop::MemoryReview, String> {
+    execute(state.service.clone(), move |s| {
+        s.review_memory_visibility(&session_id, &scope, &id, restore, &reason)
+    })
+    .await
+}
+#[tauri::command]
+async fn confirm_memory_change(
+    state: State<'_, AppState>,
+    session_id: String,
+    preview_id: String,
+    approve_protected: bool,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.confirm_memory_change(&session_id, &preview_id, approve_protected)
+    })
+    .await
+}
+#[tauri::command]
 async fn list_conversations(
     state: State<'_, AppState>,
     session_id: String,
@@ -386,14 +464,14 @@ async fn pick_import(
     session_id: String,
     scope: String,
     format: String,
-) -> Result<Option<recallcard::desktop::ImportPreview>, String> {
+) -> Result<Option<recallcard::desktop::ImportFilePreview>, String> {
     let guard = dialog_guard(&state)?;
     let path = tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
         app.dialog()
             .file()
             .set_title("选择要导入的对话文件")
-            .add_filter("对话导出", &["json", "jsonl"])
+            .add_filter("对话导出或备份", &["json", "jsonl", "zip"])
             .blocking_pick_file()
     })
     .await
@@ -403,8 +481,31 @@ async fn pick_import(
     };
     let path = path.into_path().map_err(|_| "请选择本机文件")?;
     execute(state.service.clone(), move |s| {
-        s.preview_import(&session_id, &format, &path, &scope)
+        s.select_import_file(&session_id, &format, &path, &scope)
             .map(Some)
+    })
+    .await
+}
+#[tauri::command]
+async fn preview_import_selection(
+    state: State<'_, AppState>,
+    session_id: String,
+    selection_id: String,
+    source_ids: Vec<String>,
+) -> Result<recallcard::desktop::ImportPreview, String> {
+    execute(state.service.clone(), move |s| {
+        s.preview_import_selection(&session_id, &selection_id, &source_ids)
+    })
+    .await
+}
+#[tauri::command]
+async fn return_import_selection(
+    state: State<'_, AppState>,
+    session_id: String,
+    selection_id: String,
+) -> Result<(), String> {
+    execute(state.service.clone(), move |s| {
+        s.return_import_selection(&session_id, &selection_id)
     })
     .await
 }
@@ -419,6 +520,32 @@ async fn confirm_import(
     })
     .await
 }
+#[tauri::command]
+async fn prepare_dream_task(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    source_refs: Vec<String>,
+    memory_refs: Vec<String>,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.prepare_dream_task(&session_id, &scope, &source_refs, &memory_refs)
+    })
+    .await
+}
+#[tauri::command]
+async fn review_dream_text(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    text: String,
+) -> Result<recallcard::desktop::DreamPreview, String> {
+    execute(state.service.clone(), move |s| {
+        s.review_dream_text(&session_id, &scope, &text)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn pick_dream(
     app: AppHandle,
@@ -524,11 +651,21 @@ fn main() {
             search_records,
             read_record,
             read_sources,
+            manage_memories,
+            managed_memory,
+            managed_memory_source,
+            review_memory_edit,
+            review_memory_visibility,
+            confirm_memory_change,
             pick_import,
+            preview_import_selection,
+            return_import_selection,
             preview_note,
             confirm_note,
             confirm_import,
             pick_dream,
+            prepare_dream_task,
+            review_dream_text,
             apply_dream,
             export_dream
         ])
