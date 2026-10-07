@@ -20,6 +20,20 @@ CI 对 Linux、Windows、macOS 分别执行 Rust 格式、严格 Clippy 与完�
 
 ## 桌面验收与 Actions 用量
 
+提交前先在本机完成 Rust 格式、严格 Clippy、相关 Rust 回归，以及 Node 单元/状态测试。桌面界面另有无需浏览器进程的检查：
+
+```sh
+npm ci --prefix desktop/tests/local-dom --ignore-scripts --no-audit --no-fund
+npm --prefix desktop/tests/local-dom test
+python3 -m unittest discover -s desktop/tests -p 'test_native_*.py' -v
+```
+
+本地 DOM 检查直接执行实际应用模块和事件处理器，验证来源/时间与正文节点、ZIP 选择、受保护确认和旧批准失效；不是重新写一套界面实现。它通过网络失败护栏禁止测试期连接或监听，独立开发依赖不进入浏览器扩展或桌面运行包。Node 版本要求与模拟边界见 [本地 DOM 说明](../desktop/tests/local-dom/README.md)。不能由这些测试推断真实布局、WebKit 或剪贴板已通过。
+
+原生驱动检查在本地用合成响应验证：先定位/滚动再点击、多行内容真实粘贴后逐字读回、取消和保护确认、逐条打开搜索结果核对原文及完整引用。断连后不重复点击、输入或写入。WebDriver 的整块可见文本可能含布局空白，因此正文比较使用具体文本节点，同时检查卡片可见并实际打开记录。
+
+标准环境发现仅验收脚本问题时，`recheck-native.yml` 可复用已经通过构建的原始成品；先核对来源运行、程序源码无变化、包内提交和二进制摘要，再执行真实操作。程序源码有变化则必须重新构建。每次通过结论保留原构建提交与验收提交，不删除历史失败记录。
+
 日常开发先在 dot 云电脑运行编译、Clippy、相关 Rust/Python/Node 测试。普通 main 提交和文档修改不自动启动全平台矩阵。核心、独立浏览器和独立桌面工作流可以手动启动；只有相应 `validate/core-*`、`validate/browser-*`、`validate/gui-*` 验收分支自动触发，PR 仍保留相关检查。
 
 Linux 安装包工作流只在手动启动或 `validate/desktop-*` 分支上执行，一次完成正式构建、界面回归、真实 Tauri/原生文件选择器操作和 AppImage/deb 打包。它采用 Ubuntu 22.04 基线，收集非空文件、版本/提交号和校验清单，保存 Actions artifacts，不创建 Release、不推送别的仓库。Cargo 缓存复用依赖；同工作流同分支的新运行取消旧运行。

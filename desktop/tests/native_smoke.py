@@ -444,6 +444,18 @@ class NativeSmoke:
         self.driver.button("确认执行", "//dialog[@id='modal']")
         self.driver.idle()
 
+    def verify_search_records(self, expected):
+        browser = self.driver
+        # WebDriver 可见文本会插入布局空白。先核对可见卡片的正文节点，再真实打开每条原文。
+        rows = browser.observe("return Array.from(document.querySelectorAll('.results .result-card'), node => ({text:node.querySelector('p').textContent, visible:node.getClientRects().length > 0}));")
+        assert len(rows) == len(expected) and all(row["visible"] for row in rows)
+        assert {row["text"] for row in rows} == set(expected)
+        for index, row in enumerate(rows):
+            browser.click(f".results .result-card:nth-child({index + 1})")
+            browser.idle()
+            assert browser.observe("return document.querySelector('.reading-pane .body-text').textContent") == row["text"]
+            assert browser.observe("return document.querySelector('.reading-pane .ref').textContent") == expected[row["text"]]
+
     def exercise_memory_management(self, original):
         browser = self.driver
         original_events = self.events()
@@ -512,7 +524,7 @@ class NativeSmoke:
         browser.button("查找")
         browser.idle()
         assert browser.observe("return document.querySelectorAll('.results .result-card').length") == 2
-        assert EDITED_MEMORY_TEXT in browser.text(".results") and ZIP_USER_TEXT in browser.text(".results")
+        self.verify_search_records({EDITED_MEMORY_TEXT: f"memory:{memory_id}@3", ZIP_USER_TEXT: f"event:{original['source_refs'][0]}"})
         browser.navigate("记忆管理")
         browser.click(".memory-list .result-card")
         browser.idle()
@@ -557,7 +569,7 @@ class NativeSmoke:
         browser.button("查找")
         browser.idle()
         assert browser.observe("return document.querySelectorAll('.results .result-card').length") == 2
-        assert EDITED_MEMORY_TEXT in browser.text(".results") and ZIP_USER_TEXT in browser.text(".results")
+        self.verify_search_records({EDITED_MEMORY_TEXT: f"memory:{memory_id}@3", ZIP_USER_TEXT: f"event:{original['source_refs'][0]}"})
         self.checkpoint("主动查看隐藏记忆并撤销遗忘恢复搜索")
         return edited, {"forgotten": forgotten_rule, "restored": restored_rule}
 
@@ -576,7 +588,7 @@ class NativeSmoke:
         browser.idle()
         assert any(event["content"] == WORK_NOTE_TEXT and event["scope"] == "work" for event in self.events())
         assert browser.observe("return document.querySelector('select[aria-label=\"资料范围\"]').value") == "work"
-        assert WORK_NOTE_TEXT in browser.text(".results")
+        assert WORK_NOTE_TEXT in browser.observe("return Array.from(document.querySelectorAll('.results .result-card p'), node => node.textContent)")
         assert ZIP_USER_TEXT not in browser.text("#content") and EDITED_MEMORY_TEXT not in browser.text("#content")
         browser.navigate("记忆管理")
         assert not browser.observe("return !!document.querySelector('.memory-list .result-card')")

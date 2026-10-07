@@ -87,6 +87,27 @@ class NativeControlsTest(unittest.TestCase):
                 driver.type("#result", '```json\n{}\n```')
             self.assertEqual(process.call_count, 2)
 
+    def test_search_contract_opens_each_visible_record_and_checks_full_reference(self):
+        smoke = object.__new__(module.NativeSmoke)
+        smoke.driver = Mock()
+        smoke.driver.observe.side_effect = [
+            [{"text": "合成记忆原文", "visible": True}, {"text": "合成事件原文", "visible": True}],
+            "合成记忆原文", "memory:mem_synthetic@3", "合成事件原文", "event:evt_synthetic",
+        ]
+        smoke.verify_search_records({"合成记忆原文": "memory:mem_synthetic@3", "合成事件原文": "event:evt_synthetic"})
+        self.assertEqual(smoke.driver.click.call_count, 2)
+        self.assertEqual(smoke.driver.idle.call_count, 2)
+
+    def test_hidden_card_or_wrong_full_record_fails_search_contract(self):
+        smoke = object.__new__(module.NativeSmoke); smoke.driver = Mock()
+        smoke.driver.observe.return_value = [{"text": "合成原文", "visible": False}]
+        with self.assertRaises(AssertionError):
+            smoke.verify_search_records({"合成原文": "event:evt_synthetic"})
+        smoke.driver.click.assert_not_called()
+        smoke.driver.observe.side_effect = [[{"text": "合成原文", "visible": True}], "错误正文"]
+        with self.assertRaises(AssertionError):
+            smoke.verify_search_records({"合成原文": "event:evt_synthetic"})
+
 
 if __name__ == "__main__":
     unittest.main()
