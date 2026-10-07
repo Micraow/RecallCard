@@ -4,7 +4,7 @@
 
 ## 运行
 
-Linux 需要标准系统包提供的 WebKitWebDriver、Xvfb、AT-SPI、xdotool、xclip、scrot、openbox，以及官方 tauri-driver。Python 使用安装了 `python3-pyatspi` 的 `/usr/bin/python3`。
+Linux 需要标准系统包提供的 WebKitWebDriver、Xvfb、AT-SPI、xdotool、xclip、scrot、openbox，无需额外的驱动代理。Python 使用安装了 `python3-pyatspi` 的 `/usr/bin/python3`。
 
 ```sh
 dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" \
@@ -15,6 +15,10 @@ dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" \
 ```
 
 桌面按钮、输入框、选择框和确认窗口由 WebDriver 操作；文件路径通过原生选择器输入。DOM 脚本仅观察状态、读取可见控件值或滚动，不执行产品命令。CLI 用于读取 canonical 结果和原有 Native Messaging 安装测试；新增的导入、整理、记忆编辑及范围切换全部经过窗口。
+
+Linux 直接连接系统官方 WebKitWebDriver。能力字段 `webkitgtk:browserOptions` 与 `TAURI_AUTOMATION` / `TAURI_WEBVIEW_AUTOMATION` 环境来自 [Tauri 官方 Linux 映射](https://github.com/tauri-apps/tauri/blob/tauri-driver-v2.1.0/crates/tauri-driver/src/server.rs) 和 [原生驱动启动方式](https://github.com/tauri-apps/tauri/blob/tauri-driver-v2.1.0/crates/tauri-driver/src/webdriver.rs)。没有更换 WebKit、修改应用二进制或降低浏览器安全设置；移除的是曾多次在点击回执处断连的中间 HTTP 代理。
+
+启动时必须先取得原生 `/status` 的 ready 响应，再创建唯一会话。标准输出和错误输出保存在 `webkit-webdriver.log`；结束时关闭会话并回收驱动进程。创建会话、点击、键入和确认均不因断连自动重发。
 
 ## 覆盖的 20 个检查点
 
