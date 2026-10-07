@@ -12,6 +12,16 @@ export function createContextSelection(ui) {
   const same = (selected, version, epoch, session, scope) => state.contextSelection === selected && selected.version === version && state.epoch === epoch && state.vault?.session_id === session && state.scope === scope && state.page === 'search' && selected.open;
   function invalidate() { if (state.contextSelection) { state.contextSelection.preview = null; state.contextSelection.version++; } }
   function clear() { invalidate(); state.contextSelection = null; }
+  function refreshResults() {
+    const selected = state.contextSelection;
+    if (!selected) return;
+    invalidate(); selected.open = false;
+    if (selected.query !== (state.resultQuery || '')) { clear(); return; }
+    const rows = available(), previousCount = selected.references.length;
+    selected.candidates = rows; selected.key = rows.map(recordRef).join('\n');
+    selected.references = rows.map(recordRef).filter(reference => selected.references.includes(reference));
+    if (selected.references.length !== previousCount) showNotice('部分所选资料已不在当前结果中，请检查剩余选择后继续');
+  }
   function close() { if (state.busy) return; invalidate(); data().open = false; state.mobileDetail = false; render(); }
   const request = selected => ({ sessionId: state.vault.session_id, scope: state.scope, references: [...selected.references], goal: selected.goal, budgetTokens: budget });
 
@@ -47,20 +57,25 @@ export function createContextSelection(ui) {
     selected.open = true; state.mobileDetail = true; render();
     return prepare();
   }
+  function focusChoice(reference) {
+    [...document.querySelectorAll('.results .context-check input')]
+      .find(input => input.dataset.selectionReference === reference)?.focus({ preventScroll: true });
+  }
   function toggle(reference, checked, control) {
     const selected = data();
     if (state.busy || !control.isConnected || !selected.open || !selected.candidates.some(row => recordRef(row) === reference)) return;
+    const keepFocus = document.activeElement === control;
     if (checked && !selected.references.includes(reference)) {
-      if (selected.references.length >= 8) { showNotice('一次最多带上 8 条资料，请先取消一条'); render(); return; }
+      if (selected.references.length >= 8) { showNotice('一次最多带上 8 条资料，请先取消一条'); render(); if (keepFocus) focusChoice(reference); return; }
       selected.references.push(reference);
     } else if (!checked) selected.references = selected.references.filter(value => value !== reference);
     selected.references = selected.candidates.map(recordRef).filter(value => selected.references.includes(value));
-    invalidate(); render();
+    invalidate(); render(); if (keepFocus) focusChoice(reference);
   }
   function checkbox(row) {
     if (!data().open) return null;
     const reference = recordRef(row); if (!refValid(reference)) return null;
-    const input = $('input', { type: 'checkbox', 'aria-label': `带上资料：${title(row)}` });
+    const input = $('input', { type: 'checkbox', 'aria-label': `带上资料：${title(row)}`, 'data-selection-reference': reference });
     input.checked = data().references.includes(reference);
     input.addEventListener('change', () => toggle(reference, input.checked, input));
     return $('label', { class: 'context-check' }, input, $('span', { class: 'sr-only' }, '带上这条资料'));
@@ -134,5 +149,5 @@ export function createContextSelection(ui) {
       $('div', { class: 'reader-heading' }, $('h2', {}, '带到另一个AI'), button('返回搜索结果', close)), body,
       $('div', { class: 'continuation-actions' }, prepareButton, copyButton));
   }
-  return { open, close, clear, invalidate, checkbox, pane, isOpen: () => Boolean(state.contextSelection?.open) };
+  return { open, close, clear, invalidate, refreshResults, checkbox, pane, isOpen: () => Boolean(state.contextSelection?.open) };
 }
