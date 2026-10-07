@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at_utc": "2026-10-07T23:46:27.127652+00:00",
+  "checked_at_utc": "2026-10-07T23:56:08.393128+00:00",
   "application_commit": "12f4672fe0f3fe3fac0702c33998501950b01538",
   "application_source_changed": false,
   "local_gate_passed": true,
@@ -9,17 +9,17 @@
     "preflight": 11,
     "dom": 225,
     "javascript_contracts": 111,
-    "native_driver_contracts": 54,
+    "native_driver_contracts": 56,
     "preflight_contracts": 37,
     "independent_review": "passed"
   },
   "prior_actual_run": {
-    "id": 37703502788,
-    "verification_commit": "da7becae8f0574a4fb6f2cc040c0f330907be3b5",
+    "id": 37704264555,
+    "verification_commit": "fa03ed783763a1a76c70273dcc1fa7ed56ca26d0",
     "browser_passed": 73,
     "browser_failed": 0,
-    "native_passed_checkpoints": 29,
-    "native_failure": "GTK将deepseek-补在完整目录后并选中；精确读回门禁安全停止，未提交错误路径"
+    "native_passed_checkpoints": 30,
+    "native_failure": "第二次选择器的临时行Component不可用；已识别Files聚焦与Recent到目录的异步过渡"
   },
   "reuse": {
     "run_id": 37702406803,
@@ -34,10 +34,10 @@
   "source_sha256": {
     ".github/workflows/desktop.yml": "f96ee0b77a3b2544271a5ab23329c846e1df8517f07d1266e640858cd1d669b1",
     ".github/workflows/recheck-integrated.yml": "eca26eaf1c9c71e97f1a66153ca04379f9aca1a4efed427c187110dd6af030a8",
-    "desktop/tests/native_smoke.py": "7b7fbecf42d85052046d2400cb2965fbfb1d5ede04d09b1a52736f9f81979d62",
-    "desktop/tests/test_native_workflow_controls.py": "3d70fd0743298fbb713b91b8046b7d145750cb49b0f92ab3a2c338916b4feeca",
+    "desktop/tests/native_smoke.py": "d745c982d09b102361590fd95f6bb7a1434983c1abc66e55ef9093e2182c41c2",
+    "desktop/tests/test_native_workflow_controls.py": "14cb9bee4b0fabf8eab12a5fcbefbb2464e02bbfa2e1edcaac7f7443daf01721",
     "desktop/tests/ui.test.mjs": "f84b00c4f303e764fbd87883b9a92b34c309d4353c9fa806d797366119d3c288",
-    "docs/ci.md": "f77e70371538cabea7760f4e9b34379ee363edf1479ccfa41528a345985ca095",
+    "docs/ci.md": "222f09b6b36aa37bafea7e3accef9c72c07529046d6a945e2ea8293eb73e4ee5",
     "scripts/tests/test_preflight.py": "e9d9b7687f6378dbee4a09623bd170e61c5e233b5d5404653017f5740f353973"
   }
 }

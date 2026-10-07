@@ -485,6 +485,26 @@ class NativeSmoke:
             cells[node.name] = node
         return cells
 
+    def native_file_list_focused(self, title, expected_rows=None, all_selected=False):
+        import pyatspi
+        matches = []
+        for node, _ in self.accessible_nodes(self.accessible_dialog(title)):
+            if node.getRole() != pyatspi.ROLE_TABLE or node.name != "Files":
+                continue
+            state = node.getState()
+            if all(state.contains(value) for value in [pyatspi.STATE_SHOWING, pyatspi.STATE_SENSITIVE, pyatspi.STATE_FOCUSED]):
+                matches.append(node)
+        assert len(matches) <= 1, "聚焦的原生文件列表不唯一"
+        if not matches:
+            return False
+        if expected_rows is not None:
+            table = matches[0].queryTable()
+            if table.nRows != expected_rows:
+                return False
+            if all_selected and sorted(table.getSelectedRows()) != list(range(expected_rows)):
+                return False
+        return True
+
     def dialog_files(self, paths):
         # 独立合成目录只放这两份文件，真实文件列表 Ctrl+A 不会包含其他资料。
         paths = [Path(path).resolve() for path in paths]
@@ -503,28 +523,26 @@ class NativeSmoke:
 
             def visible_files():
                 assert self.dialog_windows(title), "选择器在核对文件前已经关闭；不重新打开或确认"
+                if not self.native_file_list_focused(title, expected_rows=len(paths)):
+                    return None
                 found = self.native_file_cells(title, names)
                 return found if set(found) == names else None
 
-            cells = wait_for(visible_files, "两份合成文件出现在可见原生列表")
+            wait_for(visible_files, "两份合成文件出现在可见原生列表")
             self.capture(f"dialog-{self.dialog_count:02d}-visible-files", webview=False)
             self.describe_dialog(title, "visible-files")
-            import pyatspi
-            cell = cells[paths[0].name]
-            bounds = cell.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
-            assert bounds.width > 0 and bounds.height > 0, "原生文件行没有可点击区域"
-            geometry = dict(line.split("=", 1) for line in run("xdotool", "getwindowgeometry", "--shell", window).splitlines() if "=" in line)
-            x, y = bounds.x + bounds.width // 2, bounds.y + bounds.height // 2
-            assert int(geometry["X"]) <= x < int(geometry["X"]) + int(geometry["WIDTH"])
-            assert int(geometry["Y"]) <= y < int(geometry["Y"]) + int(geometry["HEIGHT"])
+            # GTK 的临时行对象可能在截图/树遍历后失效，不能复用其坐标。
+            # 目录导航实际已把焦点交给 Files 表，只核对它并使用正常全选键。
+            wait_for(lambda: self.native_file_list_focused(title, expected_rows=len(paths)), "可见Files列表仅有目标两行且实际获得焦点")
             assert run("xdotool", "getactivewindow").strip() == window, "多选窗口失去焦点，停止键盘操作"
-            run("xdotool", "mousemove", str(x), str(y))
-            run("xdotool", "click", "1")
             run("xdotool", "key", "--clearmodifiers", "ctrl+a")
-            wait_for(lambda: set(self.native_file_cells(title, names, selected=True)) == names,
-                     "原生列表实际选中两份文件")
+            def selected_files():
+                return self.native_file_list_focused(title, expected_rows=len(paths), all_selected=True) and set(self.native_file_cells(title, names, selected=True)) == names
+
+            wait_for(selected_files, "原生列表所有选中行恰好为两份目标文件")
             self.capture(f"dialog-{self.dialog_count:02d}-two-files-selected", webview=False)
             approval = wait_for(lambda: self.native_button(title, "Open"), "多文件原生确认按钮可用")
+            assert selected_files() and run("xdotool", "getactivewindow").strip() == window, "确认前列表或选中范围已改变"
             assert approval.queryAction().doAction(0), "多文件原生确认按钮未接受点击"
             wait_for(lambda: not self.dialog_windows(title), "多文件原生窗口关闭")
         finally:
