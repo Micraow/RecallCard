@@ -14,3 +14,9 @@
 - Git remote 是敏感资料存储。初始化不配置远端；不要误把公开代码仓库用作私人 Vault 远端
 
 接口依据：[MCP stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)、[MCP Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)。协议版本兼容性与真实宿主行为需分别验证。
+
+## 遗忘与修订
+
+`forget` 不删除正本，而是在模型读取、检索、启动资料、具名 View、Embedding 导出与 Dream 审核/导出时执行抑制。规则同时保留来源编号及受 scope 约束的来源身份摘要，使同一平台/账户/会话/消息的现有和后续修订继续被抑制。不同 scope、独立消息、仅内容相同的来源不会因此被遗忘。旧规则缺少摘要时从保留的 Event 推导；新规则即使原文缺失也能辨认后来同来源的重新捕获。
+
+`restore` 仅关闭对应规则，其他仍有效规则继续生效。`memory state retracted` 是记忆状态变更，不等同 `forget`，需要阻止原始证据再次整理时应显式执行 `forget`。这里不抹除 Git 历史，也不能撤回用户此前已导出或发送的文件；Python 执行器不会自动扫描 Vault 来刷新一份旧导出。

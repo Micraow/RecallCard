@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use recallcard::{
-    context::{BootstrapArgs, Context, SearchArgs},
+    context::{parse_ref, BootstrapArgs, Context, ReadArgs, SearchArgs},
     policy::Access,
     EventInput, MemoryInput, MemoryState, Result, Vault,
 };
@@ -72,7 +72,12 @@ enum Command {
         action: MemoryCommand,
     },
     /// 通过编号读取原始事件或记忆
-    Read { id: String },
+    Read {
+        id: String,
+        /// 读取具名 View 时必须显式给出授权范围
+        #[arg(long)]
+        scope: Vec<String>,
+    },
     /// 返回记忆的原始证据
     Sources { id: String },
     /// 按当前授权/抑制状态导出可选Embedding输入；不会发送云端
@@ -111,6 +116,14 @@ enum Command {
         limit: usize,
         #[arg(long, default_value_t = 1500)]
         budget_tokens: usize,
+        #[arg(long)]
+        session_ref: Option<String>,
+        #[arg(long)]
+        as_of: Option<chrono::DateTime<chrono::Utc>>,
+        #[arg(long, default_value = "context")]
+        detail: String,
+        #[arg(long)]
+        cursor: Option<String>,
     },
     /// 为本地 Agent 提供四个只读工具；范围由此处绑定
     Mcp {
@@ -186,7 +199,7 @@ enum State {
     Retracted,
 }
 
-fn input<T: DeserializeOwned>(file: &str) -> Result<T> {
+fn input_text(file: &str) -> Result<String> {
     let mut text = String::new();
     if file == "-" {
         std::io::stdin()
@@ -203,7 +216,10 @@ fn input<T: DeserializeOwned>(file: &str) -> Result<T> {
     if text.len() > 16 * 1024 * 1024 {
         return Err("输入不能超过 16 MiB".into());
     }
-    serde_json::from_str(&text).map_err(|e| format!("输入 JSON 无效：{e}"))
+    Ok(text)
+}
+fn input<T: DeserializeOwned>(file: &str) -> Result<T> {
+    serde_json::from_str(&input_text(file)?).map_err(|e| format!("输入 JSON 无效：{e}"))
 }
 fn value<T: serde::Serialize>(v: T) -> Result<Value> {
     serde_json::to_value(v).map_err(|e| e.to_string())
@@ -222,7 +238,7 @@ fn run(cli: Cli) -> Result<Value> {
             file,
             scope,
         } => {
-            let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+            let text = input_text(&file)?;
             recallcard::import::import_text(&vault, &format, &text, &scope)
         }
         Command::NativeInstall {
@@ -271,13 +287,34 @@ fn run(cli: Cli) -> Result<Value> {
                 },
             )?),
         },
-        Command::Read { id } => {
-            ensure_visible(&vault, &id)?;
-            vault.read(&id)
+        Command::Read { id, scope } => {
+            let (kind, record_id, revision) = parse_ref(&id)?;
+            if kind == "view" {
+                return Context::new(&vault, Access::new(scope)?).read(ReadArgs {
+                    refs: vec![id],
+                    budget_tokens: 32768,
+                });
+            }
+            ensure_current_visible(&vault, record_id, revision)?;
+            if !scope.is_empty() {
+                Context::new(&vault, Access::new(scope)?).read(ReadArgs {
+                    refs: vec![id.clone()],
+                    budget_tokens: 32768,
+                })?;
+            }
+            vault.read(record_id)
         }
         Command::Sources { id } => {
-            ensure_visible(&vault, &id)?;
-            value(vault.sources(&id)?)
+            let (kind, record_id, revision) = parse_ref(&id)?;
+            if kind == "view" {
+                return Err("sources 接受 Event/Memory 引用；View 请使用 read --scope".into());
+            }
+            ensure_current_visible(&vault, record_id, revision)?;
+            if kind == "event" {
+                value(vec![vault.event(record_id)?])
+            } else {
+                value(vault.sources(record_id)?)
+            }
         }
         Command::EmbeddingExport { scope } => {
             Context::new(&vault, Access::new(scope)?).embedding_corpus()
@@ -297,15 +334,19 @@ fn run(cli: Cli) -> Result<Value> {
             target,
             limit,
             budget_tokens,
+            session_ref,
+            as_of,
+            detail,
+            cursor,
         } => Context::new(&vault, Access::new(scope)?).search(SearchArgs {
             query,
             target,
-            session_ref: None,
-            as_of: None,
+            session_ref,
+            as_of,
             limit,
-            detail: "context".into(),
+            detail,
             budget_tokens,
-            cursor: None,
+            cursor,
         }),
         Command::Mcp { .. } => Err("MCP 必须以 stdio 模式启动".into()),
         Command::Forget { id, reason } => value(vault.suppress(&id, reason)?),
@@ -383,6 +424,16 @@ fn ensure_visible(vault: &Vault, id: &str) -> Result<()> {
             .any(|id| suppressed.contains(id))
     {
         return Err("记忆的来源已被抑制".into());
+    }
+    Ok(())
+}
+
+fn ensure_current_visible(vault: &Vault, id: &str, revision: Option<u64>) -> Result<()> {
+    ensure_visible(vault, id)?;
+    if let Some(revision) = revision {
+        if vault.memory(id)?.revision != revision {
+            return Err("引用的记忆版本已变化，请重新搜索".into());
+        }
     }
     Ok(())
 }

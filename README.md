@@ -71,7 +71,9 @@ vault/
 - [可选向量 worker](docs/embedding.md)
 - [可选 API Dream](docs/dream-api.md)
 - [跨平台 CI 修复记录](docs/ci.md)
-- [实施进度与验收](docs/progress.md)
+- [具名 View、实体与有效期](docs/context-v0.3.md)
+- [T01–T12 设计验收差距 v0.3](docs/acceptance-v0.3.md)
+- [实施进度](docs/progress.md)
 
 ```bash
 cargo fmt --all -- --check

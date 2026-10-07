@@ -38,24 +38,37 @@ pub struct Suppression {
     pub id: String,
     pub active: bool,
     pub source_refs: Vec<String>,
+    /// 同一 scope 内来源身份的摘要；不依赖来源当前内容或修订编号。
+    #[serde(default)]
+    pub source_hashes: Vec<String>,
     pub reason: String,
     pub updated_at: chrono::DateTime<Utc>,
 }
 impl Vault {
     pub fn suppress(&self, id: &str, reason: String) -> Result<Suppression> {
         nonempty(&reason, "遗忘原因")?;
+        if reason.len() > 4096 {
+            return Err("遗忘原因不能超过 4096 字节".into());
+        }
+        let _lock = self.lock()?;
         let refs = if id.starts_with("mem_") {
             self.memory(id)?.data.source_refs
         } else {
             self.event(id)?;
             vec![id.to_owned()]
         };
-        let _lock = self.lock()?;
+        let source_hashes = refs
+            .iter()
+            .map(|id| self.event(id).map(|event| suppression_source_hash(&event)))
+            .collect::<Result<BTreeSet<_>>>()?
+            .into_iter()
+            .collect();
         let s = Suppression {
             schema_version: 1,
             id: id.into(),
             active: true,
             source_refs: refs,
+            source_hashes,
             reason,
             updated_at: Utc::now(),
         };
@@ -83,17 +96,44 @@ impl Vault {
     }
     pub fn suppressed_ids(&self) -> Result<BTreeSet<String>> {
         let mut ids = BTreeSet::new();
+        let mut source_hashes = BTreeSet::new();
         for path in files_recursive(&self.root().join("control/suppressions"), "json")? {
             let s: Suppression = read_json(&path)?;
             validate_record_id(&s.id)?;
             if s.schema_version != 1 {
                 return Err("不支持的 suppression 版本".into());
             }
+            if path.file_stem().and_then(|name| name.to_str()) != Some(s.id.as_str()) {
+                return Err("抑制规则文件名与编号不一致".into());
+            }
+            for id in &s.source_refs {
+                validate_id(id, "evt_")?;
+            }
+            for digest in &s.source_hashes {
+                if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err("抑制规则来源摘要无效".into());
+                }
+            }
             if s.active {
                 ids.insert(s.id);
+                source_hashes.extend(s.source_hashes);
                 for id in s.source_refs {
-                    validate_id(&id, "evt_")?;
                     ids.insert(id);
+                }
+            }
+        }
+        // 兼容尚无 source_hashes 的旧规则，从仍保留的不可变 Event 补出身份。
+        // 仅扩散到同 scope、同平台/账户/会话/消息，绝不按内容相似度遗忘。
+        if !ids.is_empty() {
+            let events = self.events()?;
+            for event in &events {
+                if ids.contains(&event.id) {
+                    source_hashes.insert(suppression_source_hash(event));
+                }
+            }
+            for event in &events {
+                if source_hashes.contains(&suppression_source_hash(event)) {
+                    ids.insert(event.id.clone());
                 }
             }
         }
@@ -102,6 +142,20 @@ impl Vault {
     pub fn is_suppressed(&self, id: &str) -> Result<bool> {
         Ok(self.suppressed_ids()?.contains(id))
     }
+}
+fn suppression_source_hash(event: &Event) -> String {
+    let source = &event.data.source;
+    hash(
+        serde_json::json!([
+            event.data.scope,
+            source.platform,
+            source.account_namespace,
+            source.conversation_id,
+            source.message_id
+        ])
+        .to_string()
+        .as_bytes(),
+    )
 }
 fn validate_record_id(id: &str) -> Result<()> {
     if id.starts_with("evt_") {
