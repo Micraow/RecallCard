@@ -1,8 +1,6 @@
 name: 复用集成候选的界面验收
 on:
   workflow_dispatch:
-  push:
-    branches: ["validate/gui-import-results-20261007"]
 concurrency:
   group: integrated-recheck-${{ github.ref }}
   cancel-in-progress: true

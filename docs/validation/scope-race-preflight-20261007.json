@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "checked_at_utc": "2026-10-07T23:24:55.520088+00:00",
+  "base_remote_commit": "68f4a02fa8d09d33e6e5ff82758be31ac5fc02ca",
+  "application_source_changed": true,
+  "local_gate_passed": true,
+  "full_acceptance_passed": false,
+  "checks": {
+    "environment": {
+      "status": "passed",
+      "tests": null
+    },
+    "node_and_lockfiles": {
+      "status": "passed",
+      "tests": null
+    },
+    "actionlint": {
+      "status": "passed",
+      "tests": null
+    },
+    "workflow_sources": {
+      "status": "passed",
+      "tests": null
+    },
+    "native_order": {
+      "status": "passed",
+      "tests": null
+    },
+    "browser_assets": {
+      "status": "passed",
+      "tests": null
+    },
+    "javascript_syntax": {
+      "status": "passed",
+      "tests": null
+    },
+    "driver_contracts": {
+      "status": "passed",
+      "tests": "48"
+    },
+    "local_js": {
+      "status": "passed",
+      "tests": "111"
+    },
+    "local_dom": {
+      "status": "passed",
+      "tests": "225"
+    },
+    "preflight_contracts": {
+      "status": "passed",
+      "tests": "37"
+    }
+  },
+  "independent_review": "修正原生data目录后通过",
+  "prior_actual_run": {
+    "id": 37700473677,
+    "source_commit": "68f4a02fa8d09d33e6e5ff82758be31ac5fc02ca",
+    "browser_passed": 71,
+    "browser_failed": 0,
+    "native_passed_checkpoints": 23,
+    "native_failure": "切换范围后背景控件被迟到设置回执重绘"
+  },
+  "pending_actual_run": {
+    "browser_expected": 73,
+    "native_expected_checkpoints": 37,
+    "requires_new_application_build": true,
+    "packaging_requested": false
+  },
+  "source_sha256": {
+    ".github/workflows/desktop.yml": "c44f9c88807eea3e3bfa527b39feca84d597d84ae107f286ed735d9da2d6efd4",
+    ".github/workflows/recheck-integrated.yml": "200490a616191edfd3538d858c676ef36528d32fd075e6be2a953b7b444b7aa3",
+    "desktop/tests/local-dom/recovery.test.mjs": "501d5aba0a133997343fe9366706b5d00db3f308e8e6383073ad08cf2598d5be",
+    "desktop/tests/native_smoke.py": "e49f66a0e272a4c49ea93e906eb40fc75970cfe26dfff95d972f98dd67ba89cc",
+    "desktop/tests/test_native_workflow_controls.py": "a87ba7e9992ee84e07f9efb8ca3ac6a79497c265dcb7e90b9df9d3dbc9029502",
+    "desktop/tests/ui.test.mjs": "555082df64bb45b3d24bad787a45be47169ba290b0a56f24a4eda2b75b67ecb0",
+    "desktop/ui/app.js": "80b9266c48c0707dc5c67237a2c28f841f116ca097de1a02b80221e44614dbb9",
+    "docs/ci.md": "5fee630dc1a5fc8dc16e16131495a98b63062b76edb380596b9ffc8806dcaf1e",
+    "scripts/tests/test_preflight.py": "401fca11196be693d0e2a086725d0995562fa02b277015e30836330ba03fe497"
+  }
+}

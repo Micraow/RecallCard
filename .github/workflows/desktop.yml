@@ -2,7 +2,7 @@ name: 桌面 GUI 验证
 on:
   workflow_dispatch:
   push:
-    branches: ["validate/gui-*", "!validate/gui-import-results-20261007"]
+    branches: ["validate/gui-*"]
     paths:
       - 'desktop/**'
       - 'crates/recallcard/**'

@@ -222,7 +222,19 @@ async function cancelPreviews(next) {
 function scopeSelect() {
   const node = $('select', { 'aria-label': '资料范围' });
   for (const scope of scopeOptions(state.vault, state.scope)) { const option = $('option', { value: scope }, scopeLabel(scope)); option.selected = scope === state.scope; node.append(option); }
-  node.addEventListener('change', () => { const scope = node.value; node.value = state.scope; discardBefore(async () => { await cancelPreviews(() => resetScope(state, scope)); await rememberWorkspace(); if (state.page === 'search') loadRecords(); else if (state.page === 'conversations') loadConversations(); else if (state.page === 'memories') memoryManagement.load(); }); });
+  node.addEventListener('change', () => {
+    const scope = node.value; node.value = state.scope;
+    discardBefore(async () => {
+      await cancelPreviews(() => resetScope(state, scope));
+      // 设置保存可以排队，但不能延后资料读取，再在用户已开始下一步时重绘页面。
+      // 串行保存与过期范围校验仍由 rememberWorkspace 负责；其完成后不再操作 UI。
+      const remembering = rememberWorkspace();
+      if (state.page === 'search') await loadRecords();
+      else if (state.page === 'conversations') await loadConversations();
+      else if (state.page === 'memories') await memoryManagement.load();
+      await remembering;
+    });
+  });
   return node;
 }
 function needsVault() {

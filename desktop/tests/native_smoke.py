@@ -58,6 +58,15 @@ class DriverError(RuntimeError):
     pass
 
 
+def recent_workspace_path(temporary):
+    # 宿主 recent_workspace_file 使用 app_data_dir，而非 app_config_dir。
+    identifier = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_text())["identifier"]
+    directory = temporary / "data"
+    path = directory / identifier / "recent-workspace.json"
+    assert path.resolve().is_relative_to(directory.resolve())
+    return path
+
+
 def wait_for(check, description, timeout=20):
     deadline = time.monotonic() + timeout
     last_error = None
@@ -969,6 +978,26 @@ class NativeSmoke:
         assert "没有来源时不会凭空生成记忆" in browser.text("#content")
         assert not browser.observe("return !!document.querySelector('textarea[aria-label=\"完整整理任务\"]')")
         browser.select('select[aria-label="资料范围"]', "personal")
+        # A→B→A 后立即打开背景，而非睡眠或重放点击来躲开迟到重绘。
+        # 再只读核对真实设置已经保存为最后范围，当前可点击节点应仍在同一页面。
+        before_events, before_memories = self.events(), self.canonical_memories()
+        setting = recent_workspace_path(self.temporary)
+        browser.navigate("随身背景")
+        self.scope_transition_evidence = []
+        for scope in ["work", "personal"]:
+            browser.select_background_scope(scope)
+            background_tab = browser.find('[data-action="background-select"]')
+
+            def remembered():
+                value = json.loads(setting.read_text())
+                assert value["workspace"]["root"] == str(self.vault)
+                return value["workspace"]["scope"] == scope
+
+            wait_for(remembered, f"真实设置保存最后范围 {scope}")
+            assert browser.command("GET", f"/element/{background_tab}/attribute/aria-pressed") == "true", "设置完成不能替换已打开的背景页节点"
+            assert browser.observe('return document.querySelector(\'select[aria-label="资料范围"]\').value') == scope
+            self.scope_transition_evidence.append({"scope": scope, "persisted_scope": scope, "background_node_preserved": True})
+        assert self.events() == before_events and self.canonical_memories() == before_memories
         browser.navigate("查找与阅读")
         browser.type("#query", "核对证据")
         browser.button("查找")
@@ -1439,6 +1468,7 @@ class NativeSmoke:
             "background_selection": background_evidence, "workspace_usability": workspace_evidence,
             "deepseek_import": deepseek_evidence,
             "selected_context_and_restart": selected_recovery_evidence,
+            "scope_transition": self.scope_transition_evidence,
             "default_workspace": default_workspace_evidence,
         }, ensure_ascii=False, indent=2))
 

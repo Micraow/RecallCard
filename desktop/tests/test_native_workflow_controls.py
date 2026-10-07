@@ -17,6 +17,20 @@ spec.loader.exec_module(module)
 
 
 class NativeControlsTest(unittest.TestCase):
+    def test_scope_persistence_probe_matches_actual_tauri_data_directory(self):
+        source = (module.ROOT / "desktop/src-tauri/src/main.rs").read_text()
+        helper = source.split("fn recent_workspace_file(", 1)[1].split("#[tauri::command]", 1)[0]
+        self.assertIn(".app_data_dir()", helper)
+        self.assertNotIn(".app_config_dir()", helper)
+        self.assertIn('directory.join("recent-workspace.json")', helper)
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            identifier = json.loads((module.ROOT / "desktop/src-tauri/tauri.conf.json").read_text())["identifier"]
+            path = module.recent_workspace_path(temporary)
+            self.assertEqual(path, temporary / "data" / identifier / "recent-workspace.json")
+            self.assertTrue(path.resolve().is_relative_to(temporary.resolve()))
+            self.assertFalse(path.exists(), "验收路径检查不得写入设置")
+
     def test_context_selection_uses_current_visible_refs_and_normal_clicks(self):
         driver = self.driver()
         driver.click = Mock(); driver.idle = Mock()
