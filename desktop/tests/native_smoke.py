@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """真实 Tauri/WebKitGTK 冒烟回归：仅使用临时合成数据，不替换 invoke。
 
-在已安装官方 tauri-driver、WebKitWebDriver、xdotool、scrot、openbox 的
-Linux 上运行：dbus-run-session -- xvfb-run -a python3 desktop/tests/native_smoke.py
-应用按钮使用 W3C WebDriver；系统文件选择窗口使用正常 X11 键盘操作。
+在已安装官方 tauri-driver、WebKitWebDriver、xdotool、scrot、openbox、
+python3-pyatspi 的 Linux 上运行：
+dbus-run-session -- xvfb-run -a /usr/bin/python3 desktop/tests/native_smoke.py
+应用按钮使用 W3C WebDriver；系统文件选择窗口使用正常 X11 键盘和 AT-SPI。
 """
 
 import argparse
@@ -130,6 +131,7 @@ class NativeSmoke:
         self.processes = []
         self.logs = []
         self.steps = []
+        self.dialog_count = 0
         self.application = args.application.resolve()
 
     def checkpoint(self, name):
@@ -174,21 +176,72 @@ class NativeSmoke:
                                 capture_output=True, text=True, timeout=5)
         return result.stdout.split() if result.returncode == 0 else []
 
+    def accessible_dialog(self, title):
+        import pyatspi
+        for application in pyatspi.Registry.getDesktop(0):
+            for window in application:
+                if window.name == title:
+                    return window
+        return None
+
+    @staticmethod
+    def accessible_nodes(root):
+        if root is None:
+            return
+        pending = [(root, 0)]
+        while pending:
+            node, depth = pending.pop(0)
+            yield node, depth
+            if depth < 16:
+                pending.extend((child, depth + 1) for child in node if child is not None)
+
+    def native_button(self, title, name):
+        import pyatspi
+        for node, _ in self.accessible_nodes(self.accessible_dialog(title)):
+            if node.getRole() == pyatspi.ROLE_PUSH_BUTTON and node.name.replace("_", "") == name:
+                state = node.getState()
+                if state.contains(pyatspi.STATE_SENSITIVE) and state.contains(pyatspi.STATE_SHOWING):
+                    return node
+        return None
+
+    def describe_dialog(self, title):
+        rows = []
+        for node, depth in self.accessible_nodes(self.accessible_dialog(title)):
+            rows.append(f"{'  ' * depth}{node.getRoleName()}: {node.name} [{node.getState().getStates()}]")
+        (self.artifacts / f"dialog-{self.dialog_count:02d}-accessibility.txt").write_text("\n".join(rows))
+
     def dialog(self, title, path=None, save=False):
+        self.dialog_count += 1
         window = wait_for(lambda: self.dialog_windows(title), f"原生窗口：{title}")[0]
         run("xdotool", "windowactivate", "--sync", window)
-        self.capture(f"dialog-{len(self.steps):02d}-{title}", webview=False)
+        wait_for(lambda: self.accessible_dialog(title), f"原生窗口辅助功能就绪：{title}")
+        time.sleep(0.4)
+        self.capture(f"dialog-{self.dialog_count:02d}-{title}", webview=False)
         if path is None:
-            run("xdotool", "key", "--clearmodifiers", "Escape")
+            cancel = wait_for(lambda: self.native_button(title, "Cancel"), "原生取消按钮可用")
+            assert cancel.queryAction().doAction(0), "原生取消按钮未接受点击"
         else:
             # 只通过文件选择窗口向应用授予本次合成路径访问权。
+            # GTK 的 Recent 视图不是文件目录；先切到 Home，等路径栏完成显示。
+            run("xdotool", "key", "--clearmodifiers", "alt+Home")
+            time.sleep(0.4)
             run("xdotool", "key", "--clearmodifiers", "ctrl+l")
-            run("xdotool", "type", "--clearmodifiers", "--delay", "1", str(path))
-            run("xdotool", "key", "--clearmodifiers", "Return")
+            time.sleep(0.3)
+            run("xdotool", "key", "--clearmodifiers", "ctrl+a")
+            run("xdotool", "type", "--clearmodifiers", "--delay", "8", str(path))
+            # 给 GTK 文件补全和异步路径校验留下时间，不在未实现控件上连发回车。
             time.sleep(0.7)
-            if self.dialog_windows(title):
-                # GTK 在目录导航后可能仍等待确认，保存窗口使用其正常保存快捷键。
-                run("xdotool", "key", "--clearmodifiers", "alt+s" if save else "Return")
+            run("xdotool", "key", "--clearmodifiers", "Return")
+            time.sleep(0.5)
+            try:
+                button = wait_for(lambda: True if not self.dialog_windows(title)
+                                  else self.native_button(title, "Save" if save else "Open"),
+                                  "原生文件选择完成或确认按钮可用")
+                if button is not True:
+                    assert button.queryAction().doAction(0), "原生确认按钮未接受点击"
+            finally:
+                if self.dialog_windows(title):
+                    self.describe_dialog(title)
         wait_for(lambda: not self.dialog_windows(title), f"关闭原生窗口：{title}")
         self.driver.idle()
 
@@ -364,6 +417,10 @@ def main():
             parser.error(f"请先编译：{binary}")
     if not os.environ.get("DISPLAY"):
         parser.error("请在 Xvfb 或正常 X11 会话中运行")
+    try:
+        import pyatspi  # noqa: F401
+    except ImportError:
+        parser.error("请安装 python3-pyatspi 并使用 /usr/bin/python3 运行")
     with tempfile.TemporaryDirectory(prefix="recallcard-native-smoke-") as directory:
         temporary = Path(directory)
         # 独立本机状态目录不会碰触开发者已有的状态、授权或资料。
