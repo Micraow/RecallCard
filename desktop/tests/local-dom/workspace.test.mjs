@@ -66,7 +66,7 @@ test('阅读安全：超预算只显示片段，提示不冒充全文', async t 
 
 test('导入成果：确认后定位本批，下一批重新选择文件', async t => {
   const ui = await fixture(t); await ui.openVault(); await action(ui, '#import-button');
-  assert.equal(ui.one('#file-import-details').open, true);
+  assert.equal(ui.one('#file-import-details').open, false);
   assert.equal(ui.one('#note-import-details').open, false);
   await ui.click('选择文件并预览');
   ui.check('[aria-label="选择会话：合成第一会话"]'); await ui.click('预览所选会话');

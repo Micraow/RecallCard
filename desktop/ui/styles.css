@@ -7,3 +7,9 @@
 .button.filter-active{background:var(--accent-soft);border-color:#9cbacf;color:#1d5378}.section-heading>.button-row{margin-top:0}.archive-selection>.button-row:last-child{position:sticky;bottom:-22px;padding:12px 0;background:#fff;border-top:1px solid var(--border)}
 
 .source-selection-row{display:flex;align-items:flex-start;gap:12px;border-bottom:1px solid var(--border);padding:10px 0}.source-selection-row>div{flex:1;min-width:0}.source-selection-row p{color:var(--ink);font-size:13px;margin:5px 0;overflow-wrap:anywhere}.source-selection-row .technical-details{border:0;margin-top:7px;padding:0}.source-selection-row strong{font-size:12px}.dream-evidence{margin:12px}.dream-evidence .body-text{white-space:pre-wrap}
+
+.import-job{max-width:960px}.import-job>h2{margin-top:0}.import-job progress{display:block;width:100%;height:14px;accent-color:var(--accent);margin:16px 0}.import-job-actions{position:sticky;bottom:-22px;padding:12px 0;background:var(--surface);z-index:1}.import-job details{margin-top:18px}.official-export-guide{padding-top:18px;border-top:1px solid var(--border)}.official-export-guide p,.import-job-details p{font-size:13px;overflow-wrap:anywhere}.import-history-row{display:flex;justify-content:space-between;gap:12px;align-items:center;border-top:1px solid var(--border);margin-top:12px}.import-history-row p{font-size:12px}
+
+.handoff-branches { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 16px; }
+.handoff-branches select { width: 100%; min-width: 0; text-overflow: ellipsis; }
+.branch-end { margin-top: 10px; }

@@ -236,13 +236,17 @@ fn empty_unknown_selections_never_write_and_large_official_selection_is_supporte
             &["missing".into()]
         )
         .is_err());
-    assert_eq!(session
-        .preview_import_selection(
-            &info.session_id,
-            &selection.selection_id,
-            &["one".into(), "two".into()]
-        )
-        .unwrap().event_count, 5002);
+    assert_eq!(
+        session
+            .preview_import_selection(
+                &info.session_id,
+                &selection.selection_id,
+                &["one".into(), "two".into()]
+            )
+            .unwrap()
+            .event_count,
+        5002
+    );
     assert_eq!(
         preview(&mut session, &info, &selection, &["one"]).event_count,
         2501

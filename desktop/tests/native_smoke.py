@@ -39,6 +39,19 @@ ZIP_HIDDEN_TEXT = "合成隐藏推理占位：此内容绝不能进入资料库�
 ZIP_TIMESTAMP = 1791241200
 EDITED_MEMORY_TEXT = "合成编辑记忆：native-smoke 琥珀计划先核对证据，再用简洁中文说明。已手工补充分类标签。"
 WORK_NOTE_TEXT = "合成工作范围：native-smoke 范围隔离验收资料。"
+DEEPSEEK_DIALOG = "选择导出文件（可多选）"
+DEEPSEEK_TITLE = "合成 DeepSeek 分支与独立片段"
+DEEPSEEK_TEXTS = {
+    "q": "合成 DeepSeek 用户原话：先核对石榴项目证据。",
+    "a": "合成 DeepSeek 回答甲：先检查附件清单。",
+    "b": "合成 DeepSeek 回答乙：先检查引用，尚未得到用户确认。",
+    "separate": "合成 DeepSeek 独立根：这段不属于石榴问答。",
+    "second-q": "合成 DeepSeek 第二份用户原话：整理海棠项目。",
+    "second-a": "合成 DeepSeek 第二份回答：保留原始出处。",
+}
+DEEPSEEK_HIDDEN = "合成 DeepSeek THINK：隐藏片段绝不能写入或复制。"
+DEEPSEEK_ATTACHMENT = "合成 DeepSeek 附件原件内容绝不能写入或复制。"
+DEEPSEEK_ATTACHMENT_URL = "https://example.invalid/synthetic-private-attachment"
 
 
 class DriverError(RuntimeError):
@@ -150,7 +163,7 @@ class WebDriver:
         try:
             self.click(f"{container}//button[normalize-space(.)='{label}']", "xpath")
         except (RemoteDisconnected, ConnectionResetError, ConnectionAbortedError):
-            titles = {"选择文件并预览":"选择要导入的对话文件", "打开已有资料库":"打开已有 RecallCard 资料库", "创建新资料库":"选择用于新资料库的空文件夹", "导出本次来源包":"保存整理包", "选择结果并审阅":"选择整理结果文件"}
+            titles = {"选择导出文件": DEEPSEEK_DIALOG, "选择文件并预览":"选择要导入的对话文件", "打开已有资料库":"打开已有 RecallCard 资料库", "创建新资料库":"选择用于新资料库的空文件夹", "导出本次来源包":"保存整理包", "选择结果并审阅":"选择整理结果文件"}
             title = titles.get(label)
             if not title:
                 raise
@@ -180,6 +193,18 @@ class WebDriver:
         self.click(f'{selector} option[value="{value}"]')
         self.idle()
         assert self.observe(f"return document.querySelector({json.dumps(selector)}).value") == value
+
+    def select_keyboard(self, selector, value):
+        # 观察实际选项顺序后，打开可见原生选择控件并用键盘选择。
+        # 不给 value/selectedIndex 赋值，不点击不可见的 option，也不调用 change。
+        options = self.observe(f"return [...document.querySelector({json.dumps(selector)}).options].map(n=>({{value:n.value,disabled:n.disabled}}))")
+        choices = [index for index, option in enumerate(options) if option["value"] == value]
+        assert len(choices) == 1 and not any(option["disabled"] for option in options), "分支选项缺失、重复或不可用"
+        self.click(selector)
+        run("xdotool", "key", "--clearmodifiers", "Home", *(["Down"] * choices[0]), "Return")
+        wait_for(lambda: self.observe(f"return document.querySelector({json.dumps(selector)}).value") == value,
+                 "键盘选择确切分支", timeout=5)
+        self.idle()
 
     def blur(self, selector):
         element = self.find(selector)
@@ -335,6 +360,129 @@ class NativeSmoke:
             rows.append(f"{'  ' * depth}{node.getRoleName()}: {node.name} [{node.getState().getStates()}]")
         (self.artifacts / f"dialog-{self.dialog_count:02d}-accessibility.txt").write_text("\n".join(rows))
 
+    def native_file_cells(self, title, names, selected=False):
+        import pyatspi
+        cells = {}
+        for node, _ in self.accessible_nodes(self.accessible_dialog(title)):
+            if node.getRole() != pyatspi.ROLE_TABLE_CELL or node.name not in names:
+                continue
+            state = node.getState()
+            if not state.contains(pyatspi.STATE_SHOWING) or not state.contains(pyatspi.STATE_SENSITIVE):
+                continue
+            if selected and not state.contains(pyatspi.STATE_SELECTED):
+                continue
+            assert node.name not in cells, "原生文件列表出现同名可见行，不能确定选择目标"
+            cells[node.name] = node
+        return cells
+
+    def dialog_files(self, paths):
+        # 独立合成目录只放这两份文件，真实文件列表 Ctrl+A 不会包含其他资料。
+        paths = [Path(path).resolve() for path in paths]
+        assert len(paths) >= 2 and len(set(paths)) == len(paths), "多选验收需要不同文件"
+        folder = paths[0].parent
+        assert all(path.is_file() and path.parent == folder for path in paths), "合成文件必须在同一目录"
+        assert set(folder.iterdir()) == set(paths), "多选目录含未批准的其他文件"
+        names = {path.name for path in paths}
+        title = DEEPSEEK_DIALOG
+        self.dialog_count += 1
+        window = wait_for(lambda: self.dialog_windows(title), f"原生窗口：{title}")[0]
+        run("xdotool", "windowactivate", "--sync", window)
+        wait_for(lambda: self.accessible_dialog(title), "多选窗口辅助功能就绪")
+        try:
+            run("xdotool", "key", "--clearmodifiers", "alt+Home")
+            time.sleep(0.4)
+            run("xdotool", "key", "--clearmodifiers", "ctrl+l")
+            time.sleep(0.3)
+            run("xdotool", "key", "--clearmodifiers", "ctrl+a")
+            run("xdotool", "type", "--clearmodifiers", "--delay", "8", str(folder) + "/")
+            time.sleep(0.7)
+            run("xdotool", "key", "--clearmodifiers", "Return")
+            cells = wait_for(lambda: (found if set(found := self.native_file_cells(title, names)) == names else None),
+                             "两份合成文件出现在可见原生列表")
+            import pyatspi
+            cell = cells[paths[0].name]
+            bounds = cell.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+            assert bounds.width > 0 and bounds.height > 0, "原生文件行没有可点击区域"
+            geometry = dict(line.split("=", 1) for line in run("xdotool", "getwindowgeometry", "--shell", window).splitlines() if "=" in line)
+            x, y = bounds.x + bounds.width // 2, bounds.y + bounds.height // 2
+            assert int(geometry["X"]) <= x < int(geometry["X"]) + int(geometry["WIDTH"])
+            assert int(geometry["Y"]) <= y < int(geometry["Y"]) + int(geometry["HEIGHT"])
+            assert run("xdotool", "getactivewindow").strip() == window, "多选窗口失去焦点，停止键盘操作"
+            run("xdotool", "mousemove", str(x), str(y))
+            run("xdotool", "click", "1")
+            run("xdotool", "key", "--clearmodifiers", "ctrl+a")
+            wait_for(lambda: set(self.native_file_cells(title, names, selected=True)) == names,
+                     "原生列表实际选中两份文件")
+            self.capture(f"dialog-{self.dialog_count:02d}-two-files-selected", webview=False)
+            approval = wait_for(lambda: self.native_button(title, "Open"), "多文件原生确认按钮可用")
+            assert approval.queryAction().doAction(0), "多文件原生确认按钮未接受点击"
+            wait_for(lambda: not self.dialog_windows(title), "多文件原生窗口关闭")
+        finally:
+            if self.dialog_windows(title):
+                self.describe_dialog(title)
+        self.driver.idle()
+
+    def wait_import_job(self, count):
+        # run() 返回后 operation 已经准备就绪，后台任务仍可能正在写入。
+        # 只读真实 DOM 完成标题、进度与错误；暂停、失败或读取错误不能冒充成功。
+        def completed():
+            status = self.driver.observe("return (()=>{const n=document.querySelector('.import-job');const p=n?.querySelector('progress');return {heading:n?.querySelector('h3')?.textContent,processed:p?.value,total:p?.max,error:document.querySelector('#notice.error:not([hidden])')?.textContent||n?.querySelector('.hint.warning')?.textContent,modal:document.querySelector('#modal').open};})()")
+            assert not status.get("modal"), "批量导入不得要求第二次确认"
+            assert not status.get("error"), f"导入任务显示错误：{status.get('error')}"
+            heading = status.get("heading")
+            assert heading not in {"已暂停", "正在暂停", "可以继续上次导入", "导入尚未完成"}, f"导入未完成：{heading}"
+            if heading != "导入完成":
+                return False
+            assert status.get("processed") == count and status.get("total") == count, f"完成数量不符：{status}"
+            return status
+        return wait_for(completed, "后台导入实际完成", timeout=60)
+
+    def confirm_import_job(self, count):
+        self.driver.button(f"导入全部 {count} 条消息")
+        # 不因 idle、超时或断连重新点击批准；等待只有观察操作。
+        self.driver.idle()
+        return self.wait_import_job(count)
+
+    def exercise_default_workspace(self):
+        # 必须在启动驱动前已隔离的测试目录中验收默认保存位置。
+        # 任一环境变量缺失、指向用户目录或经符号链接越界时，连“开始使用”也不能点击。
+        temporary = self.temporary.resolve()
+        isolated = {}
+        for name, suffix in [("XDG_DATA_HOME", "data"), ("XDG_CONFIG_HOME", "config"), ("RECALLCARD_STATE_DIR", "state")]:
+            value = os.environ.get(name)
+            assert value, f"默认起步验收缺少临时目录隔离：{name}"
+            path = Path(value).resolve()
+            assert path == (temporary / suffix).resolve() and path.is_relative_to(temporary), f"默认起步验收目录未隔离：{name}"
+            isolated[name] = path
+        identifier = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_text())["identifier"]
+        assert re.fullmatch(r"[A-Za-z0-9._-]+", identifier), "应用标识不是安全的目录名称"
+        default_vault = isolated["XDG_DATA_HOME"] / identifier / "vault"
+        assert default_vault.resolve().is_relative_to(isolated["XDG_DATA_HOME"])
+        assert not default_vault.exists(), "首次起步验收必须使用尚未创建的临时默认资料库"
+        browser = self.driver
+        browser.button("开始使用")
+
+        def opened():
+            for title in ("打开已有 RecallCard 资料库", "选择用于新资料库的空文件夹", "创建资料库", DEEPSEEK_DIALOG):
+                assert not self.dialog_windows(title), f"默认起步不应打开原生选择或确认窗口：{title}"
+            status = browser.observe("return (()=>{const n=document.querySelector('.import-job');const r=n?.getBoundingClientRect();return {ready:document.querySelector('#operation').textContent==='准备就绪',page:document.querySelector('#location').textContent,importVisible:Boolean(r&&r.width>0&&r.height>0&&getComputedStyle(n).visibility!=='hidden'),modal:document.querySelector('#modal').open,error:document.querySelector('#notice.error:not([hidden])')?.textContent};})()")
+            assert not status.get("modal"), "默认起步不应要求第二次确认"
+            assert not status.get("error"), f"默认起步显示错误：{status.get('error')}"
+            return status if status.get("ready") and status.get("page") == "导入会话" and status.get("importVisible") else False
+
+        screen = wait_for(opened, "默认资料库创建后直接进入导入页")
+        marker = json.loads((default_vault / "control/schema-version.json").read_text())
+        assert marker == {"schema_version": 1, "application": "RecallCard"}, "默认资料库缺少有效格式标记"
+        assert (default_vault / "events").is_dir() and not list((default_vault / "events").rglob("*.jsonl"))
+        assert (default_vault / "memories").is_dir() and not list((default_vault / "memories").glob("*.md"))
+        browser.assert_vault_badge(default_vault.name)
+        self.checkpoint("开始使用直接初始化临时默认资料库并进入导入")
+        browser.click("#switch-vault")
+        assert browser.observe("return document.querySelector('#modal').open")
+        assert browser.text("#modal-title") == "切换资料库"
+        return {"relative_path": str(default_vault.relative_to(temporary)), "schema": marker,
+                "event_count": 0, "memory_count": 0, "screen": screen}
+
     def dialog(self, title, path=None, save=False, create=False):
         self.dialog_count += 1
         window = wait_for(lambda: self.dialog_windows(title), f"原生窗口：{title}")[0]
@@ -453,6 +601,92 @@ class NativeSmoke:
                 fixture.writestr(f"{identifier}.json", json.dumps({"id": identifier,
                     "title": title, "current_node": parent, "mapping": nodes}, ensure_ascii=False))
         return archive
+
+    def create_deepseek_fixtures(self):
+        """官方形状的纯合成双文件：保留分叉、多根及未知时间，不包含真实附件。"""
+        folder = self.temporary / "synthetic-deepseek-multiple"
+        folder.mkdir()
+
+        def node(identifier, parent, children, kind, timestamp=None):
+            message = {"files": [], "model": None if kind == "REQUEST" else "deepseek-chat",
+                       "fragments": [{"type": kind, "content": DEEPSEEK_TEXTS[identifier]}]}
+            if timestamp is not None:
+                message["inserted_at"] = timestamp
+            return {"id": identifier, "parent": parent, "children": children, "message": message}
+
+        mapping = {
+            "root": {"id": "root", "parent": None, "children": ["q"], "message": None},
+            "q": node("q", "root", ["a", "b"], "REQUEST", "2026-01-02T08:00:00+08:00"),
+            "a": node("a", "q", [], "RESPONSE", "2026-01-02T00:00:02.125Z"),
+            "b": node("b", "q", [], "TEMPLATE_RESPONSE"),
+            "separate": node("separate", None, [], "REQUEST", "2026-01-02T00:00:01Z"),
+        }
+        mapping["a"]["message"]["fragments"].insert(0, {"type": "THINK", "content": DEEPSEEK_HIDDEN})
+        mapping["q"]["message"]["files"] = [{"id": "synthetic-attachment", "name": "synthetic-original.txt",
+            "url": DEEPSEEK_ATTACHMENT_URL, "content": DEEPSEEK_ATTACHMENT}]
+        first = {"id": "native-deepseek-branches", "title": DEEPSEEK_TITLE,
+                 "inserted_at": "2026-01-02T00:00:00Z", "updated_at": "2026-01-02T00:00:03Z", "mapping": mapping}
+        second = {"id": "native-deepseek-second", "title": "合成 DeepSeek 第二份历史",
+                  "mapping": {
+                      "second-q": node("second-q", None, ["second-a"], "REQUEST", "2026-01-03T00:00:00Z"),
+                      "second-a": node("second-a", "second-q", [], "RESPONSE", "2026-01-03T00:00:01Z"),
+                  }}
+        paths = [folder / "deepseek-branches.json", folder / "deepseek-second.json"]
+        for path, value in zip(paths, [[first], second]):
+            path.write_text(json.dumps(value, ensure_ascii=False))
+        return paths
+
+    def preview_deepseek_files(self, paths):
+        browser = self.driver
+        browser.navigate("添加资料")
+        if browser.observe("return [...document.querySelectorAll('.import-job button')].some(n=>n.textContent==='导入其他文件')"):
+            browser.button("导入其他文件")
+            browser.idle()
+        browser.button("选择导出文件")
+        self.dialog_files(paths)
+        assert "2 个文件 · 2 个有消息的会话 · 6 条消息" in browser.text(".import-job")
+        assert "个人资料" in browser.text(".import-job")
+        assert self.vault.name in browser.text(".import-job")
+        browser.click(".import-job-details > summary")
+        visible = browser.text(".import-job")
+        assert all(path.name in visible for path in paths), "预览必须显示实际选择的两份文件"
+        assert "所有有效分支都会保留" in visible and "附件原件不导入" in visible
+        # 样本是预览的一部分；只观察而不读取或设置产品内部 state。
+        shown = browser.observe("return document.querySelector('.import-job').textContent")
+        for forbidden in (DEEPSEEK_HIDDEN, DEEPSEEK_ATTACHMENT, DEEPSEEK_ATTACHMENT_URL):
+            assert forbidden not in shown, "预览不得展示隐藏片段或附件原件"
+
+    def import_job_counts(self):
+        self.driver.click(".import-job details > summary")
+        return self.driver.observe("return Object.fromEntries([...document.querySelectorAll('.import-job .info-line')].map(n=>[n.firstElementChild.textContent,n.lastElementChild.textContent]))")
+
+    def verify_deepseek_events(self, events):
+        imported = [event for event in events if event["source"]["conversation_id"].startswith("native-deepseek-")]
+        assert len(imported) == 6, "双文件必须完整保存六条可见消息"
+        by_id = {event["source"]["message_id"]: event for event in imported}
+        assert set(by_id) == set(DEEPSEEK_TEXTS), "不得遗漏分支或独立根"
+        for key, event in by_id.items():
+            assert event["content"] == DEEPSEEK_TEXTS[key]
+            assert event["role"] == ("user" if key in {"q", "separate", "second-q"} else "assistant")
+            assert event["source"]["platform"] == "deepseek" and event["scope"] == "personal"
+            assert event["metadata"]["import_adapter"] == "deepseek-export"
+            assert event["capture"]["completeness"] == "partial"
+        timestamps = {"q": "2026-01-02T00:00:00+00:00", "a": "2026-01-02T00:00:02.125+00:00",
+                      "separate": "2026-01-02T00:00:01+00:00", "second-q": "2026-01-03T00:00:00+00:00",
+                      "second-a": "2026-01-03T00:00:01+00:00"}
+        for key, expected in timestamps.items():
+            assert datetime.fromisoformat(by_id[key]["occurred_at"].replace("Z", "+00:00")) == datetime.fromisoformat(expected), "必须保留原始时刻与毫秒"
+        assert by_id["b"].get("occurred_at") is None, "未提供原始时间时不得补成导入时间"
+        assert by_id["q"]["metadata"]["deepseek"]["children_ids"] == ["a", "b"]
+        assert by_id["q"]["metadata"]["deepseek"]["attachments_omitted"] == 1
+        assert by_id["a"]["metadata"]["deepseek"]["hidden_fragments_omitted"] == 1
+        assert by_id["separate"]["metadata"]["deepseek"]["parent_id"] is None
+        for key in ("a", "b"):
+            assert by_id[key]["metadata"]["previous_message_id"] == "q"
+        serialized = json.dumps(events, ensure_ascii=False)
+        for forbidden in (DEEPSEEK_HIDDEN, DEEPSEEK_ATTACHMENT, DEEPSEEK_ATTACHMENT_URL, "synthetic-original.txt"):
+            assert forbidden not in serialized, "canonical Event 不得保存隐藏片段或附件内容/链接"
+        return by_id
 
     def preview_zip(self, archive):
         browser = self.driver
@@ -961,6 +1195,7 @@ class NativeSmoke:
         browser.button("打开已有资料库")
         self.dialog("打开已有 RecallCard 资料库")
         browser.assert_vault_badge("尚未打开资料库")
+        default_workspace_evidence = self.exercise_default_workspace()
         browser.button("创建新资料库")
         self.dialog("选择用于新资料库的空文件夹", self.vault, create=True)
         assert (self.vault / "control/schema-version.json").is_file()
@@ -972,7 +1207,7 @@ class NativeSmoke:
         self.checkpoint("原生资料库创建选择与取消")
 
         browser.navigate("添加资料")
-        assert browser.observe("return document.querySelector('#file-import-details').open")
+        assert not browser.observe("return document.querySelector('#file-import-details').open")
         browser.click("#note-import-details > summary")
         browser.type("#note-content", NOTE_TEXT)
         browser.button("预览并保存")
@@ -1159,12 +1394,15 @@ class NativeSmoke:
         self.checkpoint("GUI生成的持久MCP组件读取刚保存会话")
         background_evidence = self.exercise_background_selection(edited_memory, server)
         workspace_evidence = self.exercise_workspace_usability()
+        deepseek_evidence = self.exercise_deepseek_import()
         doctor = self.cli_command("doctor")
         assert doctor["ok"], doctor
         (self.artifacts / "canonical-evidence.json").write_text(json.dumps({
             "events": self.events(), "memory": memory, "edited_memory": edited_memory,
             "visibility_rules": visibility_rules, "receipt": receipt, "doctor": doctor, "job": job,
             "background_selection": background_evidence, "workspace_usability": workspace_evidence,
+            "deepseek_import": deepseek_evidence,
+            "default_workspace": default_workspace_evidence,
         }, ensure_ascii=False, indent=2))
 
     def exercise_workspace_usability(self):
@@ -1266,6 +1504,86 @@ class NativeSmoke:
                 "default_visible_rows": visible, "fixed_primary_action": header,
                 "selected_restored": True, "copied_exact_preview": True,
                 "source_location_restored": search_reference}
+
+    def exercise_deepseek_import(self):
+        browser = self.driver
+        paths = self.create_deepseek_fixtures()
+        before = self.events()
+        self.preview_deepseek_files(paths)
+        assert self.events() == before, "多文件选择和预览不得写入 Event"
+        browser.button("取消", "//section[contains(@class,'import-job')]")
+        browser.idle()
+        assert self.events() == before, "取消多文件预览不得写入 Event"
+        assert not browser.observe("return [...document.querySelectorAll('.import-job button')].some(n=>n.textContent.startsWith('导入全部 '))")
+        self.checkpoint("DeepSeek原生双文件选择预览取消不写入")
+
+        self.preview_deepseek_files(paths)
+        completion = self.confirm_import_job(6)
+        after = self.events()
+        assert len(after) == len(before) + 6
+        events = self.verify_deepseek_events(after)
+        counts = self.import_job_counts()
+        assert counts == {"导出文件": "2", "会话": "2", "新增记录": "6", "已存在记录": "0"}, counts
+        self.checkpoint("DeepSeek一次批准后台完成保留分支角色时间")
+
+        self.preview_deepseek_files(paths)
+        repeated = self.confirm_import_job(6)
+        assert self.events() == after, "多文件重复导入不得改变任何 canonical Event"
+        duplicate_counts = self.import_job_counts()
+        assert duplicate_counts == {"导出文件": "2", "会话": "2", "新增记录": "0", "已存在记录": "6"}, duplicate_counts
+        browser.button("查看已保存会话")
+        browser.idle()
+        browser.click(f"//button[contains(@class,'result-card')][.//strong[text()='{DEEPSEEK_TITLE}']]", "xpath")
+        browser.idle()
+        rows = browser.observe("return [...document.querySelectorAll('.conversation-message')].map(n=>({ref:n.dataset.reference,text:n.querySelector('.body-text').textContent,role:n.querySelector('.message-role').textContent}))")
+        assert len(rows) == 4
+        for key in ("q", "a", "b", "separate"):
+            assert {"ref": f"event:{events[key]['id']}", "text": DEEPSEEK_TEXTS[key],
+                    "role": "用户原话" if events[key]["role"] == "user" else "AI 回复"} in rows
+        unknown = f'.conversation-message[data-reference="event:{events["b"]["id"]}"]'
+        assert "时间未知" in browser.text(unknown)
+        assert "已保留 3 条分支" in browser.text(".conversation-reader")
+        self.checkpoint("DeepSeek批量重复去重与完整原文阅读")
+
+        browser.open_continuation()
+        assert browser.observe("return document.querySelector('#continuation-branch').value") == ""
+        assert browser.observe("return [...document.querySelectorAll('#continuation-panel button')].find(n=>n.textContent==='准备交接内容').disabled"), "多分支不能默认猜选"
+        branch_b = f"event:{events['b']['id']}"
+        browser.select_keyboard("#continuation-branch", branch_b)
+        handoffs = {}
+        for key in ("b", "a"):
+            if key == "a":
+                browser.click('[data-action="close-continuation"]')
+                browser.idle()
+                browser.click(f'.conversation-message[data-reference="event:{events[key]["id"]}"] .branch-end')
+                browser.idle()
+                assert browser.observe("return document.querySelector('#continuation-branch').value") == f"event:{events[key]['id']}"
+                assert not browser.observe("return Boolean(document.querySelector('#continuation-preview'))"), "换分支必须清除旧交接内容"
+            browser.button("准备交接内容")
+            browser.idle()
+            handoff = browser.observe("return document.querySelector('textarea[aria-label=交接内容预览]').value")
+            assert f"分支末端：event:{events[key]['id']}" in handoff
+            assert "本次带上 2 / 2 条已选范围内的已保存消息" in handoff
+            assert DEEPSEEK_TEXTS["q"] in handoff and DEEPSEEK_TEXTS[key] in handoff
+            assert handoff.index(DEEPSEEK_TEXTS["q"]) < handoff.index(DEEPSEEK_TEXTS[key])
+            assert f"event:{events['q']['id']}" in handoff
+            for other in set(DEEPSEEK_TEXTS) - {"q", key}:
+                assert DEEPSEEK_TEXTS[other] not in handoff, "接续不得拼入兄弟分支、独立根或其他会话"
+                assert f"event:{events[other]['id']}" not in handoff
+            for forbidden in (DEEPSEEK_HIDDEN, DEEPSEEK_ATTACHMENT, DEEPSEEK_ATTACHMENT_URL):
+                assert forbidden not in handoff
+            if key == "b":
+                assert "原始时间未知" in handoff
+            browser.button("复制交接内容")
+            browser.idle()
+            assert run("xclip", "-selection", "clipboard", "-o") == handoff, "复制前重新核验仍必须使用已选择的具体分支"
+            handoffs[key] = handoff
+        assert self.events() == after, "阅读和接续不得改写原始事件"
+        self.checkpoint("DeepSeek原生分支选择与剪贴板不混入兄弟分支")
+        return {"files": [path.name for path in paths], "completion": completion, "counts": counts,
+                "duplicate_completion": repeated, "duplicate_counts": duplicate_counts,
+                "events": list(events.values()), "handoffs": handoffs,
+                "keyboard_branch_ref": branch_b, "copied_exact_previews": True}
 
     def close(self):
         if self.driver:

@@ -30,7 +30,7 @@ function noExecutableMarkup(ui, root = ui.one('#content')) {
 
 test('实际首页与资料入口存在，选择资料库以前没有原生写入', async t => {
   const ui = await fixture(t);
-  assert.equal(ui.one('#content h1').textContent, '你的对话与记忆');
+  assert.equal(ui.one('#content h1').textContent, '把以前的对话接着用');
   ui.button('创建新资料库'); ui.button('打开已有资料库');
   assert.equal(ui.one('#navigation').querySelectorAll('button').length, 2);
   await ui.navigate('添加资料');
@@ -121,12 +121,12 @@ test('仅提交所选会话，预览保留来源与目的地，一次确认直�
 test('ZIP 全选超限后禁止预览，缩小批次时只传余下所选会话', async t => {
   const ui = await fixture(t);
   const large = structuredClone(selection);
-  large.conversations.forEach(conversation => { conversation.event_count = 3000; });
-  large.coverage.events_available = 6000;
+  large.conversations.forEach(conversation => { conversation.event_count = 60000; });
+  large.coverage.events_available = 120000;
   await chooseImport(ui, large);
   await ui.click('选择全部可导入会话');
   assert.equal(ui.button('预览所选会话').disabled, true);
-  assert.match(ui.one('.archive-selection').textContent, /超过 5000/);
+  assert.match(ui.one('.archive-selection').textContent, /超过 100000/);
   ui.button('预览所选会话').click(); await ui.idle();
   assert.equal(ui.native.count('preview_import_selection'), 0);
   ui.one('.archive-selection label:nth-of-type(2) input').click();

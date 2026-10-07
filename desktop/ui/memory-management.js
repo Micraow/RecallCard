@@ -28,7 +28,7 @@ export function invalidateMemoryContent(state) {
   state.importPreview = null; state.importSelection = null; state.importSelectedIds = []; state.notePreview = null;
   state.conversations = []; state.conversation = null; state.conversationRows = [];
   state.conversationOffset = 0; state.conversationListOffset = 0; state.conversationListNext = null;
-  state.continuation = null; state.continuationGoal = '';
+  state.continuation = null; state.continuationGoal = ''; state.branchConversationRef = ''; state.conversationBranches = null; state.continuationBranchRef = ''; state.continuationBranchLabel = '';
   state.background = newBackgroundState(); state.continuationOpen = false; state.importBatch = null; state.searchLoaded = false;
   const includeHidden = state.memory.includeHidden;
   state.memory = { ...newMemoryState(), includeHidden };

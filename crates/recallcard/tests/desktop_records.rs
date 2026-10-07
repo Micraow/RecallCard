@@ -430,9 +430,9 @@ fn import_result_excludes_selected_conversations_without_any_saved_visible_text(
 }
 
 #[test]
-fn interrupted_import_consumes_approval_and_retry_reports_prior_writes_as_duplicates() {
+fn invalid_revision_preflight_consumes_approval_without_writes_and_retry_is_idempotent() {
     let (dir, mut session, info, vault) = setup();
-    let first = input("已经写入", "one", "personal", "合成第一条正文");
+    let first = input("预验证后保存", "one", "personal", "合成第一条正文");
     let mut second = input("修复后保存", "two", "personal", "合成第二条正文");
     second["revision_of"] = json!(format!("evt_{}", "0".repeat(64)));
     let path = dir.path().join("interrupted.jsonl");
@@ -444,7 +444,9 @@ fn interrupted_import_consumes_approval_and_retry_reports_prior_writes_as_duplic
         .confirm_import(&info.session_id, &preview.preview_id)
         .unwrap_err();
     assert!(error.contains("已写入的事件可安全去重"));
-    assert_eq!(vault.events().unwrap().len(), 1);
+    // 缺失修订引用是整批预验证错误，不是落盘中断；首条也不能提前写入。
+    // 真正持久化后失败/取消的前缀保留由批捕获和可恢复任务测试独立覆盖。
+    assert!(vault.events().unwrap().is_empty());
     assert!(session
         .confirm_import(&info.session_id, &preview.preview_id)
         .is_err());
@@ -456,10 +458,23 @@ fn interrupted_import_consumes_approval_and_retry_reports_prior_writes_as_duplic
     let receipt = session
         .confirm_import(&info.session_id, &preview.preview_id)
         .unwrap();
-    assert_eq!(receipt["events_added"], 1);
-    assert_eq!(receipt["events_duplicates"], 1);
+    assert_eq!(receipt["events_added"], 2);
+    assert_eq!(receipt["events_duplicates"], 0);
     assert_eq!(receipt["conversation_refs"].as_array().unwrap().len(), 2);
     assert_eq!(vault.events().unwrap().len(), 2);
+
+    // 修复后的导入仍需新令牌；再授权复导必须保留原始事件并准确报告重复。
+    let before = vault.events().unwrap();
+    let preview = session
+        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
+        .unwrap();
+    let repeated = session
+        .confirm_import(&info.session_id, &preview.preview_id)
+        .unwrap();
+    assert_eq!(repeated["events_added"], 0);
+    assert_eq!(repeated["events_duplicates"], 2);
+    assert_eq!(repeated["conversation_refs"].as_array().unwrap().len(), 2);
+    assert_eq!(vault.events().unwrap(), before);
 }
 
 #[test]
