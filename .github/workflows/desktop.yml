@@ -20,22 +20,40 @@ permissions:
 jobs:
   linux:
     name: Linux / Tauri 桌面应用
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          cache-on-failure: true
       - name: 安装官方系统依赖
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev webkit2gtk-driver xvfb xauth xdotool scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
+        timeout-minutes: 16
+        run: |
+          source_list="$RUNNER_TEMP/recallcard-ubuntu-official.list"
+          cat > "$source_list" <<'EOF'
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy-updates main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu jammy-security main universe
+          EOF
+          apt_options=(-o "Dir::Etc::sourcelist=$source_list" -o Dir::Etc::sourceparts=- -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          for attempt in 1 2; do
+            if sudo timeout --kill-after=30s 3m apt-get "${apt_options[@]}" --error-on=any update; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then exit 1; fi
+            sleep 5
+          done
+          sudo timeout --kill-after=30s 8m apt-get "${apt_options[@]}" install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
       - run: cargo clippy --locked --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo build --locked --manifest-path desktop/src-tauri/Cargo.toml
       - name: 编译合成资料库初始化 CLI
         run: cargo build --locked --bin recallcard --target-dir desktop/src-tauri/target
-      - name: 安装官方 Tauri WebDriver
-        run: cargo install tauri-driver --version 2.1.0 --locked
       - name: 真实 Tauri GUI 与 Rust 后端端到端验证
         timeout-minutes: 8
         env:
@@ -50,15 +68,25 @@ jobs:
           path: ${{ runner.temp }}/recallcard-native-smoke-artifacts/
           if-no-files-found: ignore
           retention-days: 14
+      - name: 保存失败诊断所需的已编译程序
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-gui-diagnostic-binaries-${{ github.sha }}
+          path: |
+            desktop/src-tauri/target/debug/recallcard-desktop
+            desktop/src-tauri/target/debug/recallcard
+          if-no-files-found: ignore
+          retention-days: 3
   interface:
     name: 中文界面交互回归
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24.19.0'
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: extension
       - run: npx playwright install --with-deps chromium

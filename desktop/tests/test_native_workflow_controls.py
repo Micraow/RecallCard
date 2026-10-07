@@ -17,6 +17,53 @@ spec.loader.exec_module(module)
 
 
 class NativeControlsTest(unittest.TestCase):
+    def test_context_selection_uses_current_visible_refs_and_normal_clicks(self):
+        driver = self.driver()
+        driver.click = Mock(); driver.idle = Mock()
+        rows = [{"ref": "event:keep", "checked": True, "disabled": False},
+                {"ref": "event:remove", "checked": True, "disabled": False},
+                {"ref": "event:add", "checked": False, "disabled": False}]
+        driver.observe = Mock(side_effect=[rows, ["event:keep", "event:add"]])
+        self.assertEqual(driver.choose_context_references(["event:add", "event:keep"]), ["event:keep", "event:add"])
+        self.assertEqual([call.args[0] for call in driver.click.call_args_list], [
+            '.context-check input[data-selection-reference="event:remove"]',
+            '.context-check input[data-selection-reference="event:add"]'])
+        self.assertEqual(driver.idle.call_count, 2)
+        for call in driver.observe.call_args_list:
+            self.assertTrue(call.args[0].startswith("return "))
+            self.assertNotIn("__TAURI__", call.args[0])
+
+    def test_context_selection_refuses_missing_disabled_or_ambiguous_choices(self):
+        for references, rows in [([], []), (["event:a", "event:a"], []),
+                (["event:missing"], [{"ref": "event:a", "checked": False, "disabled": False}]),
+                (["event:a"], [{"ref": "event:a", "checked": False, "disabled": True}]),
+                (["event:a"], [{"ref": "event:a", "checked": False, "disabled": False}] * 2)]:
+            driver = self.driver(); driver.click = Mock(); driver.observe = Mock(return_value=rows)
+            with self.subTest(references=references, rows=rows), self.assertRaises(AssertionError):
+                driver.choose_context_references(references)
+            driver.click.assert_not_called()
+
+    def test_explicit_application_restart_waits_for_driver_and_creates_one_session(self):
+        smoke = object.__new__(module.NativeSmoke); smoke.application = Path("/synthetic/recallcard-desktop")
+        previous = Mock(); previous.observations = [{"synthetic": "old"}]; smoke.driver = previous
+        fresh = Mock(); fresh.text.return_value = "会话"
+        response = Mock(); response.__enter__ = Mock(return_value=response); response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b'{"value":{"ready":true}}'
+        with patch.object(module, "urlopen", return_value=response), patch.object(module, "wait_for", side_effect=self.immediate), patch.object(module, "WebDriver", return_value=fresh) as create:
+            self.assertIs(smoke.reopen_application(), fresh)
+        previous.close.assert_called_once_with(); create.assert_called_once_with(smoke.application)
+        fresh.idle.assert_called_once_with(); self.assertEqual(fresh.observations, previous.observations)
+
+    def test_uncertain_restart_session_creation_is_not_replayed(self):
+        smoke = object.__new__(module.NativeSmoke); smoke.application = Path("/synthetic/recallcard-desktop")
+        previous = Mock(); previous.observations = []; smoke.driver = previous
+        response = Mock(); response.__enter__ = Mock(return_value=response); response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b'{"value":{"ready":true}}'
+        with patch.object(module, "urlopen", return_value=response), patch.object(module, "wait_for", side_effect=self.immediate), patch.object(module, "WebDriver", side_effect=ConnectionResetError) as create:
+            with self.assertRaises(ConnectionResetError): smoke.reopen_application()
+        previous.close.assert_called_once_with(); create.assert_called_once_with(smoke.application)
+        self.assertIsNone(smoke.driver)
+
     @staticmethod
     def immediate(check, description, **kwargs):
         value = check()

@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "checked_at_utc": "2026-10-07T22:38:00Z",
+  "application_base_commit": "5233f0fe8fc7799fbd0fe2645068cad91651af87",
+  "application_source_unchanged": true,
+  "local_gate_passed": true,
+  "actual_native_acceptance_passed": false,
+  "planned_native_checkpoints": 37,
+  "checks": {
+    "local_preflight": {
+      "passed": 11,
+      "failed": 0
+    },
+    "local_dom": {
+      "passed": 220,
+      "failed": 0
+    },
+    "javascript_contracts": {
+      "passed": 111,
+      "failed": 0
+    },
+    "native_driver_contracts": {
+      "passed": 45,
+      "failed": 0
+    },
+    "preflight_contracts": {
+      "passed": 34,
+      "failed": 0
+    },
+    "independent_route_review": "passed after fixing actual viewport and abandoned draft evidence gaps"
+  },
+  "not_run": [
+    "真实 Chromium",
+    "Tauri 宿主编译与 clippy",
+    "37步真实 Tauri/WebKit 原生闭环",
+    "IPC与跨平台实机",
+    "新安装包"
+  ],
+  "changes": [
+    "补齐 xclip；移除不用的 tauri-driver 编译",
+    "官方签名 jammy 源仅对当前 apt 调用生效；重试与步骤时限有界",
+    "跨会话选文、原文往返、实际窄窗复制、驱动结束后重新启动、历史成果读取"
+  ],
+  "source_sha256": {
+    ".github/workflows/desktop.yml": "d0cdf9a7da2b92227a4156e8d1a0722ad467f97ff2c96323312269475b8f97f8",
+    "desktop/tests/native_smoke.py": "ad887ae97f44742eb1d6420353e884a2fd220a393555fe1468ab9e89d8dae2d7",
+    "desktop/tests/test_native_workflow_controls.py": "1df9a4261612ae4c9381ab0573d21b3bde1f6899eae1e8fd7b1a14f67cc26697",
+    "scripts/preflight.py": "c22398d6edb4e1adf3e2af65dc962039342cd369c9affca769aa76e89866323a",
+    "scripts/tests/test_preflight.py": "7294a65b0030ca16a63101ee300677698614aeb8b6f8a3cdd028d642d608e0c6"
+  },
+  "packaging_workflow_unchanged": true
+}
