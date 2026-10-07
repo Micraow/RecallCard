@@ -420,7 +420,8 @@ impl Vault {
         self.ensure_no_pending_dream()?;
         Ok(guard)
     }
-    pub(crate) fn read_guard(&self) -> Result<WriteGuard> {
+    /// 在多次读取间保持同一只读快照；写入忙碌时明确返回错误。
+    pub fn read_guard(&self) -> Result<WriteGuard> {
         let path = self.state_dir()?.join("write.lock");
         reject_symlink(&path)?;
         let file = OpenOptions::new()
