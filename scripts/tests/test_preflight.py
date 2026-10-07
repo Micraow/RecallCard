@@ -315,7 +315,7 @@ class PreflightTest(unittest.TestCase):
         for value in ["https://archive.ubuntu.com/ubuntu", "https://security.ubuntu.com/ubuntu", "signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg", "timeout --kill-after=30s 3m", "timeout --kill-after=30s 8m", "for attempt in 1 2", "--error-on=any"]:
             self.assertIn(value, step["run"])
 
-    def test_integrated_application_change_starts_exactly_one_fresh_nonpackaging_workflow(self):
+    def test_integrated_recheck_starts_exactly_one_nonpackaging_workflow(self):
         matches = []
         for path, data in preflight.workflows(ROOT):
             triggers = data.get("on", data.get(True, {}))
@@ -326,15 +326,15 @@ class PreflightTest(unittest.TestCase):
                 if fnmatch.fnmatchcase("validate/gui-import-results-20261007", pattern.lstrip("!")):
                     matched = not negative
             if matched: matches.append(path.name)
-        self.assertEqual(matches, ["desktop.yml"])
+        self.assertEqual(matches, ["recheck-integrated.yml"])
         workflow = next(data for path, data in preflight.workflows(ROOT) if path.name == "recheck-integrated.yml")
-        self.assertEqual(set(workflow.get("on", workflow.get(True, {}))), {"workflow_dispatch"})
+        self.assertEqual(set(workflow.get("on", workflow.get(True, {}))), {"workflow_dispatch", "push"})
 
     def test_integrated_recheck_source_gate_rejects_each_application_change(self):
         workflow = next(data for path, data in preflight.workflows(ROOT) if path.name == "recheck-integrated.yml")
         step = next(step for step in workflow["jobs"]["native"]["steps"] if step.get("name") == "核对应用源码与原构建完全一致")
         command = shlex.split(step["run"])
-        self.assertEqual(command, ["git", "diff", "--exit-code", "03f4b635862b38394abd319d4d76a532e1d90959", "--", "crates", "Cargo.toml", "Cargo.lock", "desktop/ui", "desktop/src-tauri"])
+        self.assertEqual(command, ["git", "diff", "--exit-code", "12f4672fe0f3fe3fac0702c33998501950b01538", "--", "crates", "Cargo.toml", "Cargo.lock", "desktop/ui", "desktop/src-tauri"])
         repository = self.root / "git-fixture"; repository.mkdir()
         files = ["crates/synthetic.rs", "Cargo.toml", "Cargo.lock", "desktop/ui/app.js", "desktop/src-tauri/src/main.rs"]
         for name in files:
@@ -359,10 +359,10 @@ class PreflightTest(unittest.TestCase):
         self.assertEqual(workflow["permissions"], {"contents": "read", "actions": "read"})
         steps = workflow["jobs"]["native"]["steps"]
         scripts = "\n".join(step.get("with", {}).get("script", "") for step in steps)
-        for value in ["37698444647", "113055829696", "11517105753", "03f4b635862b38394abd319d4d76a532e1d90959", "artifact.expired", "artifact.digest", "step.conclusion === 'success'"]:
+        for value in ["37702406803", "113068726523", "11517704706", "12f4672fe0f3fe3fac0702c33998501950b01538", "artifact.expired", "artifact.digest", "step.conclusion === 'success'"]:
             self.assertIn(value, scripts)
         runs = "\n".join(step.get("run", "") for step in steps)
-        for digest in ["f76e923fdbee19ee16f28ad50fc260b2a08fdc52e7cbedd5c630ab5887d242fb", "8e58de814c9e47309aa61e800686d799389971005671fd6fb643026397c17a78"]:
+        for digest in ["43b173b96502e04b41ebf9057e892393b92075f6b6ead83b486aaca5a61c5569", "8e58de814c9e47309aa61e800686d799389971005671fd6fb643026397c17a78"]:
             self.assertIn(digest, runs)
         self.assertIn("sha256sum --check --strict", runs)
         self.assertNotIn("cargo build", runs)

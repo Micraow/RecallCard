@@ -398,11 +398,55 @@ class NativeSmoke:
                     return node
         return None
 
-    def describe_dialog(self, title):
+    def describe_dialog(self, title, phase=None):
         rows = []
         for node, depth in self.accessible_nodes(self.accessible_dialog(title)):
             rows.append(f"{'  ' * depth}{node.getRoleName()}: {node.name} [{node.getState().getStates()}]")
-        (self.artifacts / f"dialog-{self.dialog_count:02d}-accessibility.txt").write_text("\n".join(rows))
+        suffix = f"-{phase}" if phase else ""
+        (self.artifacts / f"dialog-{self.dialog_count:02d}{suffix}-accessibility.txt").write_text("\n".join(rows))
+
+    def native_location_entry(self, title):
+        import pyatspi
+        entries = []
+        for node, _ in self.accessible_nodes(self.accessible_dialog(title)):
+            if node.getRole() != pyatspi.ROLE_TEXT:
+                continue
+            attributes = dict(item.split(":", 1) for item in node.getAttributes() if ":" in item)
+            if attributes.get("placeholder-text") != "Location":
+                continue
+            state = node.getState()
+            if all(state.contains(value) for value in [pyatspi.STATE_SHOWING, pyatspi.STATE_SENSITIVE,
+                                                       pyatspi.STATE_FOCUSED, pyatspi.STATE_EDITABLE]):
+                entries.append(node)
+        assert len(entries) <= 1, "原生位置输入不唯一，不能确定键盘目标"
+        return entries[0] if entries else None
+
+    def navigate_file_folder(self, title, window, folder):
+        # 只经真实焦点与粘贴输入目录。逐字键入可能被 GTK 补全改写；
+        # Return 前必须逐字读回，不能猜测输入成功或重发确认。
+        expected = str(folder) + "/"
+        self.capture(f"dialog-{self.dialog_count:02d}-opened", webview=False)
+        self.describe_dialog(title, "opened")
+        # Ctrl+L 是切换键；已有聚焦输入时再次按会隐藏它。
+        if self.native_location_entry(title) is None:
+            run("xdotool", "key", "--clearmodifiers", "ctrl+l")
+        wait_for(lambda: self.native_location_entry(title), "原生位置输入可见并已获得焦点")
+        subprocess.run(["xclip", "-selection", "clipboard", "-i"], input=expected,
+                       text=True, check=True, timeout=5,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run("xdotool", "key", "--clearmodifiers", "ctrl+a", "ctrl+v")
+
+        def exact_location():
+            entry = self.native_location_entry(title)
+            return entry and entry.queryText().getText(0, -1) == expected
+
+        wait_for(exact_location, "原生位置输入逐字保留完整合成目录")
+        self.capture(f"dialog-{self.dialog_count:02d}-location", webview=False)
+        self.describe_dialog(title, "location")
+        assert run("xdotool", "getactivewindow").strip() == window, "位置输入期间多选窗口失去焦点"
+        assert exact_location(), "目录输入或焦点已改变，停止确认"
+        (self.artifacts / f"dialog-{self.dialog_count:02d}-location.json").write_text(json.dumps({"expected": expected, "observed": expected}, ensure_ascii=False))
+        run("xdotool", "key", "--clearmodifiers", "Return")
 
     def native_file_cells(self, title, names, selected=False):
         import pyatspi
@@ -433,16 +477,16 @@ class NativeSmoke:
         run("xdotool", "windowactivate", "--sync", window)
         wait_for(lambda: self.accessible_dialog(title), "多选窗口辅助功能就绪")
         try:
-            run("xdotool", "key", "--clearmodifiers", "alt+Home")
-            time.sleep(0.4)
-            run("xdotool", "key", "--clearmodifiers", "ctrl+l")
-            time.sleep(0.3)
-            run("xdotool", "key", "--clearmodifiers", "ctrl+a")
-            run("xdotool", "type", "--clearmodifiers", "--delay", "8", str(folder) + "/")
-            time.sleep(0.7)
-            run("xdotool", "key", "--clearmodifiers", "Return")
-            cells = wait_for(lambda: (found if set(found := self.native_file_cells(title, names)) == names else None),
-                             "两份合成文件出现在可见原生列表")
+            self.navigate_file_folder(title, window, folder)
+
+            def visible_files():
+                assert self.dialog_windows(title), "选择器在核对文件前已经关闭；不重新打开或确认"
+                found = self.native_file_cells(title, names)
+                return found if set(found) == names else None
+
+            cells = wait_for(visible_files, "两份合成文件出现在可见原生列表")
+            self.capture(f"dialog-{self.dialog_count:02d}-visible-files", webview=False)
+            self.describe_dialog(title, "visible-files")
             import pyatspi
             cell = cells[paths[0].name]
             bounds = cell.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
