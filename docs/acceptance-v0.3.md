@@ -236,3 +236,5 @@
 - 本机端点测试被云电脑底层socket策略以EPERM阻挡，授权后的相同命令仍失败。这不是已通过的IPC验证，也没有通过跳过用例伪造成功
 - Windows交叉Clippy通过仅证明可编译；所有真实三平台用例必须在本段自己的Actions中成功后才能推进main
 - 该段先发布临时验证分支，现有push工作流只运行检查和测试，没有部署或真实API调用
+
+2026-10-07 后续验收结果：IPC/语义提交 `9061a9d2d9b35f0979b3544f69481aa264d3041c` 已通过 [验证分支 CI](https://github.com/Micraow/RecallCard/actions/runs/37563960312) 与 [main CI](https://github.com/Micraow/RecallCard/actions/runs/37564390185)。三平台Rust、Python105和Node74均成功；Linux完整208项Rust（包含真实IPC/桥接）通过，Windows的专属条件测试数量不同，以其日志为准。现已推进main；之前仅交叉编译/EPERM的证据局限没有被冒充成本机运行成功。

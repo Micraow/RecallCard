@@ -77,6 +77,21 @@
           cursor = end;
         }
         if (!first || !last) throw new Error('输入框结构已变化，请手动移除上下文');
+        // Range 从同一个格式节点内开始/结束时，cloneContents 可能只有文字。
+        // 同时检查边界祖先，避免把用户新增的粗体、链接或样式当成纯文本归一化。
+        for (const boundary of [first[0], last[0]]) {
+          let parent = boundary.parentNode;
+          while (parent && parent !== node) {
+            const attributes = Array.from(parent.attributes || []);
+            const style = parent.getAttribute?.('style');
+            if (!['P', 'DIV'].includes(parent.tagName) || attributes.some(attribute => attribute.name !== 'style') ||
+                (style && !/^\s*white-space\s*:\s*pre-wrap\s*;?\s*$/iu.test(style))) {
+              throw new Error('上下文的富文本结构已变化，请手动移除');
+            }
+            parent = parent.parentNode;
+          }
+          if (parent !== node) throw new Error('输入框结构已变化，请手动移除上下文');
+        }
         const range = this.doc.createRange();
         range.setStart(...first); range.setEnd(...last);
         if (range.cloneContents().querySelector('*')) throw new Error('上下文中包含新增或重排的富文本节点，请手动移除');
