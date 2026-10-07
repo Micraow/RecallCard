@@ -526,3 +526,29 @@ test('跨会话选文：原始出处仍在读取时不先展示记忆，完成�
   assert.match(ui.one('.source-details').textContent, /已核对来源/);
   assert.equal(copyCount(ui), 0); ui.noWrites();
 });
+
+test('跨会话选文：同会话的选择框用位置、角色和原话短摘录明确区分', async t => {
+  const ui = await open(t); await carry(ui);
+  const names = checks(ui).map(node => node.getAttribute('aria-label'));
+  assert.equal(new Set(names).size, names.length);
+  assert.match(names[0], /^带上资料：第 1 条，用户原话，合成会话 1，/);
+  assert.match(names[1], /^带上资料：第 2 条，AI 回复，合成会话 1，/);
+  assert.ok(names[0].includes(selectedContextRecords[0].text));
+  assert.ok(names[1].includes(selectedContextRecords[1].text));
+  assert.match(names[2], /第 3 条，整理记忆/);
+  assert.doesNotMatch(names[2], /^带上资料：第 3 条，用户原话，/);
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});
+
+test('跨会话选文：选择框的长标题和正文只保留短摘录，恶意标记不能成为节点', async t => {
+  const ui = await open(t, { configure(native) {
+    native.data.searchResults[0].conversation_title = hostile + '长标题'.repeat(100);
+    native.data.searchResults[0].text = hostile + '长正文'.repeat(100);
+  } });
+  await carry(ui);
+  const name = checks(ui)[0].getAttribute('aria-label');
+  assert.ok(name.length < 160);
+  assert.match(name, /第 1 条，用户原话/);
+  assert.equal(ui.one('.results').querySelectorAll('img,script,iframe').length, 0);
+  assert.equal(copyCount(ui), 0); ui.noWrites();
+});
