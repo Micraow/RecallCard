@@ -1,21 +1,21 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>RecallCard 手动上下文桥</title><link rel="stylesheet" href="popup.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>RecallCard 浏览器扩展</title><link rel="stylesheet" href="popup.css"></head>
 <body>
-  <header><h1>RecallCard</h1><span>本机只读 · 手动发送</span></header>
-  <p class="notice">不会读取聊天回复。请手动粘贴模型给出的完整请求，先检查预览，再决定是否把资料放入当前对话网站的输入框。最后由你自己点击网页发送。</p>
+  <header><h1>RecallCard</h1><span>把资料带进当前对话</span></header>
+  <p class="notice">先准备使用说明；模型需要资料时，粘贴它给出的完整资料请求。</p>
   <p id="status" role="status" aria-live="polite">正在确认当前标签页…</p>
-  <div class="row"><button id="bootstrap" type="button">准备 Bootstrap</button><button id="reset" class="secondary" type="button">重置 / 重新附上说明</button></div>
-  <details><summary>当前会话关联信息</summary><pre id="binding"></pre></details>
-  <label for="action">手动粘贴 recallcard-action 代码块</label>
-  <textarea id="action" rows="7" spellcheck="false" placeholder="粘贴包含起止围栏的完整 JSON 请求"></textarea>
-  <button id="execute" type="button">验证并读取本机资料</button>
-  <label for="preview">发送前预览（可选中并手动复制）</label>
+  <div class="row"><button id="bootstrap" type="button">准备使用说明</button><button id="reset" class="secondary" type="button">重新连接当前对话</button></div>
+  <details><summary>连接信息</summary><pre id="binding"></pre></details>
+  <label for="action">模型的资料请求</label>
+  <textarea id="action" rows="7" spellcheck="false" placeholder="粘贴完整 recallcard-action 代码块（含首尾标记）"></textarea>
+  <button id="execute" type="button">查找资料</button>
+  <label for="preview">资料预览</label>
   <textarea id="preview" readonly rows="10" spellcheck="false" aria-describedby="privacy"></textarea>
-  <p id="privacy" class="muted">插入会让当前对话网站接触这些资料；即使尚未发送，也请先检查隐私。这里只表示已准备草稿，不代表模型已读到。</p>
-  <div class="row"><button id="insert" type="button">已检查，追加到草稿</button><button id="remove" class="secondary" type="button">仅移除我的上下文</button></div>
-  <button id="delivered" class="secondary" type="button">我已亲自点击网页发送</button>
-  <p class="muted">支持 ChatGPT，以及实验性 Qwen、Z.ai 适配。DeepSeek 暂未启用。实验平台初次使用、切换对话或不确定时，须先点击重置。地址与输入框不变不证明仍是同一对话。页面结构变化时会停止插入。可从预览手动复制。切换会话后须重新加载说明。</p>
+  <p id="privacy" class="muted">加入草稿后，当前网站即可读取这些资料。确认可以分享后，再在网页点击发送。</p>
+  <div class="row"><button id="insert" type="button">加入草稿</button><button id="remove" class="secondary" type="button">移除已加入的资料</button></div>
+  <button id="delivered" class="secondary" type="button">我已发送</button>
+  <details><summary>使用帮助</summary><p class="muted">支持 ChatGPT，以及实验性 Qwen、Z.ai。切换对话后，请重新连接并准备使用说明。无法插入时，可复制预览中的资料。DeepSeek 暂未支持。</p></details>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

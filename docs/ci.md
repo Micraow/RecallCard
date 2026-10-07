@@ -16,3 +16,14 @@ CI 对 Linux、Windows、macOS 分别执行 Rust 格式、严格 Clippy 与完�
 ## Windows worker fixture 的启动竞争
 
 文档提交的复跑曾在 Windows 触发多个 Python 冷启动同时争抢资源，使语义用例的 3 秒成功窗口误触发既有的正常降级。测试现串行安排独立进程 fixture，并给成功/握手场景 10 秒准备窗口；同一个用例里的并发查询、撤权/修订、100 毫秒超时、阻塞 stdin 与快速忙碌降级检查仍保持。没有修改生产默认时限，没有跳过用例，也没有把运行失败当作通过。
+
+
+## 桌面验收与 Actions 用量
+
+日常开发先在 dot 云电脑运行编译、Clippy、相关 Rust/Python/Node 测试。普通 main 提交和文档修改不自动启动全平台矩阵。核心、独立浏览器和独立桌面工作流可以手动启动；只有相应 `validate/core-*`、`validate/browser-*`、`validate/gui-*` 验收分支自动触发，PR 仍保留相关检查。
+
+Linux 安装包工作流只在手动启动或 `validate/desktop-*` 分支上执行，一次完成正式构建、界面回归、真实 Tauri/原生文件选择器操作和 AppImage/deb 打包。它采用 Ubuntu 22.04 基线，收集非空文件、版本/提交号和校验清单，保存 Actions artifacts，不创建 Release、不推送别的仓库。Cargo 缓存复用依赖；同工作流同分支的新运行取消旧运行。
+
+云电脑已经能编译 Tauri，但其系统未安装标准路径 WebKit 辅助进程且没有 sudo；因此这一次标准 Linux 运行环境与安装包验收保留在 Actions。不能把本地未执行的原生检查标成通过，也不会为每次细小文案改动重新跑全矩阵。
+
+打包安排参考用户提供的 [Nexus package.yml](https://github.com/Micraow/nexus/blob/main/.github/workflows/package.yml) 和 [MoonBridge-GUI release.yml](https://github.com/Micraow/MoonBridge-GUI/blob/main/.github/workflows/release.yml) 的系统基线与产物组织，没有复制发布、跨仓库同步、更新服务或 AUR 步骤。

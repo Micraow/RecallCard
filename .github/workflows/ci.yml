@@ -1,7 +1,13 @@
 name: 跨平台验证
 on:
+  workflow_dispatch:
   push:
+    branches: ["validate/core-*"]
   pull_request:
+    paths: ["crates/**", "Cargo.*", "python/**", "extension/**", ".github/workflows/ci.yml"]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:

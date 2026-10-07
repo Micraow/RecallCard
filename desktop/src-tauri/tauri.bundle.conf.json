@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "active": true,
+    "targets": ["appimage", "deb"],
+    "category": "Utility",
+    "shortDescription": "保存、查找和整理个人对话与记忆",
+    "longDescription": "RecallCard 中文桌面资料库：直接粘贴文字、导入对话、查找原文与出处，以及审阅整理结果。",
+    "icon": ["icons/icon.png"],
+    "resources": {"distribution/": "说明与许可证/"},
+    "linux": {"deb": {"depends": ["git", "libgtk-3-0", "libwebkit2gtk-4.1-0"]}}
+  }
+}

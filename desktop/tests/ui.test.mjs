@@ -68,6 +68,8 @@ async function fixture(t) {
     switch (command) {
       case 'choose_vault': case 'vault_status': return vault;
       case 'cancel_previews': return null;
+      case 'preview_note': return { preview_id: 'synthetic-note', session_id: vault.session_id, scope: payload.scope, content: payload.content, redacted: false };
+      case 'confirm_note': return { ref: eventRef, event };
       case 'browse_records': case 'search_records': return {
         results: payload.scope === 'personal' ? [
           { ref: eventRef, text: '事件检索片段', occurred_at: event.occurred_at },
@@ -127,7 +129,10 @@ async function fixture(t) {
   return { page, native };
 }
 
-const clickButton = (page, name) => page.getByRole('button', { name, exact: true }).click();
+async function clickButton(page, name) {
+  if (name === '选择文件并预览' && !await page.locator('#file-import-details').evaluate(node => node.open)) await page.locator('#file-import-details > summary').click();
+  return page.getByRole('button', { name, exact: true }).click();
+}
 async function idle(page) {
   await page.waitForFunction(() => document.querySelector('#operation').textContent === '准备就绪');
 }
@@ -141,7 +146,7 @@ async function navigate(page, name) {
   await idle(page);
 }
 async function previewImport(page) {
-  await navigate(page, '导入资料');
+  await navigate(page, '添加资料');
   await clickButton(page, '选择文件并预览');
   await page.getByRole('heading', { name: '确认导入', exact: true }).waitFor();
   await idle(page);
@@ -159,6 +164,7 @@ async function selectRecord(page, reference) {
 async function assertNoWrite(native) {
   assert.equal(native.count('confirm_import'), 0);
   assert.equal(native.count('apply_dream'), 0);
+  assert.equal(native.count('confirm_note'), 0);
 }
 
 test('首次打开和切换资料库时取消文件选择，不创建或丢失当前 Vault', async t => {
@@ -226,7 +232,7 @@ test('取消导入预览同时废弃原生待确认操作，往返页面不恢�
   assert.deepEqual(native.matching('cancel_previews').at(-1),
     { command: 'cancel_previews', payload: { sessionId: vault.session_id } });
   await navigate(page, '概览');
-  await navigate(page, '导入资料');
+  await navigate(page, '添加资料');
   assert.equal(await page.getByRole('heading', { name: '确认导入', exact: true }).count(), 0);
   native.next('pick_import', null);
   await clickButton(page, '选择文件并预览');
@@ -264,17 +270,17 @@ test('Dream 展示扁平化前后内容，受保护记忆需额外勾选和最�
   assert.equal(await page.locator('.change .before').textContent(), `之前\n${memory.content}`);
   assert.equal(await page.locator('.change .after').textContent(), '之后\n经过审阅的新记忆正文。');
   assert.equal(await page.locator('.change .ref').textContent(), eventRef);
-  await clickButton(page, '确认发布本次变更');
+  await clickButton(page, '保存这些记忆');
   assert.equal(await page.locator('#modal').evaluate(node => node.open), false);
   assert.match(await page.locator('#notice').textContent(), /请先勾选受保护记忆/);
   await assertNoWrite(native);
   await page.locator('#protected-approval').check();
-  await clickButton(page, '确认发布本次变更');
+  await clickButton(page, '保存这些记忆');
   await assertNoWrite(native);
   await page.locator('#modal').getByRole('button', { name: '取消', exact: true }).click();
   await assertNoWrite(native);
-  await clickButton(page, '确认发布本次变更');
-  await page.locator('#modal').getByRole('button', { name: '确认发布', exact: true }).click();
+  await clickButton(page, '保存这些记忆');
+  await page.locator('#modal').getByRole('button', { name: '确认保存', exact: true }).click();
   await idle(page);
   assert.deepEqual(native.matching('apply_dream'), [{ command: 'apply_dream', payload: {
     sessionId: vault.session_id, previewId: dreamPreview.preview_id, approveProtected: true,
@@ -303,7 +309,7 @@ test('取消 Dream 审阅废弃原生预览，冲突或已发布结果不能再�
     native.next('pick_dream', { ...dreamPreview, review });
     await clickButton(page, '选择结果并审阅');
     await idle(page);
-    assert.equal(await page.getByRole('button', { name: '确认发布本次变更', exact: true }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: '保存这些记忆', exact: true }).count(), 0);
   }
   await assertNoWrite(native);
 });
@@ -332,7 +338,8 @@ test('导入文件名、正文、Dream 诊断与变更中的恶意标记保持�
 test('耗时文件选择禁用重复操作、切换资料库和快捷键，结束后恢复', async t => {
   const { page, native } = await fixture(t);
   await openVault(page);
-  await navigate(page, '导入资料');
+  await navigate(page, '添加资料');
+  if (!await page.locator('#file-import-details').evaluate(node => node.open)) await page.locator('#file-import-details > summary').click();
   const release = native.holdNext('pick_import');
   await page.getByRole('button', { name: '选择文件并预览', exact: true }).evaluate(button => {
     button.click(); button.click();
@@ -341,7 +348,7 @@ test('耗时文件选择禁用重复操作、切换资料库和快捷键，结�
   assert.equal(native.count('pick_import'), 1);
   assert.equal(await page.locator('button:not([disabled]), input:not([disabled]), select:not([disabled])').count(), 0);
   await page.keyboard.press('Control+k');
-  assert.equal(await page.locator('#location').textContent(), '导入资料');
+  assert.equal(await page.locator('#location').textContent(), '添加资料');
   release(importPreview);
   await idle(page);
   assert.equal(await page.locator('#switch-vault').isEnabled(), true);
@@ -364,7 +371,7 @@ test('切换范围清除选中来源、阅读结果与两类预览，并以新�
   assert.equal(await page.locator('.changes').count(), 0);
   assert.equal(await page.getByRole('button', { name: '导出本次来源包', exact: true }).count(), 0);
   assert.equal(await page.getByRole('button', { name: '移除', exact: true }).count(), 0);
-  await navigate(page, '导入资料');
+  await navigate(page, '添加资料');
   assert.equal(await page.getByRole('textbox', { name: '导入范围', exact: true }).inputValue(), 'work');
   assert.equal(await page.getByRole('heading', { name: '确认导入', exact: true }).count(), 0);
   await navigate(page, '查找与阅读');
@@ -377,7 +384,7 @@ test('切换范围清除选中来源、阅读结果与两类预览，并以新�
 test('原生操作失败后解除忙碌状态并保留当前 Vault，可重新预览', async t => {
   const { page, native } = await fixture(t);
   await openVault(page);
-  await navigate(page, '导入资料');
+  await navigate(page, '添加资料');
   native.failNext('pick_import', '文件已改变，请重新选择');
   await clickButton(page, '选择文件并预览');
   await idle(page);
@@ -396,12 +403,12 @@ test('完整记录或出处超出读取预算时显示片段和明确提示，�
   native.next('read_record', { results: [], truncated: true, pending_refs: [eventRef] });
   await selectRecord(page, eventRef);
   assert.equal(await page.locator('.reading-pane .body-text').textContent(), '事件检索片段');
-  assert.match(await page.locator('.reading-pane .hint').textContent(), /有界片段/);
-  assert.match(await page.locator('#notice').textContent(), /超过桌面读取上限，显示搜索片段/);
+  assert.match(await page.locator('.reading-pane .hint').textContent(), /部分内容/);
+  assert.match(await page.locator('#notice').textContent(), /记录较长，先显示部分内容/);
   native.next('read_sources', { results: [], truncated: true, pending_refs: [memoryRef] });
   await selectRecord(page, memoryRef);
   assert.equal(await page.locator('.reading-pane .body-text').textContent(), memory.content);
-  assert.match(await page.locator('#notice').textContent(), /出处较长，本次未能显示全部/);
+  assert.match(await page.locator('#notice').textContent(), /出处较长，完整内容保存在资料库文件中/);
   assert.equal(await page.locator('.reading-pane .sample').count(), 0);
 });
 
@@ -416,11 +423,31 @@ test('切换到无效 Vault 后清除失效会话和预览，不能继续提交�
   await idle(page);
   assert.equal(await page.locator('#vault-badge').textContent(), '尚未打开资料库');
   assert.match(await page.locator('#notice').textContent(), /无法打开资料库/);
-  await navigate(page, '导入资料');
-  assert.equal(await page.getByRole('heading', { name: '先打开一个资料库', exact: true }).count(), 1);
+  await navigate(page, '添加资料');
+  assert.equal(await page.getByRole('heading', { name: '打开资料库', exact: true }).count(), 1);
   assert.equal(await page.getByRole('button', { name: '确认导入 2 条记录', exact: true }).count(), 0);
   await navigate(page, '整理记忆');
   assert.equal(await page.locator('.changes').count(), 0);
-  assert.equal(await page.getByRole('button', { name: '确认发布本次变更', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: '保存这些记忆', exact: true }).count(), 0);
   await assertNoWrite(native);
+});
+
+
+test('默认入口直接粘贴文字，预览后确认保存并进入查找，无需选择文件', async t => {
+  const { page, native } = await fixture(t);
+  await openVault(page);
+  await navigate(page, '添加资料');
+  assert.equal(await page.locator('#file-import-details').evaluate(node => node.open), false);
+  await page.locator('#note-content').fill('合成首条记录：周末整理书单');
+  await clickButton(page, '预览并保存'); await idle(page);
+  assert.equal(await page.locator('.note-preview').textContent(), '合成首条记录：周末整理书单');
+  assert.equal(native.count('confirm_note'), 0); assert.equal(native.count('pick_import'), 0);
+  await clickButton(page, '返回修改'); await idle(page);
+  assert.equal(await page.locator('#note-content').inputValue(), '合成首条记录：周末整理书单');
+  await page.locator('#note-content').fill('合成首条记录：周日整理书单');
+  await clickButton(page, '预览并保存'); await idle(page);
+  await clickButton(page, '确认保存记录'); await idle(page);
+  assert.deepEqual(native.matching('confirm_note')[0].payload, { sessionId: vault.session_id, previewId: 'synthetic-note' });
+  assert.equal(await page.locator('#location').textContent(), '查找与阅读');
+  assert.equal(native.count('confirm_note'), 1); assert.equal(native.count('pick_import'), 0);
 });

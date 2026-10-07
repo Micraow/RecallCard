@@ -21,6 +21,7 @@ def main():
     parser.add_argument('--metadata', type=Path, required=True)
     parser.add_argument('--commit', required=True)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--profile', choices=['dev','release'], default='dev')
     args = parser.parse_args()
     if not re.fullmatch(r'[a-f0-9]{40}', args.commit):
         parser.error('commit 必须是完整提交摘要')
@@ -64,7 +65,7 @@ def main():
         notices.append({'name':package['name'],'version':package['version'],'license':package.get('license'),'repository':package.get('repository'),'source_archive':f"https://crates.io/api/v1/crates/{package['name']}/{package['version']}/download",'included_files':[p.name for p in sorted(paths)]})
     files['third-party-licenses/补充来源说明.md'] = ((ROOT/'desktop/third-party-licenses/README.md').read_bytes(), False)
     files['third-party-licenses/index.json'] = (json.dumps(notices,ensure_ascii=False,indent=2).encode(),False)
-    info = {'application':'RecallCard Desktop 0.1.0','commit':args.commit,'target':'linux-x86_64','profile':'dev (debug=0, unoptimized)','gui_sha256':digest(files['recallcard-desktop'][0]),'cli_sha256':digest(files['recallcard'][0]),'requires':['Git','GLIBC >= 2.39','GTK 3','WebKitGTK 4.1'],'note':'系统运行库由系统包管理器提供；本包不包含任何用户资料、凭据、浏览器状态或可选API配置。'}
+    info = {'application':'RecallCard Desktop 0.1.0','commit':args.commit,'target':'linux-x86_64','profile':args.profile,'gui_sha256':digest(files['recallcard-desktop'][0]),'cli_sha256':digest(files['recallcard'][0]),'requires':['Git','GLIBC >= 2.39','GTK 3','WebKitGTK 4.1'],'note':'系统运行库由系统包管理器提供；本包不包含任何用户资料、凭据、浏览器状态或可选API配置。'}
     files['build-info.json'] = (json.dumps(info,ensure_ascii=False,indent=2).encode(),False)
     files['SHA256SUMS'] = (''.join(f'{digest(data)}  {name}\n' for name,(data,_) in sorted(files.items())).encode(),False)
     args.out.mkdir(parents=True,exist_ok=True)

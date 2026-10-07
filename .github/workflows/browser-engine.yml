@@ -1,6 +1,8 @@
 name: 浏览器原生 DOM 回归
 on:
+  workflow_dispatch:
   push:
+    branches: ["validate/browser-*"]
     paths:
       - 'extension/**'
       - '.github/workflows/browser-engine.yml'
@@ -8,6 +10,9 @@ on:
     paths:
       - 'extension/**'
       - '.github/workflows/browser-engine.yml'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
