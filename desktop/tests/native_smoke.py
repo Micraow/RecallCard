@@ -106,10 +106,10 @@ class WebDriver:
                 if not safe or attempt == 2:
                     raise
                 time.sleep(0.15 * (attempt + 1))
-        value = result.get("value")
-        if isinstance(value, dict) and "error" in value:
-            raise DriverError(json.dumps(value, ensure_ascii=False))
-        return value
+        # W3C WebDriver 协议错误由 HTTP 4xx/5xx 表达，已在 HTTPError 分支拒绝。
+        # execute/sync 成功时的 value 是页面自己的 JSON，允许含 error:null 等字段。
+        # 不把页面数据的字段名当作驱动失败，真实应用错误仍由调用方逐项断言。
+        return result.get("value")
 
     def command(self, method, path, data=None):
         return self.request(method, f"/session/{self.session}{path}", data)

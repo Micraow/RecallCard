@@ -502,6 +502,7 @@ test('导入内的新笔记先预览再保存并进入查找，无需选择文�
 
 test('导入格式保留选择，会话可预览并为另一个AI准备交接',async t=>{
   const {page,native}=await fixture(t);await openVault(page);await openImport(page);
+  await expandDetails(page, '#file-import-details');
   await page.locator('#import-format').selectOption('recallcard-conversation');await idle(page);
   assert.equal(await page.locator('#import-format').inputValue(),'recallcard-conversation');
   await button(page,'选择文件并预览');await idle(page);assert.equal(native.matching('pick_import').at(-1).payload.format,'recallcard-conversation');
@@ -725,6 +726,12 @@ test('空资料库显示导入空状态，不制造默认会话或原话', async
   native.next('choose_vault', { ...vault, event_count: 0, memory_count: 0 });
   native.next('list_conversations', { conversations: [], total: 0, next_offset: null });
   await openVault(page);
+  assert.equal(await page.getByRole('heading', { name: '导入会话', exact: true }).count(), 1);
+  assert.equal(await page.getByRole('button', { name: '选择导出文件', exact: true }).isVisible(), true);
+  assert.equal(native.count('list_conversations'), 0, '首次空库直接提供导入入口');
+  assert.equal(await page.locator('.conversation-message').count(), 0);
+  assert.equal(native.count('conversation_messages'), 0);
+  await navigate(page, '会话');
   assert.equal(await page.getByRole('heading', { name: '还没有保存的会话', exact: true }).count(), 1);
   assert.equal(await page.locator('.conversation-message').count(), 0);
   assert.equal(native.count('conversation_messages'), 0);

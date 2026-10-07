@@ -1,0 +1,105 @@
+name: 复用集成候选的界面验收
+on:
+  workflow_dispatch:
+  push:
+    branches: ["validate/gui-import-results-20261007"]
+concurrency:
+  group: integrated-recheck-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native:
+    name: 原编译程序 / 37步真实窗口复验
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 核对应用源码与原构建完全一致
+        run: git diff --exit-code 03f4b635862b38394abd319d4d76a532e1d90959 -- crates Cargo.toml Cargo.lock desktop/ui desktop/src-tauri
+      - name: 验收驱动与传输合同
+        run: python3 -m unittest discover -s desktop/tests -p "test_native_*.py" -v
+      - name: 核对原编译提交、已通过步骤与固定产物
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runId = 37698444647;
+            const {data: run} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: runId});
+            if (run.head_sha !== '03f4b635862b38394abd319d4d76a532e1d90959') throw new Error('原构建提交不符');
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({...context.repo, run_id: runId, per_page: 100});
+            const job = jobs.jobs.find(item => item.id === 113055829696 && item.name === 'Linux / Tauri 桌面应用');
+            for (const name of ['安装官方系统依赖', 'Run cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check', 'Run cargo clippy --locked --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings', 'Run cargo build --locked --manifest-path desktop/src-tauri/Cargo.toml', '编译合成资料库初始化 CLI']) {
+              if (!job?.steps.some(step => step.name === name && step.conclusion === 'success')) throw new Error('原构建步骤未通过：' + name);
+            }
+            const {data: artifacts} = await github.rest.actions.listWorkflowRunArtifacts({...context.repo, run_id: runId, per_page: 100});
+            const artifact = artifacts.artifacts.find(item => item.id === 11517105753);
+            if (!artifact || artifact.expired || artifact.name !== 'RecallCard-gui-diagnostic-binaries-03f4b635862b38394abd319d4d76a532e1d90959' || artifact.digest !== 'sha256:26d2ea3e775f33360dd8a71a4c4ea50c2c7851c68a0fb65af13715e0e8354500') throw new Error('固定编译产物不可验证');
+      - uses: actions/download-artifact@v4
+        with:
+          name: RecallCard-gui-diagnostic-binaries-03f4b635862b38394abd319d4d76a532e1d90959
+          run-id: '37698444647'
+          github-token: ${{ github.token }}
+          path: compiled
+      - name: 核对实际程序摘要后启用执行权限
+        run: |
+          printf '%s  %s\n' 'f76e923fdbee19ee16f28ad50fc260b2a08fdc52e7cbedd5c630ab5887d242fb' compiled/recallcard-desktop '8e58de814c9e47309aa61e800686d799389971005671fd6fb643026397c17a78' compiled/recallcard | sha256sum --check --strict
+          chmod 755 compiled/recallcard-desktop compiled/recallcard
+      - name: 安装官方原生运行依赖
+        timeout-minutes: 16
+        run: |
+          source_list="$RUNNER_TEMP/recallcard-ubuntu-official.list"
+          cat > "$source_list" <<'EOF'
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy-updates main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu jammy-security main universe
+          EOF
+          apt_options=(-o "Dir::Etc::sourcelist=$source_list" -o Dir::Etc::sourceparts=- -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          for attempt in 1 2; do
+            if sudo timeout --kill-after=30s 3m apt-get "${apt_options[@]}" --error-on=any update; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then exit 1; fi
+            sleep 5
+          done
+          sudo timeout --kill-after=30s 8m apt-get "${apt_options[@]}" install -y --no-install-recommends libwebkit2gtk-4.1-0 libgtk-3-0 webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
+      - name: 复验真实窗口与原生交接恢复闭环
+        timeout-minutes: 8
+        env:
+          LANG: C.UTF-8
+          GDK_BACKEND: x11
+        run: dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" /usr/bin/python3 desktop/tests/native_smoke.py --application "$PWD/compiled/recallcard-desktop" --cli "$PWD/compiled/recallcard" --artifacts "$RUNNER_TEMP/recallcard-integrated-native"
+      - name: 保存本轮原生截图与诊断
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-integrated-native-recheck-${{ github.sha }}
+          path: ${{ runner.temp }}/recallcard-integrated-native/
+          if-no-files-found: ignore
+          retention-days: 14
+  interface:
+    name: 中文界面交互回归
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: extension
+      - run: npx playwright install --with-deps chromium
+        working-directory: extension
+      - run: node --test desktop/tests/*.test.js desktop/tests/*.test.mjs
+        env:
+          RECALLCARD_BROWSER_ARTIFACTS: ${{ runner.temp }}/recallcard-gui-browser
+      - name: 保存 Chromium 窗口与布局证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recallcard-gui-browser-${{ github.sha }}
+          path: ${{ runner.temp }}/recallcard-gui-browser/
+          if-no-files-found: ignore
+          retention-days: 14
