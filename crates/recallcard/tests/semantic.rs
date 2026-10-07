@@ -564,7 +564,13 @@ fn persistent_worker_is_reused_and_specific_failure_codes_are_safe() {
             "available"
         );
     }
-    assert_eq!(fs::read_to_string(&starts).unwrap(), "start\n");
+    assert_eq!(
+        fs::read_to_string(&starts)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["start"]
+    );
     for (worker_code, expected) in [
         ("missing_key", "key_unavailable"),
         ("network_budget_exhausted", "network_budget_exhausted"),
@@ -700,6 +706,18 @@ fn cli_mcp_reuses_real_worker_query_cache_and_budget_with_fake_provider() {
     .unwrap();
     fallback(&budget_response, "network_budget_exhausted");
     assert_eq!(responses[4]["result"]["isError"], true);
-    assert_eq!(fs::read_to_string(starts).unwrap(), "start\n");
-    assert_eq!(fs::read_to_string(network_calls).unwrap(), "call\n");
+    assert_eq!(
+        fs::read_to_string(starts)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["start"]
+    );
+    assert_eq!(
+        fs::read_to_string(network_calls)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["call"]
+    );
 }
