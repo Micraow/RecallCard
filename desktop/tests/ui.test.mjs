@@ -372,7 +372,7 @@ test('切换范围清除选中来源、阅读结果与两类预览，并以新�
   assert.equal(await page.getByRole('button', { name: '导出本次来源包', exact: true }).count(), 0);
   assert.equal(await page.getByRole('button', { name: '移除', exact: true }).count(), 0);
   await navigate(page, '添加资料');
-  assert.equal(await page.getByRole('textbox', { name: '导入范围', exact: true }).inputValue(), 'work');
+  assert.equal(await page.locator('#import-scope').inputValue(), 'work');
   assert.equal(await page.getByRole('heading', { name: '确认导入', exact: true }).count(), 0);
   await navigate(page, '查找与阅读');
   assert.deepEqual(native.matching('browse_records').at(-1).payload,
