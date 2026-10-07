@@ -23,7 +23,9 @@ RecallCard 是本地优先、文件原生的个人上下文层。Rust 主程序�
 
 ## 快速开始
 
-需要 Rust 1.89+ 和 Git：
+拿到 Linux 开发包后，按 [Linux 首次使用 v0.3](docs/quickstart-linux-v0.3.md) 直接运行；核心不需要 Rust/Python/Node，先用包内合成资料完成离线检索。
+
+从源码构建需要 Rust 1.89+ 和 Git：
 
 ```bash
 cargo build --release
