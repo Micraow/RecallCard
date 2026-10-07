@@ -111,3 +111,27 @@ test('隐藏 mobile 不阻止唯一旧版输入框，两个可见候选中只读
   mobile.visible=true;node.readOnly=true;assert.throws(()=>adapter.insert(capsule),/唯一/);
   assert.equal(node.value,'旧版草稿');assert.equal(mobile.value,'隐藏草稿');
 });
+
+test('编辑器重建注入段并增加格式时，纯文本 Range 不能授权删除用户格式',()=>{
+  const {node,doc,adapter}=setup('DIV');
+  adapter.insert(capsule);
+  const original=node.children[0];const block=original.textContent;original.remove();
+  const formatted=new Element('STRONG');formatted.textContent=block;node.append(formatted);
+  const textNode={textContent:block,parentNode:formatted};
+  doc.defaultView.NodeFilter={SHOW_TEXT:4};
+  doc.createTreeWalker=()=>{let done=false;return{nextNode(){if(done)return null;done=true;return textNode;}};};
+  let deleted=false;
+  doc.createRange=()=>({setStart(){},setEnd(){},cloneContents(){return{querySelector(){return null;}};},deleteContents(){deleted=true;formatted.textContent='';}});
+  assert.throws(()=>adapter.remove(capsule.id),/富文本|结构|手动/);
+  assert.equal(deleted,false);assert.equal(formatted.textContent,block);
+});
+
+test('无格式的纯文本段重建后仍能只撤销完整注入块',()=>{
+  const {node,doc,adapter}=setup('DIV');adapter.insert(capsule);
+  const original=node.children[0];const block=original.textContent;original.remove();
+  const paragraph=new Element('P');paragraph.textContent=block;node.append(paragraph);
+  const textNode={textContent:block,parentNode:paragraph};doc.defaultView.NodeFilter={SHOW_TEXT:4};
+  doc.createTreeWalker=()=>{let done=false;return{nextNode(){if(done)return null;done=true;return textNode;}};};
+  doc.createRange=()=>({setStart(){},setEnd(){},cloneContents(){return{querySelector(){return null;}};},deleteContents(){paragraph.textContent='';}});
+  assert.equal(adapter.remove(capsule.id).status,'removed');assert.equal(node.textContent,'');
+});

@@ -43,18 +43,18 @@
 - Hook 回归既调用库，也直接启动 RecallCard CLI；不运行外部 Agent，不自动安装配置
 - 对应 [浏览器适配](browser-adapters-v0.3.md) 与 [生命周期 Hook](agent-hooks-v0.3.md) 文档说明实机验证边界
 
-## 已接线、等待平台 CI：本机 IPC 与语义检索
+## 已实现并通过三平台 CI：本机 IPC 与语义检索
 
 - Unix socket / Windows named pipe 只读 daemon，Vault/scope 固定绑定、有界帧、超时、私有端点与单实例保护
 - MCP、Native host 与生成的固定 Native 配置可选择 IPC；服务不可用时返回错误，不暗自换回直接读盘
 - Rust 监督 Python worker，兼容空间/当前 generation 校验、融合排序、等待后再检查权限/有效期；错误或超时退回文本检索
 - `search`、本地 `mcp`、`daemon` 的语义配置由可信启动参数指定；默认离线，云 query 需单独明确配置授权
 - 本机云终端底层拒绝 Unix socket bind（EPERM），包括标准库最小 bind；授权后的相同测试仍受限，真实 IPC 测试保留在 CI 中，不跳过也不记为通过
-- 该段先在验证分支运行现有三平台 CI，成功后才推进 main；详见 [IPC](ipc-v0.3.md) 和 [语义检索](semantic-search-v0.3.md)
+- 该段验证分支和 main 的 Linux/macOS/Windows、Python、Node CI 全部成功，main=9061a9d；Linux完整208项Rust实跑通过，平台专属数量以各runner日志为准。详见 [IPC](ipc-v0.3.md) 和 [语义检索](semantic-search-v0.3.md)
 
 ## 下一步与未完成范围
 
-1. 本机 IPC 与语义后端的远端平台回归，以及真实安装验证
+1. 本机 IPC 与语义后端的真实安装验证
 2. 实际 Agent 首次/恢复/compact 后加载，以及扩展安装后的真实网页端到端验证
 3. 大型资料库持久增量索引与性能验证；当前每次读取正本构建文本快照
 
@@ -67,3 +67,7 @@
 - Native 安装链路已做合成进程测试，Windows/macOS 真实浏览器注册与运行尚未验收
 - 没有真实云 API 费用、embedding 效果、记忆准确率或前缀缓存命中数据
 - Hook 适配代码及真实 RecallCard 子进程合同已验证；尚未运行实际 Claude Code 宿主启动/压缩，不能把 fixture 成功写成真实宿主验收
+
+## 富文本撤销后续修复
+
+已复现并修复编辑器重建注入段后遗漏用户新增格式的撤销判断。Node从74增至76项全过，新增8项真实Chromium合成页面回归，先走独立验证分支；见 [原生 DOM 回归](browser-engine-v0.3.md)。合成浏览器测试不替代登录态网页验收。

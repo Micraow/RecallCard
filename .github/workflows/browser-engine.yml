@@ -1,0 +1,30 @@
+name: 浏览器原生 DOM 回归
+on:
+  push:
+    paths:
+      - 'extension/**'
+      - '.github/workflows/browser-engine.yml'
+  pull_request:
+    paths:
+      - 'extension/**'
+      - '.github/workflows/browser-engine.yml'
+permissions:
+  contents: read
+jobs:
+  chromium:
+    name: 合成页面 / Chromium
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
