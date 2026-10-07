@@ -349,7 +349,7 @@ function importPage() {
   }
   const preview = state.importPreview;
   if (!preview) return;
-  const box = $('section', { class: 'panel file-preview' }, $('div', { class: 'section-heading' }, $('h2', {}, '确认导入'), $('span', { class: 'badge' }, '尚未写入')), $('div', { class: 'file-name' }, preview.file_name), line('解析到的记录', `${preview.event_count} 条`), line('写入范围', preview.scope), line('文件大小', `${(preview.byte_count / 1024).toFixed(1)} KiB`));
+  const box = $('section', { class: 'panel file-preview' }, $('div', { class: 'section-heading' }, $('h2', {}, '确认导入'), $('span', { class: 'badge' }, '尚未写入')), $('div', { class: 'file-name' }, preview.file_name), line('解析到的记录', `${preview.event_count} 条`), line('写入资料库', state.vault.display_name), line('写入范围', preview.scope), line('文件大小', `${(preview.byte_count / 1024).toFixed(1)} KiB`));
   if (preview.redacted_event_count) box.append(hint(`${preview.redacted_event_count} 条记录包含已遮蔽字段，请检查下方预览。`));
   box.append(paragraph(preview.warning));
   if (preview.conversations?.length) box.append(line('本批会话', preview.conversations.map(c => c.title || c.source_id).join('、')));
@@ -363,22 +363,31 @@ function importPage() {
       sourceTitle ? paragraph(`来源会话：${sourceTitle}`) : null, paragraph(sample.content)));
   }
   if (preview.truncated) box.append(paragraph('预览仅展示部分内容，导入确认后会处理全部已解析记录。'));
-  const confirmChosenImport = () => run('正在导入，完成前请勿关闭应用…', async () => {
-    state.importPreview = null;
-    try {
-      const result = await invoke('confirm_import', { sessionId: state.vault.session_id, previewId: preview.preview_id });
-      state.importSelectedIds = []; state.importSelection = null; state.results = []; background.discard(); state.continuation = null; await refreshStatus();
-      const batch = result.conversations || [];
-      state.importBatch = batch.length ? { conversations: batch, added: result.events_added, duplicates: result.events_duplicates ?? Math.max(0, result.events_seen - result.events_added) } : null;
-      const listed = await invoke('list_conversations', { ...args(), offset: 0 });
-      state.conversations = listed.conversations || []; state.conversationTotal = listed.total; state.conversationListNext = listed.next_offset; state.conversationListOffset = 0;
-      state.viewport['conversations:'] = { list: 0, reader: 0, continuation: 0 };
-      state.conversation = null; state.conversationRows = []; state.page = 'conversations'; state.workspace = 'conversations'; state.mobileDetail = false;
-      const first = batch[0] || state.conversations[0]; if (first) await readConversation(first, 0, () => true);
-      showNotice(`导入完成：新增 ${result.events_added} 条，重复 ${result.events_duplicates ?? Math.max(0, result.events_seen - result.events_added)} 条`);
-    } catch (error) { discardChangedImport(error); throw error; }
-  });
-  box.append($('div', { class: 'button-row' }, button('取消这次导入', () => cancelPreviews()), button(`确认导入 ${preview.event_count} 条记录`, () => confirmDialog('确认写入资料库', `将 ${preview.file_name} 中的 ${preview.event_count} 条记录导入 ${state.vault.display_name} / ${preview.scope}。已存在的相同记录会跳过。`, confirmChosenImport, '确认导入'), true)));
+  const importEpoch = state.epoch;
+  const importSession = state.vault.session_id;
+  const importScope = state.scope;
+  const confirmChosenImport = () => {
+    // 当前预览上的明确按钮就是写入动作；失效或已移除的按钮不能重新提交。
+    if (state.busy || !confirmImport.isConnected || state.page !== 'import' || state.importPreview !== preview
+      || state.epoch !== importEpoch || state.vault?.session_id !== importSession || state.scope !== importScope) return;
+    return run('正在导入，完成前请勿关闭应用…', async () => {
+      state.importPreview = null;
+      try {
+        const result = await invoke('confirm_import', { sessionId: importSession, previewId: preview.preview_id });
+        state.importSelectedIds = []; state.importSelection = null; state.results = []; background.discard(); state.continuation = null; await refreshStatus();
+        const batch = result.conversations || [];
+        state.importBatch = batch.length ? { conversations: batch, added: result.events_added, duplicates: result.events_duplicates ?? Math.max(0, result.events_seen - result.events_added) } : null;
+        const listed = await invoke('list_conversations', { ...args(), offset: 0 });
+        state.conversations = listed.conversations || []; state.conversationTotal = listed.total; state.conversationListNext = listed.next_offset; state.conversationListOffset = 0;
+        state.viewport['conversations:'] = { list: 0, reader: 0, continuation: 0 };
+        state.conversation = null; state.conversationRows = []; state.page = 'conversations'; state.workspace = 'conversations'; state.mobileDetail = false;
+        const first = batch[0] || state.conversations[0]; if (first) await readConversation(first, 0, () => true);
+        showNotice(`导入完成：新增 ${result.events_added} 条，重复 ${result.events_duplicates ?? Math.max(0, result.events_seen - result.events_added)} 条`);
+      } catch (error) { discardChangedImport(error); throw error; }
+    });
+  };
+  const confirmImport = button(`确认导入 ${preview.event_count} 条记录`, confirmChosenImport, true);
+  box.append(paragraph('确认后保存以上记录，已存在的相同记录会跳过。'), $('div', { class: 'button-row' }, button('取消这次导入', () => cancelPreviews()), confirmImport));
   if (selection) box.append(button('返回会话选择', () => run('正在返回会话选择…', async () => {
     state.importPreview = null;
     try { await invoke('return_import_selection', { sessionId: state.vault.session_id, selectionId: selection.selection_id }); } catch (error) { discardChangedImport(error); throw error; }

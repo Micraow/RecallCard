@@ -83,7 +83,7 @@ test('ZIP 会话默认全不选，显示角色计数及跳过范围，恶意标�
   noExecutableMarkup(ui); ui.noWrites();
 });
 
-test('仅提交所选会话，预览保留用户/助手/工具、来源和时间，最终确认只写一次', async t => {
+test('仅提交所选会话，预览保留来源与目的地，一次确认直接写入且重复点击只写一次', async t => {
   const ui = await fixture(t);
   await chooseImport(ui); await previewFirst(ui);
   assert.deepEqual(ui.native.matching('preview_import_selection')[0].payload, {
@@ -96,17 +96,17 @@ test('仅提交所选会话，预览保留用户/助手/工具、来源和时间
     assert.match(sample.textContent, /来源会话：合成第一会话/);
     assert.equal(ui.one('p:last-child', sample).children.length, 0);
   }
+  assert.match(ui.one('.file-preview').textContent, /写入资料库合成资料库.*写入范围personal/);
   ui.noWrites();
-  await ui.click('确认导入 3 条记录'); ui.noWrites();
-  assert.equal(ui.modal().open, true);
-  await ui.click('取消', ui.modal()); ui.noWrites();
-  await ui.click('确认导入 3 条记录');
-  const finish = ui.button('确认导入', ui.modal());
+  const finish = ui.button('确认导入 3 条记录');
   const release = ui.native.hold('confirm_import');
   finish.click(); finish.click();
   assert.equal(ui.native.count('confirm_import'), 1);
   assert.equal(finish.disabled, true);
+  assert.equal(ui.modal().open, false, '预览按钮之后不再打开同义确认窗口');
   release({ events_added: 3, events_seen: 3 }); await ui.idle();
+  finish.disabled = false; finish.click(); await ui.idle();
+  assert.equal(ui.native.count('confirm_import'), 1, '完成后保留的旧按钮也不能重放写入');
   assert.deepEqual(ui.native.matching('confirm_import')[0].payload, {
     sessionId: vault.session_id, previewId: preview.preview_id,
   });

@@ -215,7 +215,7 @@ test('首次打开和切换资料库时取消文件选择，不创建或丢失�
   await assertNoWrite(native);
 });
 
-test('导入预览与取消确认不写入，显式确认只提交一次且使用原预览编号', async t => {
+test('导入预览与取消不写入，一次确认无需弹窗且只提交原预览一次', async t => {
   const { page, native } = await fixture(t);
   await openVault(page);
   await previewImport(page);
@@ -223,23 +223,27 @@ test('导入预览与取消确认不写入，显式确认只提交一次且使�
     { sessionId: vault.session_id, scope: 'personal', format: 'chatgpt-export' });
   await assertNoWrite(native);
   assert.match(await page.locator('.file-preview').textContent(), /尚未写入/);
-  await button(page, '确认导入 2 条记录');
+  assert.match(await page.locator('.file-preview').textContent(), /写入资料库合成资料库.*写入范围personal/);
+  const cancelled = await page.getByRole('button', { name: '确认导入 2 条记录', exact: true }).elementHandle();
+  await button(page, '取消这次导入'); await idle(page);
+  await cancelled.evaluate(node => { node.disabled = false; node.click(); }); await idle(page);
   await assertNoWrite(native);
-  await page.locator('#modal').getByRole('button', { name: '取消', exact: true }).click();
-  await assertNoWrite(native);
-  assert.equal(await page.getByRole('heading', { name: '确认导入', exact: true }).count(), 1);
-  await button(page, '确认导入 2 条记录');
+  assert.equal(await page.getByRole('heading', { name: '确认导入', exact: true }).count(), 0);
+  await previewImport(page);
   const release = native.holdNext('confirm_import');
-  await page.locator('#modal').getByRole('button', { name: '确认导入', exact: true }).evaluate(button => {
+  const confirm = await page.getByRole('button', { name: '确认导入 2 条记录', exact: true }).elementHandle();
+  await confirm.evaluate(button => {
     button.click(); button.click();
   });
   await page.waitForFunction(() => document.querySelector('#operation').textContent.includes('正在导入'));
+  assert.equal(await page.locator('#modal').evaluate(node => node.open), false);
   assert.equal(native.count('confirm_import'), 1);
   assert.deepEqual(native.matching('confirm_import')[0].payload,
     { sessionId: vault.session_id, previewId: importPreview.preview_id });
   assert.equal(await page.locator('#switch-vault').isDisabled(), true);
   release({ events_added: 2, events_seen: 2, events_duplicates: 0, conversation_refs: [conversation.session_ref], conversations: [conversation] });
   await idle(page);
+  await confirm.evaluate(node => { node.disabled = false; node.click(); }); await idle(page);
   assert.equal(native.count('confirm_import'), 1);
   assert.equal(native.count('vault_status'), 1);
   assert.equal(await page.getByRole('heading', { name: '确认导入', exact: true }).count(), 0);
@@ -806,7 +810,7 @@ test('导入完成提示占据自己的布局空间，宽窄窗口都能直接�
   await page.setViewportSize({ width: 1180, height: 820 });
   await openVault(page); await previewImport(page);
   await button(page, '确认导入 2 条记录');
-  await page.locator('#modal').getByRole('button', { name: '确认导入', exact: true }).click(); await idle(page);
+  await idle(page);
   await openContinuation(page);
   await page.getByRole('textbox', { name: '接下来要做什么', exact: true }).fill('继续当前任务');
   await button(page, '准备交接内容'); await idle(page);

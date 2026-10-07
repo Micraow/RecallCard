@@ -70,10 +70,9 @@ test('导入成果：确认后定位本批，下一批重新选择文件', async
   assert.equal(ui.one('#note-import-details').open, false);
   await ui.click('选择文件并预览');
   ui.check('[aria-label="选择会话：合成第一会话"]'); await ui.click('预览所选会话');
-  await ui.click(`确认导入 ${preview.event_count} 条记录`);
   ui.native.next('confirm_import', { events_added: 3, events_seen: 3, events_duplicates: 0, conversations: [conversation] });
   ui.native.next('list_conversations', list); ui.native.next('conversation_messages', messages);
-  await ui.click('确认导入', ui.modal());
+  await ui.click(`确认导入 ${preview.event_count} 条记录`);
   assert.equal(ui.one('#location').textContent, '会话');
   assert.match(ui.one('.import-batch-summary').textContent, /本批导入/);
   assert.equal(ui.one('.conversation-message .body-text').textContent, event.content);
@@ -180,15 +179,16 @@ test('固定交接操作在滚动区外；复制重验失败撤销旧正文和�
 test('导入取消或失败停留原步骤，53个会话成果保持本批且所有行可达', async t => {
   const ui = await fixture(t); await ui.openVault(); await action(ui, '#import-button');
   await ui.click('选择文件并预览'); ui.check('[aria-label="选择会话：合成第一会话"]'); await ui.click('预览所选会话');
-  await ui.click('确认导入 3 条记录'); await ui.click('取消', ui.modal());
+  await ui.click('取消这次导入');
   assert.equal(ui.one('#location').textContent, '导入会话'); assert.equal(ui.document.querySelector('.import-batch-summary'), null); ui.noWrites();
-  await ui.click('确认导入 3 条记录'); ui.native.fail('confirm_import', '文件已改变'); await ui.click('确认导入', ui.modal());
+  await ui.click('选择文件并预览'); ui.check('[aria-label="选择会话：合成第一会话"]'); await ui.click('预览所选会话');
+  ui.native.fail('confirm_import', '文件已改变'); await ui.click('确认导入 3 条记录');
   assert.equal(ui.one('#location').textContent, '导入会话'); assert.equal(ui.document.querySelector('.import-batch-summary'), null);
   await ui.click('选择文件并预览'); ui.check('[aria-label="选择会话：合成第一会话"]'); await ui.click('预览所选会话');
   const many = Array.from({ length: 53 }, (_, index) => ({ session_ref: `synthetic-${index}`, title: `${index + 1}. 合成会话 ${index % 5 === 0 ? '一个非常长的项目讨论标题'.repeat(6) : '继续核验'}`, platform: index % 2 ? 'deepseek' : 'chatgpt-export', message_count: 2, captured_at: index % 3 ? '2026-10-06T08:00:00Z' : null, coverage: 'partial' }));
   ui.native.data.conversations = many;
   ui.native.next('confirm_import', { events_added: 106, events_seen: 110, events_duplicates: 4, conversation_refs: many.map(item => item.session_ref), conversations: many });
-  await ui.click('确认导入 3 条记录'); await ui.click('确认导入', ui.modal());
+  await ui.click('确认导入 3 条记录');
   assert.equal(ui.document.querySelectorAll('.conversation-list .result-card').length, 53);
   assert.match(ui.one('.import-batch-summary').textContent, /53 个会话.*新增 106 条.*重复 4 条/);
   assert.equal(ui.one('.conversation-list .selected').dataset.conversationRef, many[0].session_ref);
@@ -313,7 +313,7 @@ test('先浏览后页再导入，往返工作区不丢本批前页成果', async
   const batch = Array.from({ length: 53 }, (_, index) => ({ ...seed, session_ref: `new-${index}`, title: `本批会话 ${index}` }));
   ui.native.data.conversations = [...batch, ...old];
   ui.native.next('confirm_import', { events_added: 106, events_seen: 106, events_duplicates: 0, conversations: batch });
-  await ui.click('确认导入 3 条记录'); await ui.click('确认导入', ui.modal());
+  await ui.click('确认导入 3 条记录');
   await ui.navigate('记忆'); await ui.navigate('会话');
   assert.deepEqual([...ui.document.querySelectorAll('.conversation-list [data-conversation-ref]')].map(n => n.dataset.conversationRef), batch.map(c => c.session_ref));
   const offsets = ui.native.matching('list_conversations').slice(-2).map(c => c.payload.offset);
@@ -341,7 +341,7 @@ test('查看实际背景明确展开正文，重绘保留开关且从当前区�
 test('自动导入选中后打开接续进入详情状态，缩窄时不会退回列表', async t => {
   const ui = await fixture(t); await ui.openVault(); await action(ui, '#import-button');
   await ui.click('选择文件并预览'); ui.check('[aria-label="选择会话：合成第一会话"]');
-  await ui.click('预览所选会话'); await ui.click('确认导入 3 条记录'); await ui.click('确认导入', ui.modal());
+  await ui.click('预览所选会话'); await ui.click('确认导入 3 条记录');
   assert.equal(ui.one('.conversation-layout').classList.contains('show-detail'), false);
   await ui.click('带到另一个AI');
   assert.equal(ui.one('.conversation-layout').classList.contains('show-detail'), true);
