@@ -688,6 +688,39 @@ class NativeControlsTest(unittest.TestCase):
                         smoke.navigate_file_folder(module.DEEPSEEK_DIALOG, "42", Path(directory))
                 self.assertFalse(any(call.args[-1] == "Return" for call in action.call_args_list))
 
+    def test_native_folder_removes_only_verified_selected_completion_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            expected = directory + "/"; observed = {"text": expected + "deepseek-"}
+            smoke = object.__new__(module.NativeSmoke); smoke.artifacts = Path(directory); smoke.dialog_count = 1
+            smoke.capture = Mock(); smoke.describe_dialog = Mock(); node = Mock(); text = node.queryText.return_value
+            smoke.native_location_entry = Mock(return_value=node)
+            text.getText.side_effect = lambda *_: observed["text"]
+            text.getNSelections.return_value = 1; text.getSelection.return_value = (len(expected), len(observed["text"]))
+            def execute(*args):
+                if args[-1] == "BackSpace": observed["text"] = expected
+                return "42\n"
+            with patch.object(module, "run", side_effect=execute) as action, patch.object(module.subprocess, "run"), patch.object(module, "wait_for", side_effect=self.immediate):
+                smoke.navigate_file_folder(module.DEEPSEEK_DIALOG, "42", Path(directory))
+            keys = [call.args[-1] for call in action.call_args_list]
+            self.assertEqual(keys.count("BackSpace"), 1); self.assertEqual(keys.count("Return"), 1)
+            self.assertLess(keys.index("BackSpace"), keys.index("Return"))
+            self.assertEqual(json.loads((smoke.artifacts / 'dialog-01-location.json').read_text())["observed"], expected)
+            self.assertEqual(json.loads((smoke.artifacts / 'dialog-01-completion.json').read_text())["observed"], expected + "deepseek-")
+
+    def test_native_folder_never_deletes_unselected_partial_or_multiple_selections(self):
+        for count, offset in [(0, 0), (2, 0), (1, -1), (1, 1)]:
+            with self.subTest(count=count, offset=offset), tempfile.TemporaryDirectory() as directory:
+                expected = directory + "/"; observed = expected + "deepseek-"
+                smoke = object.__new__(module.NativeSmoke); smoke.artifacts = Path(directory); smoke.dialog_count = 1
+                smoke.capture = Mock(); smoke.describe_dialog = Mock(); node = Mock(); text = node.queryText.return_value
+                smoke.native_location_entry = Mock(return_value=node)
+                text.getText.return_value = observed; text.getNSelections.return_value = count
+                text.getSelection.return_value = (len(expected) + offset, len(observed))
+                with patch.object(module, "run", return_value="42\n") as action, patch.object(module.subprocess, "run"), patch.object(module, "wait_for", side_effect=self.immediate):
+                    with self.assertRaisesRegex(AssertionError, "补全尾部"):
+                        smoke.navigate_file_folder(module.DEEPSEEK_DIALOG, "42", Path(directory))
+                self.assertFalse(any(call.args[-1] in ["BackSpace", "Return"] for call in action.call_args_list))
+
     def test_multiple_picker_closed_during_navigation_is_not_reopened_or_confirmed(self):
         with tempfile.TemporaryDirectory() as directory:
             smoke, paths, approval, execute = self.multiple_picker(directory)
