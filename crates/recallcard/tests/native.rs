@@ -93,3 +93,26 @@ fn installer_generates_restricted_files_without_registering() {
     assert_eq!(manifest["allowed_origins"].as_array().unwrap().len(), 1);
     assert!(native::prepare_install(&v, vec!["personal".into()], EXT, &out).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn installer_resolves_selected_parent_alias_but_rejects_linked_root() {
+    use std::os::unix::fs::symlink;
+    let directory = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    let vault = Vault::init(&root.join("vault")).unwrap();
+    let real = root.join("actual");
+    std::fs::create_dir(&real).unwrap();
+    let alias = root.join("parent-alias");
+    symlink(&real, &alias).unwrap();
+    let result =
+        native::prepare_install(&vault, vec!["personal".into()], EXT, &alias.join("install"))
+            .unwrap();
+    assert_eq!(
+        result["manifest"],
+        serde_json::json!(real.join("install/com.recallcard.host.json"))
+    );
+    let linked_root = root.join("linked-root");
+    symlink(real.join("install"), &linked_root).unwrap();
+    assert!(native::prepare_install(&vault, vec!["personal".into()], EXT, &linked_root).is_err());
+}

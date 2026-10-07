@@ -918,6 +918,8 @@ fn validate_result(result: &DreamResult) -> Result<()> {
     Ok(())
 }
 fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     fs::File::open(path)
         .map_err(error)?
