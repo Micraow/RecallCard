@@ -1086,7 +1086,6 @@ class NativeSmoke:
         assert browser.text(".reading-pane .body-text") == MEMORY_TEXT
         browser.click('.reading-pane details.source-details > summary')
         assert ZIP_USER_TEXT in browser.text(".reading-pane .source-record .body-text")
-        workspace_evidence = self.exercise_workspace_usability()
         doctor = self.cli_command("doctor")
         assert doctor["ok"], doctor
         self.checkpoint("长期记忆出处与发布防重放")
@@ -1170,7 +1169,7 @@ class NativeSmoke:
         assert browser.observe("return Boolean(document.querySelector('.conversation-list'))"), "保存后应直接进入本批会话成果"
         assert not browser.observe("return Boolean(document.querySelector('.archive-selection'))"), "保存后不应留在旧导入清单"
         assert browser.observe("return [...document.querySelectorAll('#navigation [data-workspace]')].map(n=>n.dataset.workspace).join('|')") == "conversations|memories"
-        visible = browser.observe("return [...document.querySelectorAll('.conversation-list .result-card')].filter(n=>{const r=n.getBoundingClientRect();return r.height>0&&r.top>=0&&r.bottom<=innerHeight;}).length")
+        visible = browser.observe("return (()=>{const list=document.querySelector('.conversation-list').getBoundingClientRect();return [...document.querySelectorAll('.conversation-list .result-card')].filter(n=>{const r=n.getBoundingClientRect();return r.height>0&&r.top>=Math.max(0,list.top)&&r.bottom<=Math.min(innerHeight,list.bottom)&&r.left>=Math.max(0,list.left)&&r.right<=Math.min(innerWidth,list.right);}).length;})()")
         assert visible >= 8, f"默认窗口列表首屏应至少显示8行，实际{visible}行"
         self.checkpoint("五十三会话导入成果与双工作区可读列表")
 
@@ -1226,6 +1225,18 @@ class NativeSmoke:
         browser.command("POST", "/window/rect", {"width": 860, "height": 820})
         browser.idle()
         assert browser.observe("return document.documentElement.scrollWidth <= innerWidth + 2"), "窄窗口不得产生整页横向溢出"
+        browser.click('[data-action="back-to-list"]')
+        browser.idle()
+        assert browser.observe("return document.querySelector('.results.list-scroll').getBoundingClientRect().height > 0")
+        browser.click('.results .result-card')
+        browser.idle()
+        assert browser.observe("return document.querySelector('.reading-pane').getBoundingClientRect().height > 0")
+        browser.open_continuation()
+        assert browser.observe("return document.querySelector('#continuation-panel').getBoundingClientRect().height > 0")
+        browser.click('[data-action="close-continuation"]')
+        browser.idle()
+        assert browser.observe("return document.querySelector('.located-message').dataset.reference") == search_reference
+        assert browser.observe("return (()=>{const r=document.querySelector('[data-action=open-continuation]').getBoundingClientRect();return r.height>0&&r.top>=0&&r.bottom<=innerHeight;})()")
         self.checkpoint("窄窗口保留当前阅读任务")
         browser.command("POST", "/window/rect", {"width": 1180, "height": 820})
         return {"synthetic_conversations": 53, "synthetic_messages": 106,

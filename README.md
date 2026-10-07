@@ -28,4 +28,4 @@
 - [命令行与高级功能](docs/project-overview-v0.3.md)
 - [整体设计](docs/RecallCard-DESIGN-v0.2.md) · [实施与验收状态](docs/progress.md)
 
-开发者从 [开发与完整功能说明](docs/project-overview-v0.3.md) 开始；普通使用不需要先读设计文档或修改配置文件。
+开发者先运行 [固定提交前检查](docs/preflight.md)，完整能力见 [开发说明](docs/project-overview-v0.3.md)；普通使用不需要先读设计文档或修改配置文件。
