@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "checked_at_utc": "2026-10-07T22:45:59.989774+00:00",
+  "base_commit": "28e22b15e690cc95a0bb590cc2d8e4de9c2dbc11",
+  "application_and_native_script_unchanged": true,
+  "local_gate_passed": true,
+  "full_acceptance_passed": false,
+  "checks": {
+    "preflight": 11,
+    "dom": 220,
+    "javascript_contracts": 111,
+    "native_driver_contracts": 45,
+    "preflight_contracts": 34
+  },
+  "changes": [
+    "保存 Chromium 截图、DOM和布局证据",
+    "原生与浏览器产物名称绑定确切提交"
+  ],
+  "workflow_sha256": "c44f9c88807eea3e3bfa527b39feca84d597d84ae107f286ed735d9da2d6efd4",
+  "validation_branch": "validate/gui-import-results-20261007",
+  "matching_push_workflows": [
+    "desktop.yml"
+  ],
+  "packaging_workflow_matches": false,
+  "observation": "创建验证分支后，对28e22b15提交的Actions只读查询仍未发现运行；这不是排队根因的判定。"
+}
