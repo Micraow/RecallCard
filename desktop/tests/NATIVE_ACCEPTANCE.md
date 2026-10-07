@@ -16,6 +16,10 @@ dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" \
 
 桌面按钮、输入框、选择框和确认窗口由 WebDriver 操作；文件路径通过原生选择器输入。DOM 脚本仅观察状态、读取可见控件值或滚动，不执行产品命令。CLI 用于读取 canonical 结果和原有 Native Messaging 安装测试；新增的导入、整理、记忆编辑、随身背景选择及范围切换全部经过窗口。MCP 检查启动 GUI 实际生成的组件，完成初始化后调用只读工具，不使用外部 AI 宿主。
 
+普通文件导入在预览页展示文件、数量、资料库与范围后，点击一次“确认导入 N 条记录”即保存。
+取消验收在这个按钮之前执行，随后重新选文件并审查；确认后检查没有第二层弹窗。
+JSON/ZIP 的 canonical Event 不写入、重复导入去重及来源/角色/时间断言继续保留。
+
 Linux 直接连接系统官方 WebKitWebDriver。能力字段 `webkitgtk:browserOptions` 与 `TAURI_AUTOMATION` / `TAURI_WEBVIEW_AUTOMATION` 环境来自 [Tauri 官方 Linux 映射](https://github.com/tauri-apps/tauri/blob/tauri-driver-v2.1.0/crates/tauri-driver/src/server.rs) 和 [原生驱动启动方式](https://github.com/tauri-apps/tauri/blob/tauri-driver-v2.1.0/crates/tauri-driver/src/webdriver.rs)。没有更换 WebKit、修改应用二进制或降低浏览器安全设置；移除的是曾多次在点击回执处断连的中间 HTTP 代理。
 
 启动时必须先取得原生 `/status` 的 ready 响应，再创建唯一会话。标准输出和错误输出保存在 `webkit-webdriver.log`；结束时关闭会话并回收驱动进程。创建会话、点击、键入和确认均不因断连自动重发。

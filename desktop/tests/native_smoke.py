@@ -396,8 +396,8 @@ class NativeSmoke:
 
     def confirm_import(self, count=1):
         self.driver.button(f"确认导入 {count} 条记录")
-        self.driver.button("确认导入", "//dialog[@id='modal']")
         self.driver.idle()
+        assert not self.driver.observe("return document.querySelector('#modal').open"), "普通导入不得要求第二次确认"
 
     def create_zip_fixture(self):
         def conversation(identifier, title, user_text, with_hidden=False):
@@ -488,9 +488,11 @@ class NativeSmoke:
         before = self.events()
         self.preview_zip(archive)
         assert self.events() == before, "ZIP 列表、勾选和预览均不得写入 Event"
-        browser.button("确认导入 2 条记录")
-        browser.button("取消", "//dialog[@id='modal']")
+        browser.button("取消这次导入")
+        browser.idle()
         assert self.events() == before, "取消 ZIP 导入不得写入 Event"
+        assert not browser.observe("return Boolean(document.querySelector('.file-preview'))")
+        self.preview_zip(archive)
         browser.button("返回会话选择")
         browser.idle()
         assert browser.observe("return document.querySelectorAll('.archive-selection input:checked').length") == 1
@@ -995,10 +997,12 @@ class NativeSmoke:
         assert self.events() == note_events
         self.preview_import(source)
         assert self.events() == note_events, "预览不得写入 Event"
-        browser.button("确认导入 1 条记录")
-        browser.button("取消", "//dialog[@id='modal']")
-        assert self.events() == note_events, "取消确认不得写入 Event"
+        browser.button("取消这次导入")
+        browser.idle()
+        assert self.events() == note_events, "确认按钮之前取消不得写入 Event"
+        assert not browser.observe("return Boolean(document.querySelector('.file-preview'))")
         self.checkpoint("导入预览与取消不写入")
+        self.preview_import(source)
         self.confirm_import()
         events = self.events()
         assert len(events) == 2 and any(event["content"] == EVENT_TEXT for event in events)
