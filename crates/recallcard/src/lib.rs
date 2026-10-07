@@ -9,6 +9,7 @@ pub mod context;
 pub mod policy;
 pub mod transport;
 
+pub mod desktop;
 pub mod dream;
 pub mod import;
 pub mod native;

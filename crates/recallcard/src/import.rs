@@ -5,6 +5,20 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 pub fn import_text(vault: &Vault, format: &str, text: &str, scope: &str) -> Result<Value> {
+    let inputs = parse_text(format, text, scope)?;
+    let before = vault.events()?.len();
+    let mut ids = Vec::new();
+    for input in inputs {
+        ids.push(vault.capture(input)?.id);
+    }
+    let after = vault.events()?.len();
+    Ok(
+        json!({"ok":true,"events_added":after.saturating_sub(before),"events_seen":ids.len(),"refs":ids.iter().map(|i|format!("event:{i}")).collect::<Vec<_>>(),"coverage":{"messages":"partial","tools":if format=="claude-code"{"partial"}else{"unsupported"},"files":"unsupported","citations":"partial","branches":if format=="chatgpt-export"{"selected_current_branch"}else{"partial"},"hidden_reasoning":"not_collected"},"note":"仅导入显式提供的文件；导入中断可安全重复运行，已写原始事件不回滚"}),
+    )
+}
+
+/// 复用正式导入适配器的无副作用解析；桌面预览不得先写入用户 Vault。
+pub(crate) fn parse_text(format: &str, text: &str, scope: &str) -> Result<Vec<EventInput>> {
     validate_scope(scope)?;
     if text.len() > 16 * 1024 * 1024 {
         return Err("单次导入上限 16 MiB；请分批导出".into());
@@ -28,15 +42,7 @@ pub fn import_text(vault: &Vault, format: &str, text: &str, scope: &str) -> Resu
             return Err("导入数据的 scope 与指定范围不一致".into());
         }
     }
-    let before = vault.events()?.len();
-    let mut ids = Vec::new();
-    for input in inputs {
-        ids.push(vault.capture(input)?.id);
-    }
-    let after = vault.events()?.len();
-    Ok(
-        json!({"ok":true,"events_added":after.saturating_sub(before),"events_seen":ids.len(),"refs":ids.iter().map(|i|format!("event:{i}")).collect::<Vec<_>>(),"coverage":{"messages":"partial","tools":if format=="claude-code"{"partial"}else{"unsupported"},"files":"unsupported","citations":"partial","branches":if format=="chatgpt-export"{"selected_current_branch"}else{"partial"},"hidden_reasoning":"not_collected"},"note":"仅导入显式提供的文件；导入中断可安全重复运行，已写原始事件不回滚"}),
-    )
+    Ok(inputs)
 }
 // 仅供已知导出适配器映射固定 Event 字段；不是对外接口。
 #[allow(clippy::too_many_arguments)]
