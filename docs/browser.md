@@ -1,5 +1,7 @@
 # 浏览器手动上下文桥
 
+当前扩展 0.2.0 还提供 Qwen/Z.ai 实验性手动输入框适配；精确权限、必须重置的会话限制和验证状态见 [手动浏览器适配 v0.3](browser-adapters-v0.3.md)。本文以下安装与人工发送流程仍适用。
+
 本页对应 `extension/`，以设计 v0.2 为准。扩展是无第三方运行依赖的 Chrome Manifest V3 实现，使用固定的 `com.recallcard.host` 本机桥，不启动 HTTP 服务，不调用付费 API。
 
 **验证状态：已运行 Node 内建单元、模拟 DOM 和生命周期测试，以及 Linux 上的 Native 启动器子进程、二进制分帧和配置拒绝测试；尚未在真实登录的 ChatGPT 页面、Chrome Native Messaging 安装环境、macOS 或 Windows 上完成端到端验证。** 请先用合成资料验收；不要把“测试通过”理解为当前 ChatGPT DOM 已实测兼容。

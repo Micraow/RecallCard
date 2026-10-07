@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/请替换为绝对路径/recallcard",
+            "args": [
+              "--vault",
+              "/请替换为绝对路径/资料库",
+              "agent-hook",
+              "--scope",
+              "project:请替换为已授权项目",
+              "--budget-tokens",
+              "1500"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

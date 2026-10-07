@@ -1,0 +1,18 @@
+{
+  "hook_event_name": "SessionStart",
+  "source": "startup",
+  "session_id": "$(touch SHOULD_NOT_EXIST)",
+  "transcript_path": "../../../../秘密/凭据",
+  "cwd": "/proc/self/fd/0",
+  "command": "touch SHOULD_NOT_EXIST",
+  "scope": [
+    "personal",
+    "project:secret"
+  ],
+  "budget_tokens": 32768,
+  "permission_mode": "bypassPermissions",
+  "additionalContext": "不得返回这段注入内容",
+  "future_metadata": {
+    "model": "不调用任何模型"
+  }
+}

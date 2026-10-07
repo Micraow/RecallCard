@@ -12,17 +12,17 @@
 
 - 审查起点已发布基线：`23cfd96b8a7e0c1c4505d26e06c2f03227ac9ef6`
 - 本次审查的同步、Python worker、Native 启动器及浏览器恢复阶段已于审查期间发布为 `d3105ef280b2d6ade56bacb41a8a8f3b37ea41cc`；该提交必须以自己的 CI 结果验收，不能直接继承基线结论
-- 审查后补入实体/有效期/View、CLI 引用与持续遗忘修复；本机完整复测 143 项 Rust 通过，远端结果仍按本段提交单独确认
+- 审查后补入实体/有效期/View、CLI 引用与持续遗忘修复；本机完整复测 161 项 Rust 通过，远端结果仍按本段提交单独确认
 - v0.2 设计文件 SHA-256：`0348b3569a9992948d8f39170579094efc74de0d514cf83ceb7588353c48bcc2`
 
 以下运行结果来自本轮已完成的验证记录；本审查没有以测试函数数量替代执行结果，也没有沿用旧报告的测试总数：
 
 | 检查 | 本轮确认结果 | 适用范围 |
 |---|---|---|
-| Linux Rust | 143 项通过 | 当前工作树的本机测试；不是 Windows/macOS 当前工作树通过的证明 |
+| Linux Rust | 161 项通过 | 当前工作树的本机测试；不是 Windows/macOS 当前工作树通过的证明 |
 | Python 完整回归 | 105 项通过，无跳过 | 已设置 `RECALLCARD_TEST_BINARY`，包含真实 Rust 导出与 fake API 合同；未访问真实供应商 |
 | Rust→Embedding 合同 | 独立脚本通过 | 显式传入已有 Rust 二进制，离线验证导出、哈希、复用、撤权与 generation |
-| 扩展 Node 回归 | 52 项通过 | 协议、后台、生命周期和模拟 DOM；不是登录网页实测 |
+| 扩展 Node 回归 | 74 项通过 | 协议、后台、生命周期和模拟 DOM；不是登录网页实测 |
 | 已发布基线 CI | Linux、macOS、Windows、Node 全绿 | [run 37558934749](https://github.com/Micraow/RecallCard/actions/runs/37558934749)，对应上述 `23cfd96`；于 2026-10-07 01:51 UTC 确认 |
 | 恢复阶段远端 CI | Linux、macOS、Windows、Node、Python 全绿 | [run 37559424832](https://github.com/Micraow/RecallCard/actions/runs/37559424832)，绑定 `d3105ef`；2026-10-07 01:58 UTC 确认 |
 
@@ -74,7 +74,7 @@
 
 - 源码：[capture.rs](../crates/recallcard/src/capture.rs) 注入标记识别；[model.rs](../crates/recallcard/src/model.rs) origin/parts；[context.rs](../crates/recallcard/src/context.rs) 默认召回过滤；[protocol.js](../extension/protocol.js) 胶囊来源
 - 回归：[context.rs 测试](../crates/recallcard/tests/context.rs) `recaptured_capsule_is_not_new_evidence_or_search_noise`；[vault_safety.rs](../crates/recallcard/tests/vault_safety.rs) `injected_context_cannot_be_evidence_even_with_a_native_user_source`、`block_level_injection_cannot_hide_behind_a_native_user_envelope`、`mixed_injected_and_user_parts_are_not_whole_event_evidence`；[dream.rs 测试](../crates/recallcard/tests/dream.rs) `injected_context_is_not_exported_as_new_evidence`
-- 缺口：浏览器目前仅有 ChatGPT 适配；没有第二家 Web 场景。无标记的复制、同义改写或错误标成 user_input 的手工材料，不能保证被自动识别为旧记忆。含混合注入的整条 Event 保守拒绝，尚无精确 part 级证据引用与批准
+- 缺口：浏览器增加了 Qwen/Z.ai 实验性手动 composer 适配和合成回归，但两家 Web 实际往返仍未验收。无标记的复制、同义改写或错误标成 user_input 的手工材料，不能保证被自动识别为旧记忆。含混合注入的整条 Event 保守拒绝，尚无精确 part 级证据引用与批准
 
 ### T05 笔记本 Arch 与服务器 Debian 同时成立
 
@@ -113,11 +113,11 @@
 
 ### T09 多轮上下文或宿主 compact 后继续使用
 
-**状态：部分；Agent 生命周期钩子未实现，真实宿主未实机验证。**
+**状态：部分；Agent 生命周期 Hook 代码和本机CLI合同已实现，真实宿主未实机验证。**
 
 - 已有：[transport.rs](../crates/recallcard/src/transport.rs) 在 MCP initialize 中给出显式调用 bootstrap 的说明；[Claude Code 示例配置](../integrations/claude-code/mcp.example.json) 注册四个工具
 - Web 已有：[broker.js](../extension/broker.js)、[content.js](../extension/content.js) 的会话绑定、重置和重新附上说明；[生命周期测试](../extension/tests/lifecycle.test.js) 验证 SPA/重载/过期绑定；[后台测试](../extension/tests/broker.test.js) 验证快照与去重
-- 未实现：本地 Agent 首次启动、恢复、压缩后真正装载已授权 Bootstrap 的适配器/钩子；没有已验证的会话快照 ID 与显式跨端 continuation 命令
+- 新增：[agent_hook.rs](../crates/recallcard/src/agent_hook.rs) 和 [17项回归](../crates/recallcard/tests/agent_hook.rs) 按官方 SessionStart 合同输出固定 scope 的 Bootstrap，覆盖 startup/resume/compact/clear；当前尚未接入真实宿主，仍没有显式跨端 continuation 命令
 - 未实测：真实 Claude Code 在这些生命周期节点的上下文结果。MCP instructions 是指引，不是“模型必定调用”的保证；网页压缩不可观察，扩展只提供人工恢复入口
 
 ### T10 同快照 Bootstrap 同字节且不混入动态值
@@ -158,7 +158,7 @@
 
 ### 宿主生命周期与跨端交接
 
-**Agent 适配未实现；Web 人工恢复部分实现。** 目前只有一个 Claude Code MCP 示例配置和日志导入器，没有启动/恢复/compact 钩子实现。没有显式选择 source session/branch 的 continuation 包生成入口，也没有 captured-through/dreamed-through 的统一覆盖游标管理。
+**Agent 适配代码已实现、宿主未实测；Web 人工恢复部分实现。** Claude Code MCP 示例、日志导入与 SessionStart Hook 现均有代码/fixture；后者只运行本项目 CLI，不启动外部 Agent。没有显式选择 source session/branch 的 continuation 包生成入口，也没有 captured-through/dreamed-through 的统一覆盖游标管理。
 
 浏览器的会话 nonce、稳定快照、导航失效和手动重置已落地，但不能证明外部模型在压缩后仍知道如何读 RecallCard，更不能读取宿主隐藏会话状态。
 

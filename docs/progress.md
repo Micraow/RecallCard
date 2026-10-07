@@ -36,6 +36,13 @@
 - 遗忘按 scope + 来源身份摘要继承到现有/未来修订；保留旧规则兼容和显式恢复，不混同独立消息
 - [T01–T12 验收差距 v0.3](acceptance-v0.3.md) 逐条区分实现、自动回归和未实机验证
 
+## 已实现：更多手动网页与 Agent 生命周期
+
+- Qwen/Z.ai 实验性 composer 适配：固定主机/路由、显式重置绑定、输入框变化失效、保留草稿、人工最终发送；DeepSeek 因会话身份不确定仍停用
+- Claude Code `SessionStart` 的 startup/resume/compact/clear 只读 Hook：有界输入、固定 scope、稳定 Bootstrap、官方输出结构及合成配置示例
+- Hook 回归既调用库，也直接启动 RecallCard CLI；不运行外部 Agent，不自动安装配置
+- 对应 [浏览器适配](browser-adapters-v0.3.md) 与 [生命周期 Hook](agent-hooks-v0.3.md) 文档说明实机验证边界
+
 ## 下一步与未完成范围
 
 1. 独立 daemon 与本机 IPC；当前 MCP/Native 直接调用同一 Rust core
@@ -45,10 +52,10 @@
 
 ## 验证边界
 
-- 2026-10-07 当前 Linux 工作区重新执行：143 项 Rust、105 项 Python（包括 Rust→fake API→Rust review 合同）、52 项 Node 测试全部通过，格式检查与严格 Clippy 通过
+- 2026-10-07 当前 Linux 工作区重新执行：161 项 Rust、105 项 Python（包括 Rust→fake API→Rust review 合同）、74 项 Node 测试全部通过，格式检查与严格 Clippy 通过
 - Rust→Python embedding 导出/哈希/增量缓存/撤权过滤合同独立通过
 - 已修复工作流 runner 上下文、Windows 严格告警、macOS 父目录别名；Windows 原子替换短暂占用修复及恢复阶段 d3105ef 已在三平台 Actions 全部通过；本段新改动另跑独立 CI，详见 [CI 修复记录](ci.md)
 - Linux/macOS/Windows CI 的每次结果绑定具体提交；本机通过不等于远端通过，也不等于浏览器安装验收
 - Native 安装链路已做合成进程测试，Windows/macOS 真实浏览器注册与运行尚未验收
 - 没有真实云 API 费用、embedding 效果、记忆准确率或前缀缓存命中数据
-- 未执行实际 Claude Code 宿主启动/压缩后钩子；不得把 fixture 成功写成真实宿主验收
+- Hook 适配代码及真实 RecallCard 子进程合同已验证；尚未运行实际 Claude Code 宿主启动/压缩，不能把 fixture 成功写成真实宿主验收

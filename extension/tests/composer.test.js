@@ -1,25 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import '../composer-adapter.js';
-class Element {
-  constructor(tag='TEXTAREA',id='') {this.tagName=tag;this.id=id;this.value='';this.children=[];this._text='';this.isConnected=true;this.visible=true;this.disabled=false;this.readOnly=false;this.attributes={};this.events=[];this.style={};this.classList={contains:(x)=>x==='ProseMirror'};this.isContentEditable=tag==='DIV';}
-  get textContent(){return this._text+this.children.map(x=>x.textContent).join('');}
-  set textContent(v){this._text=v;this.children=[];}
-  getClientRects(){return this.visible?[{}]:[];} getAttribute(name){return this.attributes[name]??null;}
-  append(node){node.parentNode=this;this.children.push(node);}
-  remove(){const p=this.parentNode;p.children=p.children.filter(x=>x!==this);this.parentNode=null;this.isConnected=false;}
-  dispatchEvent(event){this.events.push(event.type);}
-}
-function setup(tag='TEXTAREA',id='prompt-textarea'){
-  const node=new Element(tag,id);
-  const doc={nodes:[node],querySelectorAll(selector){
-    // 仅模拟这里使用的明确 id/type 选择器，不能让 fixture 忽略 selector。
-    const selectors=selector.split(',').map(part=>part.trim().match(/^(?:([a-z]+))?#([a-z0-9_-]+)$/iu));
-    assert.ok(selectors.every(Boolean),'fixture 不支持此 selector');
-    return this.nodes.filter(element=>selectors.some(([,tag,identifier])=>element.id===identifier&&(!tag||element.tagName===tag.toUpperCase())));
-  },createElement:()=>new Element('P'),defaultView:{InputEvent:class{constructor(type){this.type=type;}}}};
-  return {node,doc,adapter:new globalThis.RecallCardComposerAdapter(doc)};
-}
+import { Element, setup } from './fixtures/composer.mjs';
 const capsule={id:'r_demo',nonce:'a'.repeat(48),text:'来源 event:evt_demo\n待审核上下文'};
 test('追加不覆盖已有草稿，移除不丢失前后新编辑',()=>{
   const {node,adapter}=setup();node.value='原有草稿🙂\r\n第二行';const original=node.value;

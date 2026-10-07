@@ -1,0 +1,8 @@
+{
+  "session_id": "synthetic-session-resume",
+  "transcript_path": "/不应读取的合成路径/transcript.jsonl",
+  "cwd": "/不应进入的合成目录",
+  "hook_event_name": "SessionStart",
+  "source": "resume",
+  "model": "synthetic-model-not-called"
+}
