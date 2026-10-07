@@ -512,6 +512,16 @@ fn selected_import_file_cannot_be_a_symlink_or_turn_into_one() {
     assert!(session
         .preview_import(&info.session_id, "manual-jsonl", &link, "personal")
         .is_err());
+    let parent_link = dir.path().join("arbitrary-parent-link");
+    symlink(dir.path(), &parent_link).unwrap();
+    assert!(session
+        .preview_import(
+            &info.session_id,
+            "manual-jsonl",
+            &parent_link.join("target.jsonl"),
+            "personal",
+        )
+        .is_err());
     let preview = session
         .preview_import(&info.session_id, "manual-jsonl", &target, "personal")
         .unwrap();
@@ -522,4 +532,34 @@ fn selected_import_file_cannot_be_a_symlink_or_turn_into_one() {
         .confirm_import(&info.session_id, &preview.preview_id)
         .is_err());
     assert_eq!(session.status(&info.session_id).unwrap().event_count, 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_system_tmp_alias_allows_native_file_selection() {
+    let directory = tempfile::Builder::new()
+        .prefix("recallcard-desktop-system-alias-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let mut session = DesktopSession::default();
+    let info = session
+        .select_vault(&directory.path().join("vault"), true)
+        .unwrap();
+    let path = directory.path().join("selected.jsonl");
+    assert!(path.starts_with("/tmp"));
+    fs::write(
+        &path,
+        event_input("macos-native-alias", "合成系统目录内容", "personal").to_string(),
+    )
+    .unwrap();
+    let preview = session
+        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
+        .unwrap();
+    assert_eq!(preview.event_count, 1);
+    assert_eq!(
+        session
+            .confirm_import(&info.session_id, &preview.preview_id)
+            .unwrap()["events_added"],
+        1
+    );
 }
