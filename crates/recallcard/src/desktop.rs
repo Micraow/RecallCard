@@ -6,6 +6,7 @@
 //! 多文件导入的后台线程不持桌面会话锁；宿主应轮询状态，不能持锁等待任务完成。
 mod background;
 mod branches;
+mod handoff;
 mod imports;
 mod memory;
 mod recent;
