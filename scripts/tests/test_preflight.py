@@ -246,6 +246,15 @@ class PreflightTest(unittest.TestCase):
         self.assertFalse(report["full_acceptance_passed"])
         self.assertEqual([item["name"] for item in report["not_run"]], ["chromium", "native", "rust_and_packaging"])
 
+    def test_zero_tests_or_missing_summary_cannot_be_green(self):
+        for runner, output in [("node", "ℹ tests 0\nℹ fail 0\n"), ("python", "Ran 0 tests in 0.001s\nOK"), ("node", "exit 0"), ("python", "OK")]:
+            with self.subTest(runner=runner, output=output), self.assertRaisesRegex(preflight.PreflightError, "未证明有用例执行"):
+                preflight.tested_output(output, runner)
+
+    def test_actual_runner_summaries_require_a_positive_count(self):
+        for runner, output in [("node", "\x1b[32mℹ tests 59\x1b[0m\n"), ("python", "Ran 21 tests in 0.42s\nOK"), ("python", "Ran 1 test in 0.01s\nOK")]:
+            self.assertEqual(preflight.tested_output(output, runner), output)
+
     def test_partial_run_never_claims_full_gate(self):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):

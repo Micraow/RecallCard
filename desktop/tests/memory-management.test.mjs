@@ -1,7 +1,7 @@
 // 合成 Vault 上的真实 Chromium DOM 回归；不读取真实对话或连接外部 AI。
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { workspaceAssets, idle, button, navigate, openSearch, openDream, openContinuation } from './workspace-browser-helpers.mjs';
+import { captureBrowserEvidence, workspaceAssets, idle, button, navigate, openSearch, openDream, openContinuation } from './workspace-browser-helpers.mjs';
 import { chromium } from '../../extension/node_modules/playwright/index.mjs';
 
 const vault = { session_id: 'synthetic-memory-session', display_name: '合成记忆库',
@@ -30,7 +30,7 @@ async function fixture(t, overrides = {}) {
     stillHiddenAfterRestore: false, pending: null, listTotal: 1 };
   const calls = []; const errors = []; const queues = new Map();
   page.on('pageerror', error => errors.push(error.message));
-  t.after(async () => { await page.close(); assert.deepEqual(errors, [], '页面没有未处理异常'); });
+  t.after(async () => { if (!t.passed || errors.length) await captureBrowserEvidence(page, `memory-failure-${t.name}`); await page.close(); assert.deepEqual(errors, [], '页面没有未处理异常'); });
   const defaults = (command, payload) => {
     const row = { ...data.memory, content: '列表记忆片段', hidden: data.hidden, can_restore: data.canRestore };
     switch (command) {

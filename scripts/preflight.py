@@ -355,19 +355,27 @@ def check_javascript(root):
 
 
 def check_driver_contracts(root):
-    return {"output": command([sys.executable, "-m", "unittest", "discover", "-s", "desktop/tests", "-p", "test_native_*.py", "-v"], root, include_stderr=True)}
+    return {"output": tested_output(command([sys.executable, "-m", "unittest", "discover", "-s", "desktop/tests", "-p", "test_native_*.py", "-v"], root, include_stderr=True), "python")}
+
+
+def tested_output(output, runner):
+    plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+    pattern = r"(?m)^(?:ℹ|#) tests (\d+)\s*$" if runner == "node" else r"(?m)^Ran (\d+) tests? in "
+    match = re.search(pattern, plain)
+    require(match and int(match.group(1)) > 0, "测试进程未证明有用例执行：数量为零或缺少执行摘要")
+    return output
 
 
 def check_preflight_contracts(root, actionlint):
     executable = shutil.which(actionlint) or ""
-    return {"output": command([sys.executable, "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_preflight.py", "-v"],
-                              root, include_stderr=True, environment_overrides={"RECALLCARD_PREFLIGHT_ACTIONLINT": executable})}
+    return {"output": tested_output(command([sys.executable, "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_preflight.py", "-v"],
+                              root, include_stderr=True, environment_overrides={"RECALLCARD_PREFLIGHT_ACTIONLINT": executable}), "python")}
 
 
 def check_local_js(root):
     files = sorted(str(path.relative_to(root)) for folder in ("extension/tests", "desktop/tests") for path in (root / folder).glob("*.test.js"))
     require(files, "没有找到本地 JavaScript 合同")
-    return {"output": command(["node", "--test", "--test-isolation=none", "--test-concurrency=1", *files], root)}
+    return {"output": tested_output(command(["node", "--test", "--test-isolation=none", "--test-concurrency=1", *files], root), "node")}
 
 
 def check_local_dom(root):
@@ -378,7 +386,7 @@ def check_local_dom(root):
     require(script == expected, "local-dom 测试命令已变化；须审阅执行边界并同步预检")
     files = sorted(path.name for path in directory.glob("*.test.mjs"))
     require(files, "没有找到真实模块 DOM 合同")
-    return {"output": command(["node", "--experimental-vm-modules", "--test", "--test-isolation=none", "--test-concurrency=1", *files], directory),
+    return {"output": tested_output(command(["node", "--experimental-vm-modules", "--test", "--test-isolation=none", "--test-concurrency=1", *files], directory), "node"),
             "scope": "真实应用模块的 DOM/事件合同；不验证 CSS、几何、真实点击、模态焦点或原生 IPC"}
 
 

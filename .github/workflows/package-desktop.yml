@@ -52,9 +52,19 @@ jobs:
         working-directory: extension
         run: npx playwright install --with-deps chromium
       - name: 界面与状态验证
+        env:
+          RECALLCARD_BROWSER_ARTIFACTS: ${{ runner.temp }}/recallcard-browser-artifacts
         run: |
           node --test desktop/tests/*.test.mjs
           npm --prefix extension run test:browser
+      - name: 保存浏览器布局与失败诊断
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-browser-acceptance-${{ github.sha }}
+          path: ${{ runner.temp }}/recallcard-browser-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
       - name: 浏览器保存与桌面跨端合同
         env:
           RECALLCARD_STATE_DIR: ${{ runner.temp }}/recallcard-product-state
