@@ -52,6 +52,15 @@
 - 本机云终端底层拒绝 Unix socket bind（EPERM），包括标准库最小 bind；授权后的相同测试仍受限，真实 IPC 测试保留在 CI 中，不跳过也不记为通过
 - 该段验证分支和 main 的 Linux/macOS/Windows、Python、Node CI 全部成功，main=9061a9d；Linux完整208项Rust实跑通过，平台专属数量以各runner日志为准。详见 [IPC](ipc-v0.3.md) 和 [语义检索](semantic-search-v0.3.md)
 
+## 已交付：中文 Tauri 桌面版与免配置首条记录
+
+- 桌面窗口复用 Rust 核心，支持创建/选择资料库、粘贴文字、文件导入预览与确认、关键词查找、原文与出处阅读、整理结果审阅和保存
+- 默认分类可直接开始，不要求先配置 API、向量、Git 同步或浏览器扩展；README 与三步指南已缩短，复杂功能在需要时再配置
+- `9d76621` 正式程序在 Ubuntu 22.04 标准 WebKitGTK 环境通过 19 项界面/状态用例和 9 步真实原生操作，AppImage/deb 构建成功：[验收与安装包](https://github.com/Micraow/RecallCard/actions/runs/37579114793)
+- `6581e52` 只读取已成功验收的成品，核对原 SHA-256 后按完整 deb、运行 ZIP、校验清单分发；没有重新编译：[分发记录](https://github.com/Micraow/RecallCard/actions/runs/37581139328)
+- 安装包、截图和版本化三步指南已经交付；详情见 [桌面说明](desktop-v0.1.md) 和 [三步开始](desktop-quickstart-v0.1.md)
+- 用户自己的 Arch/KDE Wayland 电脑未实测；云端受管理 Chromium 明确阻止加载扩展，因此真实已安装扩展链路仍未验收，不把桌面或合成浏览器通过算作扩展安装成功
+
 ## 下一步与未完成范围
 
 1. 本机 IPC 与语义后端的真实安装验证
