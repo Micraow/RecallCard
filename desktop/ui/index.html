@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RecallCard</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#home" aria-label="RecallCard 首页"><span class="brand-icon" aria-hidden="true">R</span><span>RecallCard<small>把记忆留在自己手里</small></span></a>
+      <div class="nav-caption">我的资料库</div>
+      <nav aria-label="主导航" id="navigation"></nav>
+      <div class="sidebar-bottom"><span class="privacy-dot"></span>本地运行 · 由你掌控<p>资料保存在你选择的文件夹<br>没有账户，也无需 API 密钥</p><span class="version">桌面预览版 0.1</span></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><div id="location">欢迎使用</div><div class="topbar-actions"><span id="vault-badge" class="badge">尚未打开资料库</span><button id="switch-vault" class="button small quiet">打开资料库</button></div></header>
+      <main id="content" tabindex="-1"></main>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <footer><span id="operation">准备就绪</span><span>本地保存 · 不会自动发送资料</span></footer>
+    </div>
+  </div>
+  <dialog id="modal" aria-labelledby="modal-title"></dialog>
+</body>
+</html>

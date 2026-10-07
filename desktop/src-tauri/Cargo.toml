@@ -1,0 +1,27 @@
+[package]
+name = "recallcard-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "RecallCard 中文桌面资料库"
+repository = "https://github.com/Micraow/RecallCard"
+
+[workspace]
+
+[dependencies]
+recallcard = { path = "../../crates/recallcard" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2" }
+tauri-plugin-dialog = "2"
+
+[build-dependencies]
+tauri-build = "2"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.release]
+lto = "thin"
+strip = true
