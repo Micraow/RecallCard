@@ -11,6 +11,7 @@ use std::{
     },
 };
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 type Service = Arc<Mutex<DesktopSession>>;
@@ -42,6 +43,21 @@ async fn execute<T: serde::Serialize + Send + 'static>(
     .await
     .map_err(|_| "本地操作未完成，请重试；资料库仍保存在原目录".to_string())?
 }
+/// 仅本地主窗口明确点击复制时写纯文本；不开放系统剪贴板读取。
+#[tauri::command]
+fn write_clipboard(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    text: String,
+) -> Result<(), String> {
+    if window.label() != "main" || text.is_empty() || text.len() > 1024 * 1024 {
+        return Err("复制内容为空、超出上限或窗口无权操作".into());
+    }
+    app.clipboard()
+        .write_text(text)
+        .map_err(|_| "系统剪贴板写入失败，请重试".into())
+}
+
 #[tauri::command]
 async fn choose_vault(
     app: AppHandle,
@@ -492,9 +508,11 @@ async fn export_dream(
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             choose_vault,
+            write_clipboard,
             cancel_previews,
             vault_status,
             browse_records,

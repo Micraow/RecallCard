@@ -232,14 +232,11 @@ async function openConversation(item, offset = 0) {
     if (current()) { if(state.conversation?.session_ref!==item.session_ref) state.continuationGoal=''; state.conversation = item; state.conversationRows = result.messages || []; state.conversationOrderKnown=result.order_known;state.conversationOffset = offset; state.conversationNext = result.next_offset; state.continuation = null; }
   });
 }
-function copyText(text) {
-  const field = $('textarea', { readonly: true, 'aria-label': '复制内容' }); field.value = text;
-  document.body.append(field); field.select();
+async function copyText(text) {
   try {
-    if (!document.execCommand('copy')) throw new Error('copy failed');
+    await invoke('write_clipboard', { text });
     showNotice('已复制，可以粘贴到你选择的客户端');
-  } catch { showNotice('无法自动复制，请在预览框中全选后按 Ctrl+C', true); }
-  field.remove();
+  } catch (error) { showNotice(typeof error === 'string' ? error : '系统剪贴板写入失败，请重试', true); }
 }
 function conversationPage() {
   content.append(heading('会话与接续', '按来源找回一段对话，把原话和接下来的目标带到另一个 AI。'));
@@ -257,7 +254,7 @@ function conversationPage() {
     pane.append($('div',{class:'button-row'},...(state.conversationOffset?[button('回到开头',()=>openConversation(state.conversation,0),false,'small')]:[]),...(state.conversationNext!=null?[button('后续消息',()=>openConversation(state.conversation,state.conversationNext),false,'small')]:[])));
     const goal=$('textarea',{rows:2,placeholder:'例如：接着实现上次确定的方案，先检查还缺什么','aria-label':'接下来要做什么'});goal.value=state.continuationGoal||'';goal.addEventListener('input',()=>{state.continuationGoal=goal.value;state.continuation=null;document.querySelector('.copy-continuation')?.setAttribute('disabled','');});
     pane.append($('hr',{class:'divider'}),$('h2',{},'在另一个 AI 继续'),paragraph('写下下一步，程序会准备稳定背景、来源和选定会话中的消息。你检查后复制，再到目标客户端发送。'),goal,button('准备交接内容',()=>run('正在准备有来源的交接内容…',async current=>{const result=await invoke('prepare_continuation',{...args(),conversationRef:state.conversation.session_ref,goal:state.continuationGoal||''});if(current())state.continuation=result;}),true));
-    if(state.continuation){const preview=$('textarea',{rows:12,readonly:true,'aria-label':'交接内容预览'});preview.value=state.continuation.text;pane.append(preview,hint(`已带上 ${state.continuation.message_count} / ${state.continuation.available_messages} 条消息。复制和发送前请检查是否适合分享给目标服务。`),button('复制交接内容',()=>run('正在重新核对交接内容…',async current=>{const shown=state.continuation;const fresh=await invoke('prepare_continuation',{...args(),conversationRef:state.conversation.session_ref,goal:state.continuationGoal||''});if(!current())return;if(!shown||fresh.text!==shown.text){state.continuation=null;throw new Error('资料或权限已改变，请重新生成并检查交接预览');}copyText(shown.text);}),true,'copy-continuation'));}
+    if(state.continuation){const preview=$('textarea',{rows:12,readonly:true,'aria-label':'交接内容预览'});preview.value=state.continuation.text;pane.append(preview,hint(`已带上 ${state.continuation.message_count} / ${state.continuation.available_messages} 条消息。复制和发送前请检查是否适合分享给目标服务。`),button('复制交接内容',()=>run('正在重新核对交接内容…',async current=>{const shown=state.continuation;const fresh=await invoke('prepare_continuation',{...args(),conversationRef:state.conversation.session_ref,goal:state.continuationGoal||''});if(!current())return;if(!shown||fresh.text!==shown.text){state.continuation=null;throw new Error('资料或权限已改变，请重新生成并检查交接预览');}await copyText(shown.text);}),true,'copy-continuation'));}
   } else pane.append(paragraph('先从左侧选择一段已保存的对话。'));
   content.append($('div',{class:'conversation-layout'},list,pane));
 }

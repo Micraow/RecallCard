@@ -477,6 +477,7 @@ class NativeSmoke:
         assert "recallcard.context/1" in handoff and "下一步测试导入幂等" in handoff
         assert "event:" in handoff and "原始时间未知" in handoff
         browser.button("复制交接内容")
+        browser.idle()
         copied = run("xclip", "-selection", "clipboard", "-o")
         assert copied == handoff, "真实桌面剪贴板必须与预览完全一致"
         self.checkpoint("可见会话直接保存并跨AI接续")
