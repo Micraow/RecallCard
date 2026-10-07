@@ -130,6 +130,13 @@ enum Command {
         #[arg(long, required = true)]
         scope: Vec<String>,
     },
+    /// 只读响应 Claude Code 启动/恢复/压缩生命周期，不运行外部 Agent
+    AgentHook {
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+        #[arg(long, default_value_t = 1500)]
+        budget_tokens: usize,
+    },
     /// 抑制记录及其原始证据，防止检索与下一次 Dream 再次提炼
     Forget {
         id: String,
@@ -351,6 +358,15 @@ fn run(cli: Cli) -> Result<Value> {
             cursor,
         }),
         Command::Mcp { .. } => Err("MCP 必须以 stdio 模式启动".into()),
+        Command::AgentHook {
+            scope,
+            budget_tokens,
+        } => recallcard::agent_hook::session_start(
+            &vault,
+            Access::new(scope)?,
+            budget_tokens,
+            std::io::stdin().lock(),
+        ),
         Command::Forget { id, reason } => value(vault.suppress(&id, reason)?),
         Command::Restore { id } => value(vault.restore(&id)?),
     }

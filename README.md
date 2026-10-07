@@ -13,7 +13,8 @@ RecallCard 是本地优先、文件原生的个人上下文层。Rust 主程序�
 - 按客户端绑定 scope；来源校验、反注入回声、秘密模式脱敏、遗忘抑制
 - 主动导入手工 JSONL、ChatGPT 官方导出所选分支、Claude Code JSONL 日志
 - 手动 Dream：有界导出、差异预览、按摘要批准、保护记录、幂等收据和崩溃恢复
-- Chrome 扩展 + Native Messaging：只读查询、可见草稿、人工发送，不扫描网页回复
+- Chrome 扩展 + Native Messaging：ChatGPT，以及实验性 Qwen/Z.ai；只读查询、可见草稿、人工发送
+- Claude Code SessionStart 只读 Hook：启动、恢复、压缩、清空后重新生成授权 Bootstrap
 - 确定性人类视图、安全 Git 同步、离线健康检查
 - 可选 Python 向量 worker：空间签名、增量复用、权限过滤与离线降级
 - 可选 API Dream：固定前缀、请求预算、usage 记录，只生成待审核提议
@@ -67,6 +68,8 @@ vault/
 - [安全边界](docs/security.md)
 - [手动 Dream](docs/dream.md)
 - [浏览器桥安装与人工验收](docs/browser.md)
+- [Qwen / Z.ai 手动适配与限制 v0.3](docs/browser-adapters-v0.3.md)
+- [Agent 生命周期 Hook v0.3](docs/agent-hooks-v0.3.md)
 - [安全 Git 同步](docs/sync.md)
 - [可选向量 worker](docs/embedding.md)
 - [可选 API Dream](docs/dream-api.md)

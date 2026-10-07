@@ -1,3 +1,4 @@
+import './site-adapters.js';
 export const PROTOCOL = 'recallcard.action/1';
 export const MAX_ACTION_BYTES = 16 * 1024;
 export const MAX_CAPSULE_BYTES = 64 * 1024;
@@ -106,12 +107,8 @@ export function parseAction(text, session) {
   if (!match || match[1].includes('```')) fail('请只粘贴一个完整的 recallcard-action 代码块；未完成的流式内容不会执行');
   return validateAction(strictJson(match[1]), session);
 }
-export function routeFor(url) {
-  let parsed;
-  try { parsed = new URL(url); } catch { fail('页面地址无效'); }
-  if (parsed.origin !== 'https://chatgpt.com' || parsed.username || parsed.password || !/^(?:\/|\/c\/[A-Za-z0-9_-]+|\/g\/[A-Za-z0-9_-]+(?:\/c\/[A-Za-z0-9_-]+)?)\/?$/u.test(parsed.pathname)) fail('仅支持 chatgpt.com 的对话页面');
-  return parsed.origin + parsed.pathname.replace(/\/$/u, '');
-}
+export function siteFor(url) { return globalThis.RecallCardSites.forUrl(url); }
+export function routeFor(url) { return siteFor(url).route; }
 export function newNonce() {
   return Array.from(crypto.getRandomValues(new Uint8Array(24)), (n) => n.toString(16).padStart(2, '0')).join('');
 }

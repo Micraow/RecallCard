@@ -13,4 +13,5 @@ pub mod dream;
 pub mod import;
 pub mod native;
 
+pub mod agent_hook;
 pub mod sync;

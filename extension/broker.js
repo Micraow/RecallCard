@@ -1,22 +1,24 @@
-import { parseAction, validateAction, routeFor, newNonce, reserveRequest, makeCapsule, byteLength, fail, PROTOCOL } from './protocol.js';
+import { parseAction, validateAction, routeFor, siteFor, newNonce, reserveRequest, makeCapsule, byteLength, fail, PROTOCOL } from './protocol.js';
 export const HOST = 'com.recallcard.host';
 export function verifyPopup(sender, extensionId, popupUrl) {
   if (sender.id !== extensionId || sender.tab || sender.url !== popupUrl) fail('仅允许扩展自己的弹窗发起操作');
 }
 export function verifyContent(sender, extensionId, liveUrl, requestedRoute) {
-  if (sender.id !== extensionId || !Number.isInteger(sender.tab?.id) || sender.frameId !== 0 || !sender.documentId || sender.origin !== 'https://chatgpt.com') fail('拒绝未知扩展、子框架或缺少文档身份的消息');
+  if (sender.id !== extensionId || !Number.isInteger(sender.tab?.id) || sender.frameId !== 0 || !sender.documentId) fail('拒绝未知扩展、子框架或缺少文档身份的消息');
   const route = routeFor(liveUrl);
+  if (sender.origin !== siteFor(liveUrl).origin) fail('消息来源与当前网站不匹配');
   if (routeFor(sender.url) !== route || routeFor(sender.tab.url) !== route || requestedRoute !== route) fail('页面地址或标签身份已变化');
   return route;
 }
 export function bindSession(previous, { route, token, documentId }) {
   if (typeof token !== 'string' || !/^[a-f0-9-]{36}$/u.test(token)) fail('文档会话标识无效');
+  const platform = siteFor(route);
   if (previous?.route === route && previous.token === token && previous.documentId === documentId) return previous;
-  return { route, token, documentId, nonce: newNonce(), session_ref: `chatgpt:${token}`, used: [], preview: null, bootstrap: null, last_request_at: 0 };
+  return { route, token, documentId, nonce: newNonce(), session_ref: `${platform.id}:${token}`, used: [], preview: null, bootstrap: null, last_request_at: 0 };
 }
 export function publicState(state) {
   const preview = state.preview && Object.fromEntries(Object.entries(state.preview).filter(([key]) => !['source_request', 'result_fingerprint'].includes(key)));
-  return { route: state.route, nonce: state.nonce, session_ref: state.session_ref, preview };
+  return { route: state.route, platform: siteFor(state.route).id, platform_name: siteFor(state.route).name, nonce: state.nonce, session_ref: state.session_ref, preview };
 }
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
@@ -49,7 +51,7 @@ export class Broker {
     const tab = await this.api.getTab(tabId);
     const state = await this.api.load(tabId);
     if (!state || routeFor(tab.url) !== state.route || message.nonce !== state.nonce || message.session_ref !== state.session_ref) fail('会话已过期，请重新打开扩展');
-    if (!tab.active) fail('请回到目标 ChatGPT 标签页再操作');
+    if (!tab.active) fail('请回到目标对话标签页再操作');
     const check = await this.api.content(tabId, { kind: 'check', route: state.route, nonce: state.nonce, session_ref: state.session_ref }, state.documentId);
     if (!check?.ok) fail('页面文档或会话已变化，请重新打开扩展');
     return state;
@@ -117,10 +119,10 @@ export class Broker {
     if (!Number.isInteger(tabId)) fail('标签页编号无效');
     const tab = await this.api.getTab(tabId);
     routeFor(tab.url);
-    if (!tab.active) fail('请回到目标 ChatGPT 标签页再操作');
+    if (!tab.active) fail('请回到目标对话标签页再操作');
     if (['inspect', 'reset'].includes(message.kind)) {
       const response = await this.api.content(tabId, { kind: message.kind === 'inspect' ? 'describe' : 'reset' });
-      if (!response?.ok) fail(response?.error || '页面扩展未就绪，请刷新 ChatGPT 页面');
+      if (!response?.ok) fail(response?.error || '页面扩展未就绪，请刷新当前受支持的对话页面');
       const state = await this.current(tabId, response.result);
       return { ...publicState(state), inserted: response.result.inserted, warnings: response.result.warnings };
     }

@@ -2,13 +2,17 @@
 (() => {
   'use strict';
   class ComposerAdapter {
-    constructor(doc) { this.doc = doc; this.receipts = new Map(); }
+    constructor(doc, location = doc.location) { this.doc = doc; this.location = location; this.receipts = new Map(); }
     find() {
-      const nodes = [...this.doc.querySelectorAll('#prompt-textarea, textarea#mobile-composer-prompt')].filter((node) => node.isConnected && node.getClientRects().length > 0);
+      const site = globalThis.RecallCardSites.forUrl(this.location?.href);
+      const nodes = [...this.doc.querySelectorAll(site.selector)].filter((node) => {
+        const style = this.doc.defaultView.getComputedStyle?.(node);
+        return node.isConnected && node.getClientRects().length > 0 && style?.visibility !== 'hidden' && style?.visibility !== 'collapse' && style?.display !== 'none' && style?.opacity !== '0';
+      });
       if (nodes.length !== 1) throw new Error('没有找到唯一可用的输入框；请从预览手动复制，扩展已安全停止');
       const node = nodes[0];
-      if (node.disabled || node.readOnly || node.getAttribute('aria-disabled') === 'true') throw new Error('输入框暂不可编辑');
-      if (node.tagName !== 'TEXTAREA' && !(node.isContentEditable && node.classList.contains('ProseMirror'))) throw new Error('输入框结构未受支持；请手动复制预览');
+      if (node.disabled || node.readOnly || node.getAttribute('aria-disabled') === 'true' || node.getAttribute('aria-readonly') === 'true') throw new Error('输入框暂不可编辑');
+      if (node.tagName !== 'TEXTAREA' && !(site.richText && node.isContentEditable && node.classList.contains('ProseMirror'))) throw new Error('输入框结构未受支持；请手动复制预览');
       return node;
     }
     text(node) { return node.tagName === 'TEXTAREA' ? node.value : node.textContent; }
