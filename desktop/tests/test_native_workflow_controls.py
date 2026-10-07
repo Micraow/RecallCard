@@ -555,6 +555,7 @@ class NativeControlsTest(unittest.TestCase):
         smoke.temporary = Path(directory); paths = smoke.create_deepseek_fixtures()
         smoke.driver = Mock(); smoke.dialog_count = 0; smoke.capture = Mock(); smoke.describe_dialog = Mock()
         smoke.navigate_file_folder = Mock()
+        smoke.native_file_list_focused = Mock(return_value=True)
         native = {"open": True}
         smoke.dialog_windows = Mock(side_effect=lambda title: ["42"] if native["open"] else [])
         smoke.accessible_dialog = Mock(return_value=object())
@@ -563,7 +564,7 @@ class NativeControlsTest(unittest.TestCase):
             node = Mock()
             node.queryComponent.return_value.getExtents.return_value = SimpleNamespace(x=100, y=200, width=200, height=24)
             cells[path.name] = node
-        smoke.native_file_cells = Mock(side_effect=[cells, cells if selected else {paths[0].name: cells[paths[0].name]}])
+        smoke.native_file_cells = Mock(side_effect=lambda *_args, **kwargs: cells if not kwargs.get('selected') or selected else {paths[0].name: cells[paths[0].name]})
         approval = Mock()
         def approve(_):
             if accepted:
@@ -589,10 +590,10 @@ class NativeControlsTest(unittest.TestCase):
             approval.queryAction.return_value.doAction.side_effect = lambda value: (order.append("open") or original(value))
             with patch.dict(sys.modules, {"pyatspi": SimpleNamespace(DESKTOP_COORDS=0)}), patch.object(module, "run", side_effect=execute) as action, patch.object(module.time, "sleep"), patch.object(module, "wait_for", side_effect=self.immediate):
                 smoke.dialog_files(paths)
-            self.assertEqual(order, ["visible", "selected", "open"])
+            self.assertEqual(order, ["visible", "selected", "selected", "open"])
             smoke.navigate_file_folder.assert_called_once_with(module.DEEPSEEK_DIALOG, "42", paths[0].parent)
             self.assertFalse(any(call.args[1] == "type" for call in action.call_args_list))
-            self.assertEqual(sum(call.args == ("xdotool", "click", "1") for call in action.call_args_list), 1)
+            self.assertFalse(any(call.args[1] in ["click", "mousemove", "getwindowgeometry"] for call in action.call_args_list))
             self.assertEqual(sum(call.args == ("xdotool", "key", "--clearmodifiers", "ctrl+a") for call in action.call_args_list), 1)
             smoke.native_file_cells.assert_any_call(module.DEEPSEEK_DIALOG, {path.name for path in paths}, selected=True)
             approval.queryAction.return_value.doAction.assert_called_once_with(0)
@@ -623,6 +624,43 @@ class NativeControlsTest(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "未接受点击"):
                     smoke.dialog_files(paths)
             approval.queryAction.return_value.doAction.assert_called_once_with(0)
+            smoke.driver.idle.assert_not_called()
+
+    def test_file_list_focus_requires_unique_visible_sensitive_files_table(self):
+        api = SimpleNamespace(ROLE_TABLE=1, STATE_SHOWING=2, STATE_SENSITIVE=3, STATE_FOCUSED=4)
+        def table(name="Files", states={2, 3, 4}):
+            node = Mock(); node.getRole.return_value = api.ROLE_TABLE; node.name = name
+            node.getState.return_value.contains.side_effect = lambda state: state in states
+            return node
+        smoke = object.__new__(module.NativeSmoke); smoke.accessible_dialog = Mock(); smoke.accessible_nodes = Mock()
+        with patch.dict(sys.modules, {"pyatspi": api}):
+            for node in [table("Recent"), table(states={2, 3}), table(states={3, 4}), table(states={2, 4})]:
+                smoke.accessible_nodes.return_value = [(node, 0)]
+                self.assertFalse(smoke.native_file_list_focused(module.DEEPSEEK_DIALOG))
+            smoke.accessible_nodes.return_value = [(table(), 0)]
+            self.assertTrue(smoke.native_file_list_focused(module.DEEPSEEK_DIALOG))
+            focused = table(); actual = focused.queryTable.return_value
+            smoke.accessible_nodes.return_value = [(focused, 0)]
+            actual.nRows = 8; actual.getSelectedRows.return_value = [0, 1]
+            self.assertFalse(smoke.native_file_list_focused(module.DEEPSEEK_DIALOG, expected_rows=2), "Recent额外行不能只看目标子集")
+            actual.nRows = 2
+            self.assertTrue(smoke.native_file_list_focused(module.DEEPSEEK_DIALOG, expected_rows=2, all_selected=True))
+            for selected in [[], [0], [0, 1, 2], [0, 0]]:
+                actual.getSelectedRows.return_value = selected
+                self.assertFalse(smoke.native_file_list_focused(module.DEEPSEEK_DIALOG, expected_rows=2, all_selected=True))
+            smoke.accessible_nodes.return_value = [(table(), 0), (table(), 0)]
+            with self.assertRaisesRegex(AssertionError, "不唯一"):
+                smoke.native_file_list_focused(module.DEEPSEEK_DIALOG)
+
+    def test_multiple_picker_never_sends_select_all_without_file_list_focus(self):
+        with tempfile.TemporaryDirectory() as directory:
+            smoke, paths, approval, execute = self.multiple_picker(directory)
+            smoke.native_file_list_focused.return_value = False
+            with patch.object(module, "run", side_effect=execute) as action, patch.object(module, "wait_for", side_effect=self.immediate):
+                with self.assertRaisesRegex(AssertionError, "原生列表"):
+                    smoke.dialog_files(paths)
+            self.assertFalse(any(call.args[-1] == "ctrl+a" for call in action.call_args_list))
+            approval.queryAction.return_value.doAction.assert_not_called()
             smoke.driver.idle.assert_not_called()
 
     def test_multiple_picker_refuses_extra_files_mixed_folders_or_duplicate_paths(self):
