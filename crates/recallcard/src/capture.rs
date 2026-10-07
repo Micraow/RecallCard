@@ -2,6 +2,7 @@
 use crate::model::*;
 use regex::Regex;
 use serde_json::Value;
+use std::sync::OnceLock;
 
 pub fn redact_event(input: &mut EventInput) -> Result<()> {
     fn synthetic_origin(text: &str) -> Option<Origin> {
@@ -29,10 +30,16 @@ pub fn redact_event(input: &mut EventInput) -> Result<()> {
         r"(?i)\b(?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*[^\s,;]+",
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
     ];
-    let rules = patterns
-        .iter()
-        .map(|p| Regex::new(p).map_err(|e| e.to_string()))
-        .collect::<Result<Vec<_>>>()?;
+    static RULES: OnceLock<Result<Vec<Regex>>> = OnceLock::new();
+    let rules = RULES
+        .get_or_init(|| {
+            patterns
+                .iter()
+                .map(|p| Regex::new(p).map_err(|e| e.to_string()))
+                .collect::<Result<Vec<_>>>()
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
     fn scrub(text: &mut String, rules: &[Regex]) -> usize {
         let mut n = 0;
         for rule in rules {
@@ -75,22 +82,22 @@ pub fn redact_event(input: &mut EventInput) -> Result<()> {
             _ => 0,
         }
     }
-    let mut count = scrub(&mut input.content, &rules);
+    let mut count = scrub(&mut input.content, rules);
     for field in [
         &mut input.source.platform,
         &mut input.source.account_namespace,
         &mut input.source.conversation_id,
         &mut input.source.message_id,
     ] {
-        count += scrub(field, &rules);
+        count += scrub(field, rules);
     }
     for part in &mut input.parts {
-        count += scrub(&mut part.text, &rules);
+        count += scrub(&mut part.text, rules);
     }
     if let Some(url) = &mut input.source.url {
-        count += scrub(url, &rules);
+        count += scrub(url, rules);
     }
-    count += walk(&mut input.metadata, &rules);
+    count += walk(&mut input.metadata, rules);
     input.capture.redacted |= count > 0;
     input.capture.redaction_count = input
         .capture

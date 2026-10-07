@@ -3,10 +3,13 @@
 //! 宿主应把整个服务放在互斥锁内，每条命令持锁到结束；切换 Vault 会废弃所有旧会话
 //! 和审查令牌。预览只读；确认命令只接受保存在本机内存中的预览编号，不接受替代路径
 //! 或替代内容。错误不转发解析器、操作系统或 Git 输出中的文件正文、秘密和路径。
+//! 多文件导入的后台线程不持桌面会话锁；宿主应轮询状态，不能持锁等待任务完成。
 mod background;
+mod imports;
 mod memory;
 mod records;
 pub use background::{BackgroundCandidate, BackgroundPage, BackgroundReview};
+pub use imports::{ImportJobFile, ImportJobPreview, ImportJobState, ImportJobStatus};
 pub use memory::{MemoryEdit, MemoryReview};
 
 use crate::{
@@ -126,6 +129,8 @@ pub struct DesktopSession {
     pending_note: Option<PendingNote>,
     pending_memory: Option<memory::PendingMemory>,
     pending_background: Option<background::PendingBackground>,
+    pending_import_job: Option<imports::PendingImportJob>,
+    active_import_job: Option<imports::ImportJobControl>,
 }
 
 pub type SessionService = DesktopSession;
@@ -149,6 +154,7 @@ struct PendingImportSelection {
     selection_id: String,
     file: FileSnapshot,
     scope: String,
+    format: String,
 }
 
 enum DreamInput {
@@ -167,7 +173,7 @@ struct PendingNote {
     input: EventInput,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct FileSnapshot {
     path: PathBuf,
     identity: FileIdentity,
@@ -175,7 +181,7 @@ struct FileSnapshot {
     bytes: usize,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct FileIdentity {
     #[cfg(unix)]
     device: u64,
@@ -221,6 +227,8 @@ impl DesktopSession {
     }
 
     pub fn close_vault(&mut self) {
+        self.pause_import_job();
+        self.pending_import_job = None;
         self.selected = None;
         self.pending_import = None;
         self.pending_import_selection = None;
@@ -433,18 +441,18 @@ impl DesktopSession {
         self.pending_import_selection = None;
         check_scope(scope)?;
         validate_import_format(format)?;
-        let limit = if matches!(format, "auto" | "chatgpt-export") {
+        let limit = if matches!(format, "auto" | "chatgpt-export" | "deepseek-export") {
             import_bundle::MAX_ARCHIVE_BYTES
         } else {
             IMPORT_LIMIT
         };
         let (file, bytes) = bounded_bytes(path, limit)?;
         if import_bundle::is_zip(&bytes) {
-            if !matches!(format, "auto" | "chatgpt-export") {
-                return Err("ZIP 备份请选择 ChatGPT 或自动识别格式".into());
+            if !matches!(format, "auto" | "chatgpt-export" | "deepseek-export") {
+                return Err("ZIP 备份请选择对应平台或自动识别格式".into());
             }
             let summary =
-                import_bundle::inspect_archive(&bytes, scope).map_err(|_| archive_error())?;
+                import_bundle::inspect_import_bytes(format, &bytes, scope).map_err(|_| archive_error())?;
             let selection = ImportSelection {
                 selection_id: token(),
                 session_id: session_id.into(),
@@ -459,6 +467,7 @@ impl DesktopSession {
                 selection_id: selection.selection_id.clone(),
                 file,
                 scope: scope.into(),
+                format: format.into(),
             });
             return Ok(ImportFilePreview::Selection(selection));
         }
@@ -504,7 +513,7 @@ impl DesktopSession {
             format.into()
         };
         let parsed = import_bundle::parse_import_bytes(&format, bytes, scope)
-            .map_err(|_| "导入文件无效：请检查格式、范围和 5000 条事件上限".to_owned())?;
+            .map_err(|_| "导入文件无效：请检查来源结构、资料范围和大小限制".to_owned())?;
         self.prepare_import_preview(session_id, &format, scope, file, parsed, None)
     }
 
@@ -525,18 +534,19 @@ impl DesktopSession {
         let (file, bytes) = checked_bytes(&pending.file, import_bundle::MAX_ARCHIVE_BYTES)?;
         let selected: BTreeSet<String> = source_ids.iter().cloned().collect();
         let scope = pending.scope.clone();
+        let format = pending.format.clone();
         // 文件未改变时允许调整批次；文件核对失败会永久废弃本次清单。
         self.pending_import_selection = Some(pending);
         if selected.is_empty() {
             return Err("请至少选择一个有消息的会话，再生成导入预览".into());
         }
         let parsed =
-            import_bundle::parse_archive_selected(&bytes, &scope, &selected).map_err(|_| {
-                "无法预览本批会话：请确认会话来自当前清单，且所选消息合计不超过 5000 条".to_owned()
+            import_bundle::parse_import_bytes_selected(&format, &bytes, &scope, &selected).map_err(|_| {
+                "无法预览本批会话：请确认所选会话属于当前清单，且未超过文件或消息上限".to_owned()
             })?;
         self.prepare_import_preview(
             session_id,
-            "chatgpt-export",
+            &format,
             &scope,
             file,
             parsed,
@@ -645,7 +655,7 @@ impl DesktopSession {
             }
         };
         let parsed = if let Some(ids) = &pending.selected_source_ids {
-            import_bundle::parse_archive_selected(&bytes, &pending.scope, ids)
+            import_bundle::parse_import_bytes_selected(&pending.format, &bytes, &pending.scope, ids)
         } else {
             import_bundle::parse_import_bytes(&pending.format, &bytes, &pending.scope)
         }
@@ -654,8 +664,8 @@ impl DesktopSession {
         let result = (|| {
             let before = vault.events()?.len();
             let mut refs = Vec::new();
-            for event in parsed.events {
-                refs.push(format!("event:{}", vault.capture(event)?.id));
+            for event in vault.capture_batch(parsed.events)? {
+                refs.push(format!("event:{}", event.id));
             }
             let after = vault.events()?.len();
             let events_added = after.saturating_sub(before);
@@ -841,6 +851,7 @@ impl DesktopSession {
 
     pub fn cancel_previews(&mut self, session_id: &str) -> Result<()> {
         self.vault(session_id)?;
+        self.pending_import_job = None;
         self.pending_import = None;
         self.pending_import_selection = None;
         self.pending_dream = None;
@@ -1286,37 +1297,14 @@ fn bounded_bytes(path: &Path, limit: usize) -> Result<(FileSnapshot, Vec<u8>)> {
 }
 
 fn detect_import_format(text: &str) -> Result<String> {
-    if let Ok(value) = serde_json::from_str::<Value>(text) {
-        if value["schema"] == "recallcard.conversation/1" {
-            return Ok("recallcard-conversation".into());
-        }
-        if value["mapping"].is_object()
-            || value
-                .as_array()
-                .is_some_and(|a| a.iter().all(|v| v["mapping"].is_object()))
-        {
-            return Ok("chatgpt-export".into());
-        }
-    }
-    if let Some(first) = text
-        .lines()
-        .find(|s| !s.trim().is_empty())
-        .and_then(|line| serde_json::from_str::<Value>(line).ok())
-    {
-        if first["sessionId"].is_string() && first["type"].is_string() {
-            return Ok("claude-code".into());
-        }
-        if first["source"].is_object() && first["role"].is_string() {
-            return Ok("manual-jsonl".into());
-        }
-    }
-    Err("未识别出支持的对话文件。请选择扩展导出的 JSON、ChatGPT 会话 JSON / ZIP 或 Claude Code JSONL".into())
+    import_bundle::detect_import_format(text)
 }
 
 fn validate_import_format(format: &str) -> Result<()> {
     if [
         "manual-jsonl",
         "chatgpt-export",
+        "deepseek-export",
         "claude-code",
         "recallcard-conversation",
         "auto",
