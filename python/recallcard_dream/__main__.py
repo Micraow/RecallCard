@@ -102,7 +102,9 @@ def parser():
     result.add_argument("--max-job-bytes", type=int, default=MAX_JOB_BYTES, help="输入 Job 字节上限，最多 1 MiB")
     result.add_argument("--max-result-bytes", type=int, default=MAX_RESULT_BYTES, help="Result 文件字节上限，最多 1 MiB")
     result.add_argument("--max-response-bytes", type=int, default=MAX_RESPONSE_BYTES, help="供应商完整响应字节上限，最多 2 MiB")
-    result.add_argument("--timeout", type=float, default=30, help="请求超时秒数，大于 0 且最多 120；默认 30")
+    result.add_argument("--timeout", type=float, default=30, help="整个请求的超时秒数，大于 0 且最多 1800；默认 30")
+    result.add_argument("--connect-timeout", type=float, help="连接超时秒数，最多120且不超过整个请求；默认最多30")
+    result.add_argument("--read-timeout", type=float, help="单次读写等待秒数，不超过整个请求；默认与请求时限相同")
     return result
 
 
@@ -129,7 +131,7 @@ def main(argv=None):
                     fail("unsafe_path", "Result 输出不能覆盖输入 Job")
             approval = NetworkApproval(args.allow_network, args.approve_endpoint,
                                        tuple(args.approve_scope), args.approve_dream_data)
-            client = DreamClient(args.endpoint, args.model, approval, timeout=args.timeout,
+            client = DreamClient(args.endpoint, args.model, approval, timeout=args.timeout, connect_timeout=args.connect_timeout, read_timeout=args.read_timeout,
                                  max_output_tokens=args.max_output_tokens, max_request_bytes=args.max_request_bytes,
                                  max_total_request_bytes=args.max_request_bytes, max_job_bytes=args.max_job_bytes,
                                  max_result_bytes=args.max_result_bytes, max_response_bytes=args.max_response_bytes)

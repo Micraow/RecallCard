@@ -89,6 +89,19 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(json.loads(sent["messages"][-1]["content"]), fixture())
         self.assertNotIn(KEY, canonical(response).decode())
 
+    def test_configured_wait_limits_reach_the_worker_without_changing_data_or_budget(self):
+        request = request_fixture()
+        request["config"]["timeouts"] = {"connect_seconds": 15, "read_seconds": 300, "operation_seconds": 600}
+        response, transport, factory = self.run_request(request)
+        self.assertIs(response["ok"], True)
+        kwargs = factory.call_args.kwargs
+        self.assertEqual((kwargs["connect_timeout"], kwargs["read_timeout"], kwargs["timeout"]), (15, 300, 600))
+        self.assertEqual(transport.calls[0][3], 600)
+        self.assertEqual(json.loads(transport.calls[0][1])["messages"][-1]["content"], canonical(fixture()).decode())
+        for bad in ({"connect_seconds":121}, {"read_seconds":31}, {"operation_seconds":1801}, {"operation_seconds":True}, {"other":2}):
+            request["config"]["timeouts"] = bad
+            self.assert_rejected_before_call(request)
+
     def test_absent_or_nonobject_consent_never_calls(self):
         for consent in (None, False, True, [], "approved", 1):
             with self.subTest(consent=consent):

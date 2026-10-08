@@ -27,6 +27,42 @@ pub struct MemoryProviderConfig {
     pub model: String,
 }
 
+/// 传输等待与请求体/输出预算独立；旧配置按原30秒网络/45秒进程监督解释。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryTimeouts {
+    pub connect_seconds: u64,
+    pub read_seconds: u64,
+    pub operation_seconds: u64,
+}
+impl Default for MemoryTimeouts {
+    fn default() -> Self {
+        Self {
+            connect_seconds: 30,
+            read_seconds: 30,
+            operation_seconds: 30,
+        }
+    }
+}
+impl MemoryTimeouts {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+    pub fn validate(&self) -> AppResult<()> {
+        if !(1..=120).contains(&self.connect_seconds)
+            || !(1..=1800).contains(&self.read_seconds)
+            || !(1..=1800).contains(&self.operation_seconds)
+            || self.connect_seconds > self.operation_seconds
+            || self.read_seconds > self.operation_seconds
+        {
+            return Err(invalid(
+                "超时须满足连接1–120秒、读取与整个请求1–1800秒，单步不得超过整个请求",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// 配置模型不是数据授权。此记录须由人的本机设置动作提供，模型接口不能创建。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +107,8 @@ pub struct MemoryConfig {
     pub credential_storage: Option<super::credentials::CredentialStorage>,
     pub consent: Option<MemoryConsent>,
     pub budget: MemoryBudget,
+    #[serde(default, skip_serializing_if = "MemoryTimeouts::is_default")]
+    pub timeouts: MemoryTimeouts,
     pub quiet_seconds: u64,
     pub batch_size: usize,
     pub max_projection_bytes: usize,
@@ -86,6 +124,7 @@ impl Default for MemoryConfig {
             credential_storage: None,
             consent: None,
             budget: MemoryBudget::default(),
+            timeouts: MemoryTimeouts::default(),
             quiet_seconds: 30,
             batch_size: 16,
             max_projection_bytes: 256 * 1024,
@@ -94,6 +133,7 @@ impl Default for MemoryConfig {
 }
 impl MemoryConfig {
     pub fn validate(&self) -> AppResult<()> {
+        self.timeouts.validate()?;
         if self.schema != CONFIG_SCHEMA
             || validate_scope(&self.scope).is_err()
             || self.quiet_seconds > 86400
@@ -157,6 +197,8 @@ impl MemoryConfig {
     fn binding(&self) -> AppResult<String> {
         let mut config = self.clone();
         config.paused = false;
+        // 等待时限不改变证据、目的地或预算身份，调整后可显式重试原任务。
+        config.timeouts = MemoryTimeouts::default();
         digest(&config)
     }
 }
@@ -237,6 +279,14 @@ pub trait MemoryProvider {
         Ok(())
     }
     fn execute(&mut self, config: &MemoryConfig, job: &DreamJob) -> AppResult<ProviderOutput>;
+    fn execute_cancellable(
+        &mut self,
+        config: &MemoryConfig,
+        job: &DreamJob,
+        _cancelled: &dyn Fn() -> AppResult<bool>,
+    ) -> AppResult<ProviderOutput> {
+        self.execute(config, job)
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MemoryJobRecord {
@@ -429,6 +479,22 @@ impl<'a> MemoryRuntime<'a> {
     pub fn configure(&self, config: MemoryConfig) -> AppResult<MemoryRuntimeStatus> {
         config.validate()?;
         let guard = self.lock("state.lock")?;
+        self.write_config_locked(&config)?;
+        drop(guard);
+        self.status()
+    }
+    /// 仅调整等待时限；同一写锁内保留同期目的地、权限与预算。
+    pub fn set_timeouts(&self, timeouts: MemoryTimeouts) -> AppResult<MemoryRuntimeStatus> {
+        timeouts.validate()?;
+        let guard = self.lock("state.lock")?;
+        let mut config = self.read_config()?;
+        config.timeouts = timeouts;
+        config.validate()?;
+        self.write_config_locked(&config)?;
+        drop(guard);
+        self.status()
+    }
+    fn write_config_locked(&self, config: &MemoryConfig) -> AppResult<()> {
         let (root_identity, marker) = self.vault_identity()?;
         self.vault
             .write_replace(
@@ -444,7 +510,7 @@ impl<'a> MemoryRuntime<'a> {
             for summary in self.records()? {
                 if summary.paused_by_config
                     && summary.status.state == JobState::Paused
-                    && summary.config_hash == self.binding(&config)?
+                    && summary.config_hash == self.binding(config)?
                 {
                     let mut record = self.load(&summary.status.job_id)?;
                     record.paused_by_config = false;
@@ -454,8 +520,7 @@ impl<'a> MemoryRuntime<'a> {
                 }
             }
         }
-        drop(guard);
-        self.status()
+        Ok(())
     }
     pub fn status(&self) -> AppResult<MemoryRuntimeStatus> {
         let _guard = self.read_lock()?;
@@ -895,7 +960,21 @@ impl<'a> MemoryRuntime<'a> {
                 config
             };
             let output = provider
-                .execute(&config, &record.projection)
+                .execute_cancellable(&config, &record.projection, &|| {
+                    let _state = match self.read_lock() {
+                        Ok(guard) => guard,
+                        Err(error) if error.code == ErrorCode::Conflict && error.retryable => {
+                            return Ok(false)
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    let current = self.read_config()?;
+                    let job = self.load(&record.status.job_id)?;
+                    Ok(current.paused
+                        || !current.enabled
+                        || self.binding(&current)? != record.config_hash
+                        || matches!(job.status.state, JobState::Paused | JobState::Cancelled))
+                })
                 .map_err(|error| {
                     let mut safe = AppError::new(
                         error.code,
@@ -1554,7 +1633,7 @@ impl MemoryProvider for PythonMemoryProvider {
                 .python_path
                 .join("recallcard_dream/runtime.py")
                 .is_file()
-            || !(1..=120).contains(&self.timeout_seconds)
+            || !(1..=1815).contains(&self.timeout_seconds)
             || !self.credential_status(config).present
         {
             return Err(AppError::new(
@@ -1566,6 +1645,14 @@ impl MemoryProvider for PythonMemoryProvider {
         self.verify_worker()
     }
     fn execute(&mut self, config: &MemoryConfig, job: &DreamJob) -> AppResult<ProviderOutput> {
+        self.execute_cancellable(config, job, &|| Ok(false))
+    }
+    fn execute_cancellable(
+        &mut self,
+        config: &MemoryConfig,
+        job: &DreamJob,
+        cancelled: &dyn Fn() -> AppResult<bool>,
+    ) -> AppResult<ProviderOutput> {
         self.available(config)?;
         if self.credential.is_none() && self.environment_binding.is_none() {
             self.environment_binding = config.provider.clone();
@@ -1623,8 +1710,24 @@ impl MemoryProvider for PythonMemoryProvider {
                 if envelope.error.is_some() || envelope.verification.as_deref() != Some("provider_reported") { return Err(invalid("模型 worker 的验证标记无效")); }
                 Ok(ProviderOutput { result: envelope.result.ok_or_else(|| invalid("模型结果缺失"))?, usage: envelope.usage.ok_or_else(|| invalid("模型用量字段缺失"))?, verification: "provider_reported".into() })
             };
-            let result = tokio::time::timeout(std::time::Duration::from_secs(self.timeout_seconds), exchange).await.unwrap_or_else(|_| Err(unavailable()));
-            if result.is_err() { let _ = child.kill().await; }
+            let timeout = if self.timeout_seconds == 45 { config.timeouts.operation_seconds + 15 } else { self.timeout_seconds };
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+            let result = {
+                let mut exchange = std::pin::pin!(exchange);
+                loop {
+                    match cancelled() {
+                        Ok(true) => break Err(AppError::new(ErrorCode::Cancelled,"模型调用已取消","已发出的请求可能仍计费；不会自动重试")),
+                        Err(error) => break Err(error),
+                        Ok(false) => {}
+                    }
+                    if std::time::Instant::now() >= until { break Err(unavailable()); }
+                    match tokio::time::timeout(std::time::Duration::from_millis(100), exchange.as_mut()).await {
+                        Ok(result) => break result,
+                        Err(_) => continue,
+                    }
+                }
+            };
+            if result.is_err() { let _ = child.kill().await; let _ = child.wait().await; }
             result
         })
     }

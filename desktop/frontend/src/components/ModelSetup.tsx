@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { appError, type AppError } from "../service/contracts";
 import { scopeLabel } from "../service/types";
-import type { MemoryConfig } from "../service/runtime";
+import { validMemoryTimeouts, type MemoryConfig } from "../service/runtime";
 import {
   validModelTarget,
   type ModelSetupRequest,
@@ -40,6 +40,10 @@ export function ModelSetupDialog({
   const [output, setOutput] = useState(
     String(defaults.budget.max_output_tokens_per_call),
   );
+  const [connectSeconds, setConnectSeconds] = useState(String(defaults.timeouts?.connect_seconds ?? 30));
+  const [readSeconds, setReadSeconds] = useState(String(defaults.timeouts?.read_seconds ?? 30));
+  const [operationSeconds, setOperationSeconds] = useState(String(defaults.timeouts?.operation_seconds ?? 30));
+  const timeouts = {connect_seconds: Number(connectSeconds), read_seconds: Number(readSeconds), operation_seconds: Number(operationSeconds)};
   const [step, setStep] = useState<"input" | "review">("input");
   const [capability, setCapability] = useState<ModelSetupSnapshot | null>(null);
   const [remember, setRemember] = useState(false);
@@ -49,7 +53,7 @@ export function ModelSetupDialog({
   const [submitting, setSubmitting] = useState(false);
   const submitLock = useRef(false);
   const [error, setError] = useState<AppError | null>(null);
-  const validBudget =
+  const validBudget = validMemoryTimeouts(timeouts) &&
     Number.isSafeInteger(Number(calls)) &&
     Number(calls) >= 1 &&
     Number(calls) <= 1_000_000 &&
@@ -109,6 +113,7 @@ export function ModelSetupDialog({
       paused: false,
       scope,
       provider,
+      timeouts,
       consent: {
         ...provider,
         scope,
@@ -198,6 +203,15 @@ export function ModelSetupDialog({
             <p className="field-hint">
               默认仅当前后台服务使用。系统安全存储确认可用时，下一步可以选择安全保存。
             </p>
+            <details>
+              <summary>连接与等待时间</summary>
+              <div className="budget-fields">
+                <label className="field-label">连接等待（秒）<input aria-label="连接等待秒数" className="field-input" type="number" min="1" max="120" value={connectSeconds} onChange={e=>setConnectSeconds(e.target.value)} /></label>
+                <label className="field-label">单次读取等待（秒）<input aria-label="单次读取等待秒数" className="field-input" type="number" min="1" max="1800" value={readSeconds} onChange={e=>setReadSeconds(e.target.value)} /></label>
+                <label className="field-label">整个请求时限（秒）<input aria-label="整个请求时限秒数" className="field-input" type="number" min="1" max="1800" value={operationSeconds} onChange={e=>setOperationSeconds(e.target.value)} /></label>
+              </div>
+              <p className="field-hint">慢模型可延长等待，单步不得超过整个请求。暂停或取消会终止本机等待；已发出的请求仍可能计费。</p>
+            </details>
             <div className="budget-fields">
               <div>
                 <label className="field-label" htmlFor="model-month-calls">
@@ -305,7 +319,7 @@ export function ModelSetupDialog({
               <div className="model-budget-review">
                 每月最多 {Number(calls).toLocaleString()} 次请求 · 预留{" "}
                 {Number(tokens).toLocaleString()} tokens · 单次输出最多{" "}
-                {Number(output).toLocaleString()} tokens
+                {Number(output).toLocaleString()} tokens · 连接 {connectSeconds} 秒 / 读取 {readSeconds} 秒 / 整个请求 {operationSeconds} 秒
               </div>
               <p className="field-hint">
                 当前版本同一资料库只支持一个活动整理范围，保存会替换其他范围的整理设置。配置和凭据可用，不代表模型已经成功响应。

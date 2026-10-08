@@ -1,4 +1,10 @@
 import type { AppError, JobState } from "./contracts";
+export interface MemoryTimeouts { connect_seconds: number; read_seconds: number; operation_seconds: number; }
+export const validMemoryTimeouts = (value: MemoryTimeouts): boolean =>
+  [value.connect_seconds, value.read_seconds, value.operation_seconds].every(Number.isSafeInteger) &&
+  value.connect_seconds >= 1 && value.connect_seconds <= 120 &&
+  value.read_seconds >= 1 && value.read_seconds <= value.operation_seconds &&
+  value.operation_seconds >= value.connect_seconds && value.operation_seconds <= 1800;
 export interface MemoryConfig {
   schema: "recallcard.memory-runtime/1";
   credential_storage?:
@@ -26,6 +32,7 @@ export interface MemoryConfig {
     max_output_tokens_per_call: number;
     max_request_bytes_per_call: number;
   };
+  timeouts?: MemoryTimeouts;
   quiet_seconds: number;
   batch_size: number;
   max_projection_bytes: number;

@@ -354,6 +354,15 @@ enum JobsCommand {
 }
 #[derive(Subcommand)]
 enum BackgroundCommand {
+    /// 只调整已保存模型的等待时限，不改变发送范围、密钥或请求预算
+    Timeouts {
+        #[arg(long, default_value_t = 30)]
+        connect_seconds: u64,
+        #[arg(long, default_value_t = 30)]
+        read_seconds: u64,
+        #[arg(long, default_value_t = 30)]
+        operation_seconds: u64,
+    },
     Status {
         #[arg(long, default_value = "personal")]
         scope: String,
@@ -1073,6 +1082,17 @@ fn run_application(cli: &Cli) -> Option<recallcard::application::AppResult<Value
                 }
             },
             Command::Background { action } => match action {
+                BackgroundCommand::Timeouts {
+                    connect_seconds,
+                    read_seconds,
+                    operation_seconds,
+                } => Ok(json!(memory.set_timeouts(
+                    recallcard::application::background_memory::MemoryTimeouts {
+                        connect_seconds: *connect_seconds,
+                        read_seconds: *read_seconds,
+                        operation_seconds: *operation_seconds,
+                    }
+                )?)),
                 BackgroundCommand::Status { scope } => Ok(json!(memory.status_for_scope(scope)?)),
                 BackgroundCommand::Configure { file } => {
                     let config: MemoryConfig = input(file).map_err(|_| {

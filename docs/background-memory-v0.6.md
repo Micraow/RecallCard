@@ -58,3 +58,19 @@
 共同进程有单实例租约、导入调度线程、记忆调度和真实心跳。已包含独立 CLI 服务在启动器退出后继续运行、停机时不应用迟到模型结果的合成测试。运行时保存实际 build 信息与程序摘要，避免静默混用旧后台程序。
 
 系统 keyring adapter 已实现；默认回归使用 keyring 官方 mock 和合成 backend，不写真实系统凭据。Linux 图形登录会话、macOS Keychain 和 Windows Credential Manager 的真实保存/解锁/重启行为仍需各平台验收，不能用 mock 通过代替。当前会话管道、父进程环境不变、不同供应商子进程隔离、重启缺密钥时不收费重试均需独立回归。
+
+## 0.7 候选：慢模型等待与取消
+
+原有配置不变时，网络整个请求仍为 30 秒，Python 子进程另有 15 秒启动／收尾余量。可在模型设置的「连接与等待时间」分别配置连接、单次读取和整个请求。连接最多 120 秒，读取和请求最多 1800 秒，单步不得超过整个请求；这些是等待上限，不改变发送内容、token预算或 TLS 校验。
+
+CLI 可只修改等待设置，不必重新输入目的地、密钥或授权：
+
+```sh
+recallcard --vault /你的资料库 background timeouts --connect-seconds 15 --read-seconds 300 --operation-seconds 600
+```
+
+也可在 `background configure --file` 的配置中加入 `timeouts: {connect_seconds, read_seconds, operation_seconds}`。旧配置缺少此字段时使用原默认值。Python 独立入口对应 `--connect-timeout`、`--read-timeout`、`--timeout`。
+
+正在执行的请求沿用启动时限；修改等待时间适用于下一次请求或人工明确重试。等待设置不改变任务的数据身份，但失败请求的预留预算不会退还。模型请求没有自动重发。配置暂停、任务暂停／取消会终止本机 worker 并等待回收；供应商已收到的请求可能仍计费，不能承诺远端请求被撤销。
+
+socket 的连接、读写受各自时限与整体剩余时间约束；Rust 进程监督覆盖 Python 启动、DNS等可能阻塞的调用、管道输入输出和进程收尾。监督是另一层明确上限，不是无限等待。响应字节、输入投影和输出 token 的硬限制仍保留。

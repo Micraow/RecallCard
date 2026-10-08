@@ -2,7 +2,8 @@ name: 自动连接与文件入口验收
 on:
   workflow_dispatch:
   push:
-    branches: ["validate/connected-context-*"]
+    branches: ["validate/connected-context-*", "work/connected-context-v0.7"]
+    paths: ["crates/**", "Cargo.*", "python/**", "desktop/frontend/**", "desktop/src-tauri/**", "desktop/package*.json", "desktop/tests/**", "extension/**", "VERSION", ".github/workflows/connected-context.yml"]
 permissions:
   contents: read
 concurrency:
@@ -68,6 +69,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
+          cargo clippy --locked --workspace --all-targets --target-dir desktop/src-tauri/target -- -D warnings
           cargo test --locked --workspace --target-dir desktop/src-tauri/target
       - name: 核心真实结果：${{ steps.core_checks.outcome }}
         if: always()

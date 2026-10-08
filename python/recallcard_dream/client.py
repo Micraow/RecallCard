@@ -431,11 +431,11 @@ class TransportResponse:
     body: bytes
 
 
-def https_transport(endpoint: str, payload: bytes, key: str, timeout: float, response_limit: int) -> TransportResponse:
+def https_transport(endpoint: str, payload: bytes, key: str, timeout: float, response_limit: int, *, connect_timeout=None, read_timeout=None) -> TransportResponse:
     """标准库直连 HTTPS；无代理、无重定向、无重试，错误正文不读取。"""
     url = urlsplit(validate_endpoint(endpoint))
     deadline = time.monotonic() + timeout
-    connection = http.client.HTTPSConnection(url.hostname, url.port, timeout=timeout, context=ssl.create_default_context())
+    connection = http.client.HTTPSConnection(url.hostname, url.port, timeout=min(timeout, connect_timeout or timeout), context=ssl.create_default_context())
     try:
         connection.connect()
         sock = connection.sock
@@ -444,7 +444,7 @@ def https_transport(endpoint: str, payload: bytes, key: str, timeout: float, res
             seconds = deadline - time.monotonic()
             if seconds <= 0:
                 fail("timeout", "供应商请求超时；不会自动重试")
-            sock.settimeout(seconds)
+            sock.settimeout(min(seconds, read_timeout or timeout))
 
         remaining()
         connection.request("POST", url.path, payload, {"Authorization": "Bearer " + key, "Content-Type": "application/json",
@@ -510,16 +510,24 @@ class DreamClient:
     """每次 execute 至多发送一条请求；同一实例的请求/字节预算累计，不缓存结果或秘密。"""
 
     def __init__(self, endpoint: str, model: str, approval: NetworkApproval | None = None, *,
-                 transport: Callable = https_transport, timeout=30.0, max_output_tokens=4096,
+                 transport: Callable = https_transport, timeout=30.0, connect_timeout=None, read_timeout=None, max_output_tokens=4096,
                  max_requests=1, max_request_bytes=MAX_REQUEST_BYTES, max_total_request_bytes=MAX_REQUEST_BYTES,
                  max_job_bytes=MAX_JOB_BYTES, max_result_bytes=MAX_RESULT_BYTES, max_response_bytes=MAX_RESPONSE_BYTES):
         self.endpoint = validate_endpoint(endpoint)
         self.model = _text(model, 256)
         self.approval = approval or NetworkApproval()
         self.transport = transport
-        if type(timeout) not in (float, int) or not math.isfinite(timeout) or not 0 < timeout <= 120:
-            fail("invalid_config", "timeout 必须大于 0 且不超过 120 秒")
+        if type(timeout) not in (float, int) or not math.isfinite(timeout) or not 0 < timeout <= 1800:
+            fail("invalid_config", "timeout 必须大于 0 且不超过 1800 秒")
         self.timeout = timeout
+        self.connect_timeout = min(timeout, 30.0) if connect_timeout is None else connect_timeout
+        self.read_timeout = timeout if read_timeout is None else read_timeout
+        for name, seconds, maximum in (("connect_timeout", self.connect_timeout, 120), ("read_timeout", self.read_timeout, 1800)):
+            if type(seconds) not in (float, int) or not math.isfinite(seconds) or not 0 < seconds <= min(maximum, timeout):
+                fail("invalid_config", name + " 必须为正数且不超过步骤上限和整个请求时限")
+        if transport is https_transport:
+            from functools import partial
+            self.transport = partial(https_transport, connect_timeout=self.connect_timeout, read_timeout=self.read_timeout)
         self.max_output_tokens = _integer(max_output_tokens, 1, 131072)
         self.max_requests = _integer(max_requests, 1, 100)
         self.max_request_bytes = _integer(max_request_bytes, 1, MAX_REQUEST_BYTES)

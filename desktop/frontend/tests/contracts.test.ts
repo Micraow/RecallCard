@@ -154,3 +154,10 @@ test("模型目的地只接受不夹带凭据的明确 HTTPS 地址", () => {
     false,
   );
 });
+
+
+test("模型等待时间单独校验连接、读取与整个请求，不改变token预算", async () => {
+  const {validMemoryTimeouts} = await import("../src/service/runtime.ts");
+  assert.equal(validMemoryTimeouts({connect_seconds:15,read_seconds:300,operation_seconds:600}),true);
+  for(const value of [{connect_seconds:121,read_seconds:300,operation_seconds:600},{connect_seconds:15,read_seconds:301,operation_seconds:300},{connect_seconds:0,read_seconds:30,operation_seconds:30},{connect_seconds:30,read_seconds:30,operation_seconds:1801}]) assert.equal(validMemoryTimeouts(value),false);
+});

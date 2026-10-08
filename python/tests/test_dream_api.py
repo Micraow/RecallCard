@@ -309,7 +309,13 @@ class DreamTests(unittest.TestCase):
     def test_invalid_budgets_and_timeout(self):
         for kwargs in ({"max_requests": 0}, {"max_requests": 101}, {"max_request_bytes": 0}, {"max_job_bytes": MAX_JOB_BYTES + 1},
                        {"max_output_tokens": True}, {"max_output_tokens": 0}, {"max_output_tokens": 131073},
-                       {"timeout": 0}, {"timeout": 121}, {"timeout": float("nan")}, {"timeout": True}):
+                       {"timeout": 0}, {"timeout": 1801}, {"timeout": float("nan")}, {"timeout": True}):
+            self.rejects(lambda: self.client(**kwargs))
+
+    def test_wait_limits_are_separate_and_do_not_disable_validation(self):
+        client = self.client(timeout=600, connect_timeout=15, read_timeout=300)
+        self.assertEqual((client.timeout,client.connect_timeout,client.read_timeout),(600,15,300))
+        for kwargs in ({"connect_timeout":121}, {"read_timeout":31}, {"connect_timeout":True}, {"read_timeout":float("inf")}, {"timeout":600,"read_timeout":601}):
             self.rejects(lambda: self.client(**kwargs))
 
     def test_request_count_budget_survives_failures(self):
@@ -705,6 +711,20 @@ class TransportTests(unittest.TestCase):
                 https_transport(ENDPOINT, b"synthetic", KEY, 30, 20)
         self.assertEqual(error.exception.code, "response_limit")
         response.read1.assert_not_called()
+
+    def test_https_connect_read_and_operation_deadlines_are_applied_without_disabling_tls(self):
+        response = Mock(status=200)
+        response.getheader.return_value = None
+        response.read1.side_effect = [b"abc", b""]
+        connection = Mock()
+        connection.getresponse.return_value = response
+        with patch("recallcard_dream.client.http.client.HTTPSConnection", return_value=connection) as constructor:
+            result = https_transport(ENDPOINT,b"synthetic",KEY,600,20,connect_timeout=15,read_timeout=300)
+        self.assertEqual(result.body,b"abc")
+        self.assertEqual(constructor.call_args.kwargs["timeout"],15)
+        self.assertTrue(constructor.call_args.kwargs["context"].check_hostname)
+        self.assertTrue(all(0 < call.args[0] <= 300 for call in connection.sock.settimeout.call_args_list))
+        connection.close.assert_called_once()
 
     def test_https_success_reads_multiple_bounded_chunks(self):
         response = Mock(status=200)

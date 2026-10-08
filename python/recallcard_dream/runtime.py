@@ -91,7 +91,12 @@ def _config(value):
         _fail("invalid_config")
     output_tokens = _integer(budget["max_output_tokens_per_call"], 1, 131072)
     request_bytes = _integer(budget["max_request_bytes_per_call"], 1, MAX_REQUEST_BYTES)
-    return endpoint, model, scope, output_tokens, request_bytes
+    timeouts = value.get("timeouts", {})
+    _fields(timeouts, set(), {"connect_seconds", "read_seconds", "operation_seconds"})
+    operation = _integer(timeouts.get("operation_seconds", 30), 1, 1800)
+    connect = _integer(timeouts.get("connect_seconds", 30), 1, min(120, operation))
+    read = _integer(timeouts.get("read_seconds", 30), 1, operation)
+    return endpoint, model, scope, output_tokens, request_bytes, (connect, read, operation)
 
 
 def _usage(diagnostics, max_request_bytes):
@@ -118,13 +123,14 @@ def execute_request(data: bytes, *, client_factory=None):
     _fields(request, {"schema", "config", "job"})
     if request["schema"] != REQUEST_SCHEMA:
         _fail("invalid_schema")
-    endpoint, model, scope, output_tokens, request_bytes = _config(request["config"])
+    endpoint, model, scope, output_tokens, request_bytes, timeouts = _config(request["config"])
     job = validate_job(request["job"])
     if job["allowed_scope"] != scope:
         _fail("scope_denied")
     approval = NetworkApproval(enabled=True, endpoint=endpoint, scopes=(scope,), dream_data=True)
     client = (client_factory or DreamClient)(
         endpoint, model, approval, max_requests=1, max_output_tokens=output_tokens,
+        connect_timeout=timeouts[0], read_timeout=timeouts[1], timeout=timeouts[2],
         max_request_bytes=request_bytes, max_total_request_bytes=request_bytes,
     )
     completed = client.execute(job)

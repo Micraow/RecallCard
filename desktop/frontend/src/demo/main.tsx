@@ -9,9 +9,11 @@ import type {
   Conversation,
   EventRecord,
 } from "../service/types";
+import type { MemoryConfig } from "../service/runtime";
 import type { JobStatus } from "../service/contracts";
 import "../styles.css";
 
+let demoModelConfig: MemoryConfig | null = null;
 const now = "2026-10-08T08:32:00Z";
 const entries = [
   [
@@ -575,6 +577,11 @@ async function invoke(
       capture_enabled: args.allowCapture,
       note: "示例注册完成，尚无浏览器调用回执。",
     };
+  if (command === "inspect_model_credential") return {present:false,storage:"unavailable",lifetime:"not_configured",os_protected_available:false,message:"合成测试不访问系统密钥"};
+  if (command === "configure_memory_model") {
+    demoModelConfig = structuredClone(args.config as MemoryConfig);
+    return invoke("model_setup_status", args);
+  }
   if (command === "model_setup_status") return {
     runtime: await invoke("memory_runtime_status", args),
     credential: { present: false, storage: "unavailable", lifetime: "not_configured", os_protected_available: false, message: "合成界面未提供任何模型密钥" },
@@ -586,7 +593,7 @@ async function invoke(
       schema: "recallcard.memory-runtime/1",
       state: "unconfigured",
       message: "后台整理尚未配置；已保存来源仍可搜索",
-      config: {
+      config: demoModelConfig || {
         schema: "recallcard.memory-runtime/1",
         enabled: false,
         paused: false,
