@@ -203,16 +203,15 @@ class WebDriver:
         self.idle()
         assert self.observe(f"return document.querySelector({json.dumps(selector)}).value") == value
 
-    def select_keyboard(self, selector, value):
-        # 观察实际选项顺序后，打开可见原生选择控件并用键盘选择。
-        # 不给 value/selectedIndex 赋值，不点击不可见的 option，也不调用 change。
-        options = self.observe(f"return [...document.querySelector({json.dumps(selector)}).options].map(n=>({{value:n.value,disabled:n.disabled}}))")
+    def select_option(self, selector, value):
+        # WebDriver 的标准 option 点击由浏览器完成选择，沿用已验证的范围控件路径。
+        # 不串发可能触发中途重绘的方向键，也不给 value 赋值或调用 change。
+        options = self.observe(f"return (()=>{{const s=document.querySelector({json.dumps(selector)});if(!s||s.disabled)return [];const r=s.getBoundingClientRect(),style=getComputedStyle(s);if(!r.width||!r.height||style.visibility==='hidden'||style.display==='none')return [];return [...s.options].map(n=>({{value:n.value,disabled:n.disabled}}));}})()")
         choices = [index for index, option in enumerate(options) if option["value"] == value]
         assert len(choices) == 1 and not any(option["disabled"] for option in options), "分支选项缺失、重复或不可用"
-        self.click(selector)
-        run("xdotool", "key", "--clearmodifiers", "Home", *(["Down"] * choices[0]), "Return")
+        self.click(f'{selector} option[value={json.dumps(value)}]')
         wait_for(lambda: self.observe(f"return document.querySelector({json.dumps(selector)}).value") == value,
-                 "键盘选择确切分支", timeout=5)
+                 "原生选择确切分支", timeout=5)
         self.idle()
 
     def blur(self, selector):
@@ -1703,7 +1702,7 @@ class NativeSmoke:
         assert browser.observe("return document.querySelector('#continuation-branch').value") == ""
         assert browser.observe("return [...document.querySelectorAll('#continuation-panel button')].find(n=>n.textContent==='准备交接内容').disabled"), "多分支不能默认猜选"
         branch_b = f"event:{events['b']['id']}"
-        browser.select_keyboard("#continuation-branch", branch_b)
+        browser.select_option("#continuation-branch", branch_b)
         handoffs = {}
         for key in ("b", "a"):
             if key == "a":
@@ -1737,7 +1736,7 @@ class NativeSmoke:
         return {"files": [path.name for path in paths], "completion": completion, "counts": counts,
                 "duplicate_completion": repeated, "duplicate_counts": duplicate_counts,
                 "events": list(events.values()), "handoffs": handoffs,
-                "keyboard_branch_ref": branch_b, "copied_exact_previews": True}
+                "webdriver_option_branch_ref": branch_b, "copied_exact_previews": True}
 
     def exercise_selected_context_and_restart(self, deepseek_evidence):
         browser = self.driver

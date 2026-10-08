@@ -460,39 +460,39 @@ class NativeControlsTest(unittest.TestCase):
                     with self.assertRaisesRegex(AssertionError, "不得保存"):
                         smoke.verify_deepseek_events(altered)
 
-    def test_keyboard_branch_select_uses_visible_control_actual_option_order_once(self):
+    def test_webdriver_option_branch_select_uses_visible_control_actual_option_order_once(self):
         driver = self.driver(); driver.click = Mock(); driver.idle = Mock()
         driver.observe = Mock(side_effect=[[
             {"value": "", "disabled": False}, {"value": "event:b", "disabled": False},
             {"value": "event:a", "disabled": False},
         ], "event:a"])
         with patch.object(module, "run") as action:
-            driver.select_keyboard("#continuation-branch", "event:a")
-            driver.click.assert_called_once_with("#continuation-branch")
-            action.assert_called_once_with("xdotool", "key", "--clearmodifiers", "Home", "Down", "Down", "Return")
+            driver.select_option("#continuation-branch", "event:a")
+            driver.click.assert_called_once_with('#continuation-branch option[value="event:a"]')
+            action.assert_not_called()
         self.assertTrue(all(call.args[0].startswith("return ") for call in driver.observe.call_args_list))
         driver.idle.assert_called_once()
 
-    def test_keyboard_branch_select_refuses_missing_duplicate_or_disabled_options(self):
+    def test_webdriver_option_branch_select_refuses_missing_duplicate_or_disabled_options(self):
         for options in [[], [{"value": "event:a", "disabled": True}],
                         [{"value": "event:a", "disabled": False}] * 2]:
             with self.subTest(options=options):
                 driver = self.driver(); driver.click = Mock(); driver.observe = Mock(return_value=options)
                 with patch.object(module, "run") as action, self.assertRaises(AssertionError):
-                    driver.select_keyboard("#continuation-branch", "event:a")
+                    driver.select_option("#continuation-branch", "event:a")
                 driver.click.assert_not_called(); action.assert_not_called()
 
-    def test_keyboard_branch_select_mismatch_or_occluded_click_never_retries(self):
+    def test_webdriver_option_branch_select_mismatch_or_occluded_click_never_retries(self):
         driver = self.driver(); driver.click = Mock(); driver.idle = Mock()
         driver.observe = Mock(side_effect=[[{"value": "event:a", "disabled": False}], "event:b"])
         with patch.object(module, "run") as action, patch.object(module, "wait_for", side_effect=self.immediate):
             with self.assertRaisesRegex(AssertionError, "确切分支"):
-                driver.select_keyboard("#continuation-branch", "event:a")
-            action.assert_called_once(); driver.click.assert_called_once(); driver.idle.assert_not_called()
+                driver.select_option("#continuation-branch", "event:a")
+            action.assert_not_called(); driver.click.assert_called_once(); driver.idle.assert_not_called()
         driver.click = Mock(side_effect=module.DriverError("element click intercepted"))
         driver.observe = Mock(return_value=[{"value": "event:a", "disabled": False}])
         with patch.object(module, "run") as action, self.assertRaises(module.DriverError):
-            driver.select_keyboard("#continuation-branch", "event:a")
+            driver.select_option("#continuation-branch", "event:a")
         action.assert_not_called(); driver.click.assert_called_once()
 
     def test_background_import_waits_past_idle_until_actual_complete_dom(self):
