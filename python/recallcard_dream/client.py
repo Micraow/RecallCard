@@ -159,11 +159,13 @@ def _date(value, *, nullable=True):
     if not isinstance(value, str) or not _TIMESTAMP.fullmatch(value):
         fail("invalid_time", "时间必须为带时区的 RFC3339 或 null")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        # datetime 只有微秒精度；单独保留纳秒以匹配 Rust 的有效时间区间。
+        # Python 3.10 的 fromisoformat 不接受任意 1–9 位小数秒。
+        # 整秒与时区交给标准库核验，小数单独保留，不能截断 Rust 的纳秒区间。
         fraction = re.search(r"\.(\d{1,9})", value)
         nanos = int(fraction.group(1).ljust(9, "0")) if fraction else 0
-        return (parsed.replace(microsecond=0).astimezone(timezone.utc), nanos)
+        whole_seconds = value[:fraction.start()] + value[fraction.end():] if fraction else value
+        parsed = datetime.fromisoformat(whole_seconds.replace("Z", "+00:00"))
+        return (parsed.astimezone(timezone.utc), nanos)
     except (ValueError, OverflowError):
         fail("invalid_time", "时间值无效")
 

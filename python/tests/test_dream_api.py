@@ -472,6 +472,31 @@ class DreamTests(unittest.TestCase):
                                      valid_to="2026-01-01T00:00:00.123456002Z")
         self.assertEqual(validate_result(result, fixture()), result)
 
+    def test_rfc3339_fraction_widths_preserve_precision_and_timezone(self):
+        from recallcard_dream.client import _date
+        for digits in range(1, 10):
+            fraction = "123456789"[:digits]
+            with self.subTest(digits=digits):
+                utc = _date(f"2026-01-01T00:00:00.{fraction}Z")
+                offset = _date(f"2026-01-01T08:00:00.{fraction}+08:00")
+                previous_day = _date(f"2025-12-31T19:00:00.{fraction}-05:00")
+                self.assertEqual(utc, offset)
+                self.assertEqual(utc, previous_day)
+                self.assertEqual(utc[1], int(fraction.ljust(9, "0")))
+        self.assertEqual(_date("2026-01-01T00:00:00Z")[1], 0)
+
+    def test_fraction_normalization_does_not_accept_invalid_times_or_intervals(self):
+        from recallcard_dream.client import _date
+        for value in ("2026-02-30T00:00:00.123456789Z", "2026-01-01T25:00:00.1Z",
+                      "2026-01-01T00:00:00.123456789+24:00", "2026-01-01T00:00:00.1234567890Z",
+                      "2026-01-01T00:00:00.Z", "2026-01-01T00:00:00.123"):
+            with self.subTest(value=value):
+                self.rejects(lambda: _date(value), "invalid_time")
+        result = result_for()
+        result["proposals"][0].update(valid_from="2026-01-01T00:00:00.123456002Z",
+                                     valid_to="2026-01-01T08:00:00.123456001+08:00")
+        self.rejects(lambda: validate_result(result, fixture()), "invalid_time")
+
     def test_boolean_choice_index_is_not_an_integer_index(self):
         body = envelope()
         body["choices"][0]["index"] = False
