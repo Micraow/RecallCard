@@ -10,6 +10,7 @@ dbus-run-session -- xvfb-run -a /usr/bin/python3 desktop/tests/native_smoke.py
 import argparse
 import base64
 from datetime import datetime, timezone
+from functools import wraps
 import json
 from http.client import RemoteDisconnected
 import os
@@ -67,18 +68,36 @@ def recent_workspace_path(temporary):
     return path
 
 
-def wait_for(check, description, timeout=20):
+def wait_for(check, description, timeout=20, stable_reads=1):
+    assert type(stable_reads) is int and 1 <= stable_reads <= 10
     deadline = time.monotonic() + timeout
     last_error = None
+    ready_reads = 0
     while time.monotonic() < deadline:
         try:
             value = check()
             if value:
-                return value
+                ready_reads += 1
+                if ready_reads >= stable_reads:
+                    return value
+            else:
+                ready_reads = 0
         except (DriverError, OSError) as error:
             last_error = error
+            ready_reads = 0
         time.sleep(0.15)
     raise AssertionError(f"等待超时：{description}；最近错误：{last_error}")
+
+
+def native_observation(check):
+    """只包裹原生只读探针；临时接口失效需重新扫描，动作不能由此重试。"""
+    @wraps(check)
+    def observe(*args, **kwargs):
+        try:
+            return check(*args, **kwargs)
+        except NotImplementedError:
+            return None
+    return observe
 
 
 def run(*args):
@@ -218,6 +237,24 @@ class WebDriver:
         element = self.find(selector)
         self.command("POST", f"/element/{element}/value", {"text": "\ue004"})
         self.idle()
+
+    def resize(self, width, height):
+        self.command("POST", "/window/rect", {"width": width, "height": height})
+        previous = None
+
+        def target_viewport():
+            nonlocal previous
+            window = self.command("GET", "/window/rect")
+            viewport = self.observe("return {width:innerWidth,height:innerHeight}")
+            sample = {"window": window, "viewport": viewport}
+            matches = abs(window["width"] - width) <= 2 and abs(window["height"] - height) <= 2 and 0 < viewport["width"] <= width + 2 and 0 < viewport["height"] <= height + 2
+            stable = matches and sample == previous
+            previous = sample if matches else None
+            if stable:
+                return sample
+            return None
+
+        return wait_for(target_viewport, f"实际内容区完成缩放到 {width}×{height}", stable_reads=2)
 
     def observe(self, script):
         # 仅观察 DOM 状态和错误；不注入后端、设置会话或绕过文件选择窗口。
@@ -369,6 +406,7 @@ class NativeSmoke:
                                 capture_output=True, text=True, timeout=5)
         return result.stdout.split() if result.returncode == 0 else []
 
+    @native_observation
     def accessible_dialog(self, title):
         import pyatspi
         for application in pyatspi.Registry.getDesktop(0):
@@ -388,6 +426,7 @@ class NativeSmoke:
             if depth < 16:
                 pending.extend((child, depth + 1) for child in node if child is not None)
 
+    @native_observation
     def native_button(self, title, name):
         import pyatspi
         for node, _ in self.accessible_nodes(self.accessible_dialog(title)):
@@ -397,17 +436,53 @@ class NativeSmoke:
                     return node
         return None
 
-    def describe_dialog(self, title, phase=None):
+    @native_observation
+    def native_dialog_description(self, title):
+        root = self.accessible_dialog(title)
+        if root is None:
+            return None
         rows = []
-        for node, depth in self.accessible_nodes(self.accessible_dialog(title)):
+        for node, depth in self.accessible_nodes(root):
             rows.append(f"{'  ' * depth}{node.getRoleName()}: {node.name} [{node.getState().getStates()}]")
-        suffix = f"-{phase}" if phase else ""
-        (self.artifacts / f"dialog-{self.dialog_count:02d}{suffix}-accessibility.txt").write_text("\n".join(rows))
+        return "\n".join(rows) or None
 
-    def native_location_entry(self, title):
+    def describe_dialog(self, title, phase=None):
+        suffix = f"-{phase}" if phase else ""
+        path = self.artifacts / f"dialog-{self.dialog_count:02d}{suffix}-accessibility.txt"
+        try:
+            description = wait_for(lambda: self.native_dialog_description(title), "采集完整原生辅助功能树", timeout=3)
+        except Exception as error:
+            # 诊断失败不替换原始操作异常，也不允许后续动作绕过各自的严格门禁。
+            description = f"辅助功能诊断未完成：{type(error).__name__}: {error}"
+            print(description, flush=True)
+        try:
+            path.write_text(description)
+        except OSError as error:
+            print(f"辅助功能诊断未保存：{error}", flush=True)
+
+    def dialog_completed(self, title, next_title=None):
+        if self.dialog_windows(title):
+            return False
+        if next_title:
+            return bool(self.dialog_windows(next_title))
+        return self.driver.observe("return document.querySelector('#operation')?.textContent === '准备就绪'") is True
+
+    def native_window_active(self, title, window):
+        if window not in self.dialog_windows(title):
+            return False
+        try:
+            return run("xdotool", "getactivewindow").strip() == window
+        except subprocess.CalledProcessError:
+            return False
+
+    @native_observation
+    def native_location_state(self, title):
         import pyatspi
+        root = self.accessible_dialog(title)
+        if root is None:
+            return None
         entries = []
-        for node, _ in self.accessible_nodes(self.accessible_dialog(title)):
+        for node, _ in self.accessible_nodes(root):
             if node.getRole() != pyatspi.ROLE_TEXT:
                 continue
             attributes = dict(item.split(":", 1) for item in node.getAttributes() if ":" in item)
@@ -418,7 +493,23 @@ class NativeSmoke:
                                                        pyatspi.STATE_FOCUSED, pyatspi.STATE_EDITABLE]):
                 entries.append(node)
         assert len(entries) <= 1, "原生位置输入不唯一，不能确定键盘目标"
-        return entries[0] if entries else None
+        # None 表示本次未能完整观察；成功扫描但没有聚焦Location用明确的空字段表示。
+        return {"focused_entry": entries[0] if entries else None}
+
+    def native_location_entry(self, title):
+        state = self.native_location_state(title)
+        return state["focused_entry"] if state else None
+
+    @native_observation
+    def native_location_snapshot(self, title):
+        entry = self.native_location_entry(title)
+        if entry is None:
+            return None
+        text = entry.queryText()
+        value = text.getText(0, -1)
+        count = text.getNSelections()
+        assert type(count) is int and 0 <= count <= 16, "原生位置选区数量无效"
+        return {"text": value, "selections": [tuple(text.getSelection(index)) for index in range(count)]}
 
     def navigate_file_folder(self, title, window, folder):
         # 只经真实焦点与粘贴输入目录。逐字键入可能被 GTK 补全改写；
@@ -427,7 +518,20 @@ class NativeSmoke:
         self.capture(f"dialog-{self.dialog_count:02d}-opened", webview=False)
         self.describe_dialog(title, "opened")
         # Ctrl+L 是切换键；已有聚焦输入时再次按会隐藏它。
-        if self.native_location_entry(title) is None:
+        previous_focus = None
+        def known_location_state():
+            nonlocal previous_focus
+            state = self.native_location_state(title) if self.native_window_active(title, window) else None
+            if state is None:
+                previous_focus = None
+                return None
+            focused = state["focused_entry"] is not None
+            stable = previous_focus is None or previous_focus is focused
+            previous_focus = focused
+            return state if stable else None
+
+        initial = wait_for(known_location_state, "同一活动窗口的位置输入状态已明确稳定", stable_reads=2)
+        if initial["focused_entry"] is None:
             run("xdotool", "key", "--clearmodifiers", "ctrl+l")
         wait_for(lambda: self.native_location_entry(title), "原生位置输入可见并已获得焦点")
         subprocess.run(["xclip", "-selection", "clipboard", "-i"], input=expected,
@@ -435,40 +539,43 @@ class NativeSmoke:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         run("xdotool", "key", "--clearmodifiers", "ctrl+a", "ctrl+v")
 
+        @native_observation
         def exact_location():
             entry = self.native_location_entry(title)
             return entry and entry.queryText().getText(0, -1) == expected
 
+        @native_observation
         def pasted_location():
             entry = self.native_location_entry(title)
             return entry and entry.queryText().getText(0, -1).startswith(expected)
 
-        wait_for(pasted_location, "原生位置输入接收到完整合成目录")
+        wait_for(pasted_location, "原生位置输入接收到完整合成目录", stable_reads=2)
         self.capture(f"dialog-{self.dialog_count:02d}-pasted-location", webview=False)
         # GTK 会把两个文件的共同前缀作为选中尾部补到目录后面。
         # 只删除明确位于完整目录之后且完全选中的尾部；不修正其他文字差异。
-        entry = self.native_location_entry(title)
-        assert entry is not None, "目录粘贴后位置框失去焦点"
-        text = entry.queryText()
-        observed = text.getText(0, -1)
+        snapshot = wait_for(lambda: self.native_location_snapshot(title), "目录粘贴后读取完整位置和选区快照")
+        observed = snapshot["text"]
         if observed != expected:
             assert observed.startswith(expected) and len(observed) > len(expected), "目录输入与预期不符，不能猜测修正"
-            assert text.getNSelections() == 1 and tuple(text.getSelection(0)) == (len(expected), len(observed)), "差异不是完整选中的补全尾部，停止输入"
-            assert run("xdotool", "getactivewindow").strip() == window, "删除补全前多选窗口失去焦点"
+            assert snapshot["selections"] == [(len(expected), len(observed))], "差异不是完整选中的补全尾部，停止输入"
             (self.artifacts / f"dialog-{self.dialog_count:02d}-completion.json").write_text(json.dumps({"expected_directory": expected, "observed": observed, "selected_range": [len(expected), len(observed)]}, ensure_ascii=False))
-            current = self.native_location_entry(title)
-            assert current is not None, "删除补全前位置框失去焦点"
-            current_text = current.queryText()
-            assert current_text.getText(0, -1) == observed and current_text.getNSelections() == 1 and tuple(current_text.getSelection(0)) == (len(expected), len(observed)), "补全文字或选区已经变化，停止输入"
+            @native_observation
+            def selected_completion():
+                if not self.native_window_active(title, window):
+                    return False
+                current = self.native_location_snapshot(title)
+                return current and current["text"] == observed and current["selections"] == [(len(expected), len(observed))]
+
+            wait_for(selected_completion, "删除前同一窗口及完整补全选区稳定", stable_reads=2)
             run("xdotool", "key", "--clearmodifiers", "BackSpace")
-        wait_for(exact_location, "原生位置输入逐字保留完整合成目录")
+        wait_for(exact_location, "原生位置输入逐字保留完整合成目录", stable_reads=2)
         self.capture(f"dialog-{self.dialog_count:02d}-location", webview=False)
         self.describe_dialog(title, "location")
-        assert run("xdotool", "getactivewindow").strip() == window, "位置输入期间多选窗口失去焦点"
-        assert exact_location(), "目录输入或焦点已改变，停止确认"
+        wait_for(lambda: self.native_window_active(title, window) and exact_location(), "确认目录前同一窗口及完整位置稳定", stable_reads=2)
         (self.artifacts / f"dialog-{self.dialog_count:02d}-location.json").write_text(json.dumps({"expected": expected, "observed": expected}, ensure_ascii=False))
         run("xdotool", "key", "--clearmodifiers", "Return")
 
+    @native_observation
     def native_file_cells(self, title, names, selected=False):
         import pyatspi
         cells = {}
@@ -484,6 +591,7 @@ class NativeSmoke:
             cells[node.name] = node
         return cells
 
+    @native_observation
     def native_file_list_focused(self, title, expected_rows=None, all_selected=False):
         import pyatspi
         matches = []
@@ -521,29 +629,31 @@ class NativeSmoke:
             self.navigate_file_folder(title, window, folder)
 
             def visible_files():
-                assert self.dialog_windows(title), "选择器在核对文件前已经关闭；不重新打开或确认"
+                # GTK 切换目录时窗口可短暂重映射，单次 onlyvisible 查询为空不等于关闭。
+                # 只等待重新观察到正确列表；永久消失仍超时失败，不重开或补确认。
+                if not self.dialog_windows(title):
+                    return None
                 if not self.native_file_list_focused(title, expected_rows=len(paths)):
                     return None
                 found = self.native_file_cells(title, names)
-                return found if set(found) == names else None
+                return found if found and set(found) == names else None
 
-            wait_for(visible_files, "两份合成文件出现在可见原生列表")
+            wait_for(visible_files, "两份合成文件出现在可见原生列表", stable_reads=2)
             self.capture(f"dialog-{self.dialog_count:02d}-visible-files", webview=False)
             self.describe_dialog(title, "visible-files")
             # GTK 的临时行对象可能在截图/树遍历后失效，不能复用其坐标。
             # 目录导航实际已把焦点交给 Files 表，只核对它并使用正常全选键。
-            wait_for(lambda: self.native_file_list_focused(title, expected_rows=len(paths)), "可见Files列表仅有目标两行且实际获得焦点")
-            assert run("xdotool", "getactivewindow").strip() == window, "多选窗口失去焦点，停止键盘操作"
+            wait_for(lambda: self.native_window_active(title, window) and visible_files(), "全选前同一窗口与完整双文件列表稳定", stable_reads=2)
             run("xdotool", "key", "--clearmodifiers", "ctrl+a")
             def selected_files():
-                return self.native_file_list_focused(title, expected_rows=len(paths), all_selected=True) and set(self.native_file_cells(title, names, selected=True)) == names
+                return self.native_file_list_focused(title, expected_rows=len(paths), all_selected=True) and set(self.native_file_cells(title, names, selected=True) or {}) == names
 
-            wait_for(selected_files, "原生列表所有选中行恰好为两份目标文件")
+            wait_for(selected_files, "原生列表所有选中行恰好为两份目标文件", stable_reads=2)
             self.capture(f"dialog-{self.dialog_count:02d}-two-files-selected", webview=False)
-            approval = wait_for(lambda: self.native_button(title, "Open"), "多文件原生确认按钮可用")
-            assert selected_files() and run("xdotool", "getactivewindow").strip() == window, "确认前列表或选中范围已改变"
+            approval = wait_for(lambda: self.native_button(title, "Open") if self.native_window_active(title, window) and selected_files() else None,
+                                "确认前完整选中范围与同一窗口稳定且Open可用", stable_reads=2)
             assert approval.queryAction().doAction(0), "多文件原生确认按钮未接受点击"
-            wait_for(lambda: not self.dialog_windows(title), "多文件原生窗口关闭")
+            wait_for(lambda: self.dialog_completed(title), "多文件窗口关闭且前端完成本次读取", stable_reads=2)
         finally:
             if self.dialog_windows(title):
                 self.describe_dialog(title)
@@ -634,7 +744,7 @@ class NativeSmoke:
             run("xdotool", "key", "--clearmodifiers", "Return")
             time.sleep(0.5)
             try:
-                button = wait_for(lambda: True if not self.dialog_windows(title)
+                button = wait_for(lambda: True if self.dialog_completed(title, "创建资料库" if create else None)
                                   else self.native_button(title, "Save" if save else "Open"),
                                   "原生文件选择完成或确认按钮可用")
                 if button is not True:
@@ -642,7 +752,7 @@ class NativeSmoke:
             finally:
                 if self.dialog_windows(title):
                     self.describe_dialog(title)
-        wait_for(lambda: not self.dialog_windows(title), f"关闭原生窗口：{title}")
+        wait_for(lambda: self.dialog_completed(title, "创建资料库" if create else None), f"原生窗口关闭并到达下一步：{title}", stable_reads=2)
         if create:
             # rfd 的 GtkMessageDialog 在部分系统未以窗口标题暴露 AT-SPI 对象。
             # 已核对固定版本截图和 rfd 按钮顺序：创建在左、取消在右。
@@ -659,7 +769,7 @@ class NativeSmoke:
                 assert width >= 200 and height >= 120, "确认窗尺寸异常，停止点击"
                 run("xdotool", "mousemove", "--window", approval_window, str(width // 4), str(height - 18))
                 run("xdotool", "click", "1")
-            wait_for(lambda: not self.dialog_windows("创建资料库"), "创建确认窗口关闭")
+            wait_for(lambda: self.dialog_completed("创建资料库"), "创建确认窗口关闭且资料库操作完成", stable_reads=2)
         self.driver.idle()
 
     def preview_import(self, source):
@@ -1633,7 +1743,7 @@ class NativeSmoke:
         assert browser.observe("return document.querySelector('#query').value") == '合成任务 17'
         assert browser.observe("return document.querySelector('.results .result-card.selected').dataset.reference") == search_reference
         self.checkpoint('搜索原话定位上下文并恢复阅读选择')
-        browser.command("POST", "/window/rect", {"width": 860, "height": 820})
+        browser.resize(860, 820)
         browser.idle()
         assert browser.observe("return document.documentElement.scrollWidth <= innerWidth + 2"), "窄窗口不得产生整页横向溢出"
         browser.click('[data-action="back-to-list"]')
@@ -1649,7 +1759,7 @@ class NativeSmoke:
         assert browser.observe("return document.querySelector('.located-message').dataset.reference") == search_reference
         assert browser.observe("return (()=>{const r=document.querySelector('[data-action=open-continuation]').getBoundingClientRect();return r.height>0&&r.top>=0&&r.bottom<=innerHeight;})()")
         self.checkpoint("窄窗口保留当前阅读任务")
-        browser.command("POST", "/window/rect", {"width": 1180, "height": 820})
+        browser.resize(1180, 820)
         return {"synthetic_conversations": 53, "synthetic_messages": 106,
                 "default_visible_rows": visible, "fixed_primary_action": header,
                 "selected_restored": True, "copied_exact_preview": True,
@@ -1786,10 +1896,10 @@ class NativeSmoke:
         browser.idle()
         assert browser.observe("return [...document.querySelectorAll('.context-check input:checked')].map(n=>n.dataset.selectionReference)") == selected
         assert browser.observe('return document.querySelector(\'#selection-context-panel textarea[aria-label="接下来要做什么"]\').value') == goal
-        browser.command("POST", "/window/rect", {"width": 820, "height": 620})
+        resized = browser.resize(820, 620)
         browser.idle()
-        actual_window = browser.command("GET", "/window/rect")
-        actual_viewport = browser.observe("return {width:innerWidth,height:innerHeight}")
+        actual_window = resized["window"]
+        actual_viewport = resized["viewport"]
         assert 0 < actual_viewport["width"] <= 822 and 0 < actual_viewport["height"] <= 622, f"缩窗请求没有得到目标大小的实际内容区：window={actual_window}, viewport={actual_viewport}"
         assert browser.observe("return document.documentElement.scrollWidth <= innerWidth + 2")
         browser.button("调整所选资料")
@@ -1815,6 +1925,7 @@ class NativeSmoke:
 
         browser = self.reopen_application()
         browser.assert_vault_badge(self.vault.name)
+        wait_for(lambda: browser.text("#location") == "会话" and browser.observe("return Boolean(document.querySelector('.conversation-message'))"), "重启后实际恢复会话原文", stable_reads=2)
         assert browser.text("#location") == "会话"
         assert browser.observe("return Boolean(document.querySelector('.conversation-message'))")
         assert not browser.observe("return Boolean(document.querySelector('#selection-context-panel'))")

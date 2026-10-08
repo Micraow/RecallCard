@@ -17,6 +17,89 @@ spec.loader.exec_module(module)
 
 
 class NativeControlsTest(unittest.TestCase):
+    def test_readiness_requires_consecutive_reads_and_resets_after_missing_or_error(self):
+        check = Mock(side_effect=[True, False, True, module.DriverError("transient"), True, True])
+        with patch.object(module.time, "monotonic", side_effect=[0, .1, .2, .3, .4, .5, .6]), patch.object(module.time, "sleep"):
+            self.assertTrue(module.wait_for(check, "合成稳定状态", timeout=1, stable_reads=2))
+        self.assertEqual(check.call_count, 6)
+
+    def test_readiness_permanent_instability_times_out_and_assertions_are_not_swallowed(self):
+        with patch.object(module.time, "monotonic", side_effect=[0, .1, .2, .3, .4, .6]), patch.object(module.time, "sleep"):
+            with self.assertRaisesRegex(AssertionError, "等待超时"):
+                module.wait_for(Mock(side_effect=[True, False, True, False]), "未稳定", timeout=.5, stable_reads=2)
+        with self.assertRaisesRegex(AssertionError, "合成权限拒绝"):
+            module.wait_for(Mock(side_effect=AssertionError("合成权限拒绝")), "不可吞掉")
+
+    def test_native_read_only_interface_can_be_rescanned_but_other_errors_propagate(self):
+        probe = Mock(side_effect=[NotImplementedError, True])
+        observed = module.native_observation(probe)
+        self.assertIsNone(observed()); self.assertTrue(observed())
+        for error in [AssertionError("目标错误"), ValueError("响应错误")]:
+            with self.subTest(error=error), self.assertRaises(type(error)):
+                module.native_observation(Mock(side_effect=error))()
+        with patch.object(module.time, "monotonic", side_effect=[0, .1, .2, .4]), patch.object(module.time, "sleep"):
+            with self.assertRaisesRegex(AssertionError, "等待超时"):
+                module.wait_for(module.native_observation(Mock(side_effect=NotImplementedError)), "接口永久缺失", timeout=.3)
+
+    def test_location_snapshot_rescans_interface_loss_and_keeps_complete_selection(self):
+        smoke = object.__new__(module.NativeSmoke); entry = Mock(); text = Mock()
+        smoke.native_location_entry = Mock(return_value=entry)
+        entry.queryText.side_effect = [NotImplementedError, text]
+        text.getText.return_value = "/synthetic/deepseek-"; text.getNSelections.return_value = 1
+        text.getSelection.return_value = [11, 20]
+        self.assertIsNone(smoke.native_location_snapshot("合成位置"))
+        self.assertEqual(smoke.native_location_snapshot("合成位置"), {"text":"/synthetic/deepseek-", "selections":[(11,20)]})
+
+    def test_diagnostic_tree_can_recover_without_replacing_original_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            smoke = object.__new__(module.NativeSmoke); smoke.artifacts = Path(directory); smoke.dialog_count = 1
+            smoke.native_dialog_description = Mock(side_effect=[None, "合成完整树"])
+            with patch.object(module.time, "monotonic", side_effect=[0,.1,.2]), patch.object(module.time, "sleep"):
+                smoke.describe_dialog("合成窗口", "ready")
+            self.assertEqual((smoke.artifacts/'dialog-01-ready-accessibility.txt').read_text(), "合成完整树")
+            with patch.object(module, "wait_for", side_effect=AssertionError("合成诊断始终不可读")), self.assertRaisesRegex(module.DriverError, "原始失败"):
+                try:
+                    raise module.DriverError("原始失败")
+                finally:
+                    smoke.describe_dialog("合成窗口", "failed")
+            self.assertIn("合成诊断始终不可读", (smoke.artifacts/'dialog-01-failed-accessibility.txt').read_text())
+
+    def test_picker_completion_needs_positive_frontend_state_not_missing_window_only(self):
+        smoke = object.__new__(module.NativeSmoke); smoke.driver = Mock(); smoke.dialog_windows = Mock(return_value=[])
+        smoke.driver.observe.return_value = False
+        self.assertFalse(smoke.dialog_completed("合成选择器"))
+        smoke.driver.observe.return_value = True
+        self.assertTrue(smoke.dialog_completed("合成选择器"))
+        smoke.dialog_windows.return_value = ["42"]
+        self.assertFalse(smoke.dialog_completed("合成选择器"))
+
+    def test_create_picker_completion_waits_for_confirmation_not_idle(self):
+        smoke = object.__new__(module.NativeSmoke); smoke.driver = Mock()
+        smoke.dialog_windows = Mock(side_effect=lambda title: ["43"] if title == "创建资料库" else [])
+        self.assertTrue(smoke.dialog_completed("目录选择器", "创建资料库"))
+        smoke.driver.observe.assert_not_called()
+        smoke.dialog_windows.return_value = []; smoke.dialog_windows.side_effect = None
+        self.assertFalse(smoke.dialog_completed("目录选择器", "创建资料库"))
+
+    def test_resize_issues_one_action_then_waits_for_actual_stable_rect_and_viewport(self):
+        driver = self.driver(); driver.observe = Mock(side_effect=[{"width":1180,"height":800}] + [{"width":820,"height":600}] * 3)
+        windows = iter([{"width":1180,"height":820}] + [{"width":820,"height":620}] * 3)
+        driver.command = Mock(side_effect=lambda method, *_: next(windows) if method == "GET" else None)
+        with patch.object(module.time, "monotonic", side_effect=[0,.1,.2,.3,.4]), patch.object(module.time, "sleep"):
+            result = driver.resize(820, 620)
+        self.assertEqual(result["viewport"], {"width":820,"height":600})
+        actions = [call for call in driver.command.call_args_list if call.args[0] == "POST"]
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].args, ("POST", "/window/rect", {"width":820,"height":620}))
+
+    def test_resize_wrong_size_remains_failure_without_repeating_action(self):
+        driver = self.driver(); driver.observe = Mock(return_value={"width":1180,"height":800})
+        driver.command = Mock(return_value={"width":1180,"height":820})
+        with patch.object(module.time, "monotonic", side_effect=[0,1,21]), patch.object(module.time, "sleep"):
+            with self.assertRaisesRegex(AssertionError, "等待超时"):
+                driver.resize(820, 620)
+        self.assertEqual(sum(call.args[0] == "POST" for call in driver.command.call_args_list), 1)
+
     def test_scope_persistence_probe_matches_actual_tauri_data_directory(self):
         source = (module.ROOT / "desktop/src-tauri/src/main.rs").read_text()
         helper = source.split("fn recent_workspace_file(", 1)[1].split("#[tauri::command]", 1)[0]
@@ -553,7 +636,7 @@ class NativeControlsTest(unittest.TestCase):
     def multiple_picker(self, directory, selected=True, focused=True, accepted=True):
         smoke = object.__new__(module.NativeSmoke)
         smoke.temporary = Path(directory); paths = smoke.create_deepseek_fixtures()
-        smoke.driver = Mock(); smoke.dialog_count = 0; smoke.capture = Mock(); smoke.describe_dialog = Mock()
+        smoke.driver = Mock(); smoke.driver.observe.return_value = True; smoke.dialog_count = 0; smoke.capture = Mock(); smoke.describe_dialog = Mock()
         smoke.navigate_file_folder = Mock()
         smoke.native_file_list_focused = Mock(return_value=True)
         native = {"open": True}
@@ -590,7 +673,7 @@ class NativeControlsTest(unittest.TestCase):
             approval.queryAction.return_value.doAction.side_effect = lambda value: (order.append("open") or original(value))
             with patch.dict(sys.modules, {"pyatspi": SimpleNamespace(DESKTOP_COORDS=0)}), patch.object(module, "run", side_effect=execute) as action, patch.object(module.time, "sleep"), patch.object(module, "wait_for", side_effect=self.immediate):
                 smoke.dialog_files(paths)
-            self.assertEqual(order, ["visible", "selected", "selected", "open"])
+            self.assertEqual(order, ["visible", "visible", "selected", "selected", "open"])
             smoke.navigate_file_folder.assert_called_once_with(module.DEEPSEEK_DIALOG, "42", paths[0].parent)
             self.assertFalse(any(call.args[1] == "type" for call in action.call_args_list))
             self.assertFalse(any(call.args[1] in ["click", "mousemove", "getwindowgeometry"] for call in action.call_args_list))
@@ -701,9 +784,11 @@ class NativeControlsTest(unittest.TestCase):
     def test_native_folder_navigation_pastes_and_reads_back_before_one_return(self):
         with tempfile.TemporaryDirectory() as directory:
             smoke = object.__new__(module.NativeSmoke); smoke.artifacts = Path(directory); smoke.dialog_count = 1
-            smoke.capture = Mock(); smoke.describe_dialog = Mock(); node = Mock()
+            smoke.capture = Mock(); smoke.describe_dialog = Mock(); smoke.dialog_windows = Mock(return_value=["42"]); node = Mock()
             node.queryText.return_value.getText.return_value = directory + "/"
+            node.queryText.return_value.getNSelections.return_value = 0
             smoke.native_location_entry = Mock(return_value=node)
+            smoke.native_location_state = Mock(return_value={"focused_entry": node})
             with patch.object(module, "run", return_value="42\n") as action, patch.object(module.subprocess, "run") as paste, patch.object(module, "wait_for", side_effect=self.immediate):
                 smoke.navigate_file_folder(module.DEEPSEEK_DIALOG, "42", Path(directory))
             self.assertEqual(paste.call_count, 1); self.assertEqual(paste.call_args.kwargs['input'], directory + "/")
@@ -714,13 +799,41 @@ class NativeControlsTest(unittest.TestCase):
             evidence = json.loads((smoke.artifacts / "dialog-01-location.json").read_text())
             self.assertEqual(evidence, {"expected": directory + "/", "observed": directory + "/"})
 
+    def test_unknown_location_state_never_triggers_toggle_but_known_absence_does_once(self):
+        for unknown_first in [True, False]:
+            with self.subTest(unknown_first=unknown_first), tempfile.TemporaryDirectory() as directory:
+                smoke = object.__new__(module.NativeSmoke); smoke.artifacts = Path(directory); smoke.dialog_count = 1
+                smoke.capture = Mock(); smoke.describe_dialog = Mock(); smoke.dialog_windows = Mock(return_value=["42"])
+                node = Mock(); node.queryText.return_value.getText.return_value = directory + "/"
+                node.queryText.return_value.getNSelections.return_value = 0
+                state = {"first": True, "focused": unknown_first, "now": 0}
+                def probe(_):
+                    if unknown_first and state["first"]:
+                        state["first"] = False
+                        raise NotImplementedError
+                    return {"focused_entry": node if state["focused"] else None}
+                smoke.native_location_state = module.native_observation(probe)
+                smoke.native_location_entry = Mock(side_effect=lambda _: node if state["focused"] else None)
+                def execute(*args):
+                    if args[-1] == "ctrl+l": state["focused"] = True
+                    return "42\n"
+                def tick():
+                    state["now"] += .01
+                    return state["now"]
+                with patch.object(module, "run", side_effect=execute) as action, patch.object(module.subprocess, "run"), patch.object(module.time, "monotonic", side_effect=tick), patch.object(module.time, "sleep"):
+                    smoke.navigate_file_folder(module.DEEPSEEK_DIALOG, "42", Path(directory))
+                self.assertEqual(sum(call.args[-1] == "ctrl+l" for call in action.call_args_list), 0 if unknown_first else 1)
+                self.assertEqual(sum(call.args[-1] == "Return" for call in action.call_args_list), 1)
+
     def test_native_folder_mismatched_text_or_lost_focus_stops_without_return(self):
         for text_ok, focused in [(False, True), (True, False)]:
             with self.subTest(text_ok=text_ok, focused=focused), tempfile.TemporaryDirectory() as directory:
                 smoke = object.__new__(module.NativeSmoke); smoke.artifacts = Path(directory); smoke.dialog_count = 1
-                smoke.capture = Mock(); smoke.describe_dialog = Mock(); node = Mock()
+                smoke.capture = Mock(); smoke.describe_dialog = Mock(); smoke.dialog_windows = Mock(return_value=["42"]); node = Mock()
                 node.queryText.return_value.getText.return_value = directory + "/" if text_ok else "/synthetic/wrong/"
+                node.queryText.return_value.getNSelections.return_value = 0
                 smoke.native_location_entry = Mock(return_value=node)
+                smoke.native_location_state = Mock(return_value={"focused_entry": node})
                 with patch.object(module, "run", return_value="42\n" if focused else "99\n") as action, patch.object(module.subprocess, "run"), patch.object(module, "wait_for", side_effect=self.immediate):
                     with self.assertRaises(AssertionError):
                         smoke.navigate_file_folder(module.DEEPSEEK_DIALOG, "42", Path(directory))
@@ -730,8 +843,9 @@ class NativeControlsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             expected = directory + "/"; observed = {"text": expected + "deepseek-"}
             smoke = object.__new__(module.NativeSmoke); smoke.artifacts = Path(directory); smoke.dialog_count = 1
-            smoke.capture = Mock(); smoke.describe_dialog = Mock(); node = Mock(); text = node.queryText.return_value
+            smoke.capture = Mock(); smoke.describe_dialog = Mock(); smoke.dialog_windows = Mock(return_value=["42"]); node = Mock(); text = node.queryText.return_value
             smoke.native_location_entry = Mock(return_value=node)
+            smoke.native_location_state = Mock(return_value={"focused_entry": node})
             text.getText.side_effect = lambda *_: observed["text"]
             text.getNSelections.return_value = 1; text.getSelection.return_value = (len(expected), len(observed["text"]))
             def execute(*args):
@@ -750,8 +864,9 @@ class NativeControlsTest(unittest.TestCase):
             with self.subTest(count=count, offset=offset), tempfile.TemporaryDirectory() as directory:
                 expected = directory + "/"; observed = expected + "deepseek-"
                 smoke = object.__new__(module.NativeSmoke); smoke.artifacts = Path(directory); smoke.dialog_count = 1
-                smoke.capture = Mock(); smoke.describe_dialog = Mock(); node = Mock(); text = node.queryText.return_value
+                smoke.capture = Mock(); smoke.describe_dialog = Mock(); smoke.dialog_windows = Mock(return_value=["42"]); node = Mock(); text = node.queryText.return_value
                 smoke.native_location_entry = Mock(return_value=node)
+                smoke.native_location_state = Mock(return_value={"focused_entry": node})
                 text.getText.return_value = observed; text.getNSelections.return_value = count
                 text.getSelection.return_value = (len(expected) + offset, len(observed))
                 with patch.object(module, "run", return_value="42\n") as action, patch.object(module.subprocess, "run"), patch.object(module, "wait_for", side_effect=self.immediate):
@@ -764,11 +879,45 @@ class NativeControlsTest(unittest.TestCase):
             smoke, paths, approval, execute = self.multiple_picker(directory)
             smoke.navigate_file_folder.side_effect = lambda *_: setattr(smoke.dialog_windows, 'side_effect', lambda _: [])
             with patch.object(module, "run", side_effect=execute), patch.object(module, "wait_for", side_effect=self.immediate):
-                with self.assertRaisesRegex(AssertionError, "已经关闭"):
+                with self.assertRaisesRegex(AssertionError, "两份合成文件"):
                     smoke.dialog_files(paths)
             smoke.navigate_file_folder.assert_called_once()
             approval.queryAction.return_value.doAction.assert_not_called()
             smoke.native_file_cells.assert_not_called(); smoke.driver.idle.assert_not_called()
+
+    def test_multiple_picker_waits_through_one_read_only_visibility_gap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            smoke, paths, approval, execute = self.multiple_picker(directory)
+            original = smoke.dialog_windows.side_effect; calls = {"count": 0}
+            def visible(title):
+                calls["count"] += 1
+                return [] if calls["count"] == 2 else original(title)
+            smoke.dialog_windows.side_effect = visible
+            def bounded(check, description, **kwargs):
+                for _ in range(2):
+                    value = check()
+                    if value: return value
+                raise AssertionError(description)
+            with patch.object(module, "run", side_effect=execute), patch.object(module, "wait_for", side_effect=bounded):
+                smoke.dialog_files(paths)
+            smoke.navigate_file_folder.assert_called_once()
+            approval.queryAction.return_value.doAction.assert_called_once_with(0)
+            smoke.driver.idle.assert_called_once()
+
+    def test_multiple_picker_reobserves_transient_final_focus_without_replaying_actions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            smoke, paths, approval, execute = self.multiple_picker(directory)
+            smoke.native_window_active = Mock(side_effect=[False, True, True, False, True, True])
+            clock = {"now": 0}
+            def tick():
+                clock["now"] += .01
+                return clock["now"]
+            with patch.object(module, "run", side_effect=execute) as action, patch.object(module.time, "monotonic", side_effect=tick), patch.object(module.time, "sleep"):
+                smoke.dialog_files(paths)
+            self.assertEqual(smoke.native_window_active.call_count, 6)
+            self.assertEqual(sum(call.args[-1] == "ctrl+a" for call in action.call_args_list), 1)
+            smoke.navigate_file_folder.assert_called_once()
+            approval.queryAction.return_value.doAction.assert_called_once_with(0)
 
 
 if __name__ == "__main__":
