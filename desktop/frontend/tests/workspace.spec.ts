@@ -274,6 +274,7 @@ test("后台导入完成刷新不会清空未提交的记忆草稿", async ({ pa
 test("正文和元信息达到可读字号与 WCAG AA 对比度", async ({ page }) => {
   await openDemo(page);
   await expect(page.locator(".memory-article > .prose")).toBeVisible();
+  await expect(page.locator(".evidence-summary strong").first()).toBeVisible();
   const metrics = await page.evaluate(() => {
     const rgb = (value: string) =>
       (value.match(/[\d.]+/g) || []).slice(0, 3).map(Number);

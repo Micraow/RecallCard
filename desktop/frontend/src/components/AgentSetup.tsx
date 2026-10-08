@@ -81,9 +81,10 @@ export function AgentSetupDialog({ service, client, close, changed }: { service:
         <div className="setup-scope"><Icon name="shield" size={20} /><div><strong>{scopeLabel(service.scope)}</strong><p>自动读取此范围的背景、记忆与原始来源</p></div><Badge>只读</Badge></div>
         <div className="setup-project"><span>接收方</span><strong>{name} 及它实际配置的模型服务</strong><span>项目</span><strong className="path-value">{plan.project_dir}</strong></div>
         <p className="setup-disclosure">读取结果会进入 {name} 的模型上下文。确认一次后，后续启动和查询会沿用此范围，无需每轮选择上下文。</p>
+        <label className="checkbox-row setup-consent"><input type="checkbox" checked={disclosed} onChange={event => setDisclosed(event.target.checked)} />我允许此项目的 {name} 自动读取上述范围，并向其模型服务提供检索结果</label>
         <section className="setup-files"><h3>将合并这些文件</h3>{plan.files.map(file => <details key={file.path}><summary><Icon name="file" size={15} /><span className="path-value">{file.path}</span><Badge>{file.changed ? file.before_digest ? '合并' : '新建' : '无需修改'}</Badge></summary><pre>{file.managed_addition}</pre>{file.backup_path && <p className="field-hint path-value">原文件备份：{file.backup_path}</p>}</details>)}</section>
         {plan.notices.length > 0 && <div className="setup-notices">{plan.notices.map((notice, index) => <p key={index}>{notice}</p>)}</div>}
-        <label className="checkbox-row setup-consent"><input type="checkbox" checked={disclosed} onChange={event => setDisclosed(event.target.checked)} />我允许此项目的 {name} 自动读取上述范围，并向其模型服务提供检索结果</label>
+
         <p className="field-hint">安装后会执行一次本机只读试验。它不能证明 {name} 已实际调用，客户端读取会单独记录。</p>
       </>}
       {stage === 3 && <>

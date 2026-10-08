@@ -62,6 +62,7 @@ test("首页主动作打开真实连接中心，返回和前进保留导航", as
   await expect(page.getByRole("button", { name: "连接 Claude Code", exact: true })).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect((await page.evaluate(() => (window as any).__DEMO_CALLS__)).some((call: any) => /connection_configure|approve_pairing|apply_connection/.test(call.command))).toBe(false);
+  await expect(page.locator('.connection-inventory .loading-state')).toHaveCount(0);
   await page.screenshot({ path: info.outputPath("04-connection-center.png"), fullPage: true });
   await page.goBack();
   await expect(page.getByRole("button", { name: "连接 AI", exact: true })).toBeVisible();

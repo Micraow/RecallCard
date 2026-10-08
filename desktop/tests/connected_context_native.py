@@ -163,6 +163,10 @@ def main():
         if not binary.is_file(): parser.error(f"请先构建同快照程序：{binary}")
     with tempfile.TemporaryDirectory(prefix="recallcard-connected-") as directory:
         temporary = Path(directory)
+        synthetic_home = temporary / "home"
+        synthetic_home.mkdir()
+        # 仅本验收进程和它启动的临时应用使用合成HOME，不读写runner已有宿主配置。
+        os.environ["HOME"] = str(synthetic_home)
         for name, suffix in [("XDG_DATA_HOME", "data"), ("XDG_CONFIG_HOME", "config"), ("RECALLCARD_STATE_DIR", "state")]:
             os.environ[name] = str(temporary / suffix)
         smoke = ConnectedJourney(args, temporary)

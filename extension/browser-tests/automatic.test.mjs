@@ -13,8 +13,9 @@ async function harness(authorized=true){
   const page=await browser.newPage();let state;let now=10000;
   const nativeCalls=[],saved=[],inserts=[];
   let grant=authorized?{capture:true,recall:true,provider_disclosure:true,permission_revision:1,platform:'chatgpt'}:null;
-  await page.route('**/*',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><title>合成对话</title>'+initial}));
+  await page.route('**/*',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:'<!doctype html><meta charset="UTF-8"><title>合成对话</title>'+initial}));
   await page.goto('https://chatgpt.com/c/synthetic');
+  assert.equal(await page.evaluate(()=>document.characterSet),'UTF-8','合成页面必须按UTF-8解码原始中文');
   const broker=new Broker({id:EXT,installationId:async()=>'11111111-1111-4111-8111-111111111111',popupUrl:`chrome-extension://${EXT}/popup.html`,getTab:async()=>({id:1,active:true,url:page.url()}),load:async()=>state?structuredClone(state):null,save:async(_,value)=>{state=structuredClone(value);},now:()=>now+=2000,
     content:async(_,message)=>{if(message.kind==='insert')inserts.push(message);return page.evaluate(({message,EXT})=>new Promise(resolve=>window.contentListener(message,{id:EXT,url:`chrome-extension://${EXT}/background.js`},resolve)),{message,EXT});},
     native:async(_,request)=>{nativeCalls.push(request);if(request.action==='connection')return{ok:true,result:{connection_id:'c'.repeat(64),capture_enabled:!!grant?.capture,automation:grant,state:grant?'reachable':'revoked'}};if(request.action==='automatic_capture'){saved.push(request.arguments.conversation);return{ok:true,result:{events_added:request.arguments.conversation.messages.length,events_seen:request.arguments.conversation.messages.length}};}if(request.action==='authorized_read')return{ok:true,result:request.arguments.action==='bootstrap'?{bootstrap_version:'v1',stable_text:'合成稳定背景',refs:[]}:{results:[{ref:'event:evt_synthetic',content:'合成召回'}]}};throw new Error('意外Native动作');}

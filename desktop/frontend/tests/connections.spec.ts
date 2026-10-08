@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 async function open(page: Page, state = 'normal') {
   await page.goto(`/demo.html?state=${state}#connections`);
   await expect(page.getByRole('heading', { name: '连接你常用的 AI' })).toBeVisible();
+  await expect(page.locator('.connection-inventory .loading-state')).toHaveCount(0);
 }
 const calls = (page: Page) => page.evaluate(() => (window as any).__DEMO_CALLS__ as { command: string; args: any }[]);
 async function agentPlan(page: Page, client = 'Claude Code') {
@@ -143,6 +144,9 @@ test('820px连接中心和授权预览保持完整，键盘可返回', async ({ 
   await page.screenshot({ path: info.outputPath('connections-820.png'), fullPage: true });
   await agentPlan(page, 'Codex');
   await expect(page.getByRole('button', { name: '授权并安装连接' })).toBeVisible();
+  const consentBox = await page.locator('.setup-consent').boundingBox();
+  const footerBox = await page.locator('.setup-footer').boundingBox();
+  expect(consentBox!.y + consentBox!.height).toBeLessThanOrEqual(footerBox!.y);
   await page.screenshot({ path: info.outputPath('agent-consent-820.png'), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.keyboard.press('Escape');

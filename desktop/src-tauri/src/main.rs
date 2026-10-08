@@ -1038,14 +1038,18 @@ async fn open_browser_extension_directory(app: AppHandle) -> Result<(), String> 
         } else {
             "xdg-open"
         };
-        std::process::Command::new(program)
+        let mut child = std::process::Command::new(program)
             .arg(path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map(|_| ())
-            .map_err(|_| "系统文件管理器未能启动，请复制显示的目录路径".to_string())
+            .map_err(|_| "系统文件管理器未能启动，请复制显示的目录路径".to_string())?;
+        // 文件管理器可独立保持打开；后台回收启动进程，避免留下僵尸进程。
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
     })
     .await
     .map_err(|_| "目录打开操作未完成".to_string())?

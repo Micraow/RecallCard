@@ -73,6 +73,7 @@
 @media (max-width: 1180px) {
   .background-page { padding: 30px; }
   .home-columns { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+  .home-attention { grid-row: 1; }
   .home-connect-start { flex-wrap: wrap; }
   .home-connect-start > div { flex: 1; min-width: 220px; }
   .home-connect-start > .button { margin-left: 70px; }

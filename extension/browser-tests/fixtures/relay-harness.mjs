@@ -1,5 +1,6 @@
 // 原创合成网页与本机桥，绝不连接真实账号、原始对话或私人剪贴板。
 import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
 import { Broker } from '../../broker.js';
 export const EXT = 'abcdefghijklmnopabcdefghijklmnop';
 export async function relayHarness(browser, platform = 'chatgpt') {
@@ -7,8 +8,9 @@ export async function relayHarness(browser, platform = 'chatgpt') {
   const path = platform === 'deepseek' ? '/a/chat/s/relay-synthetic' : '/c/relay-synthetic';
   const page = await browser.newPage({ viewport: { width: 1080, height: 800 } });
   const composer = platform === 'deepseek' ? '<textarea class="ds-scroll-area" name="search">合成问题</textarea>' : '<textarea id="mobile-composer-prompt">合成问题</textarea>';
-  await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html lang="zh-CN"><title>RecallCard 原创接力 fixture</title><body><main><h1>合成网页对话</h1><div id="turns"></div>' + composer + '<button id="website-send">网站发送（fixture）</button></main></body></html>' }));
+  await page.route('**/*', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: '<!doctype html><html lang="zh-CN"><meta charset="UTF-8"><title>RecallCard 原创接力 fixture</title><body><main><h1>合成网页对话</h1><div id="turns"></div>' + composer + '<button id="website-send">网站发送（fixture）</button></main></body></html>' }));
   await page.goto(origin + path);
+  assert.equal(await page.evaluate(() => document.characterSet), 'UTF-8', '合成页面必须按UTF-8解码原始中文');
   let state = null, now = 10000, editDuringRead = false;
   const calls = [], writes = [];
   const grant = { capture: true, recall: true, provider_disclosure: true, permission_revision: 1, platform };
