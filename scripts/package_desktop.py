@@ -123,8 +123,9 @@ def main():
             relative = path.resolve().relative_to(base.resolve()).as_posix()
             included.add(relative)
             files[f"third-party-licenses/{package['name']}-{package['version']}/{relative}"] = (path.read_bytes(), False)
-        # MPL 文件的对应源码原样随包提供，不把其文件许可扩展到其他项目文件。
-        if package.get('license') == 'MPL-2.0':
+        # 附对应源码。libdbus-sys 的包装许可未覆盖 vendor/dbus 的独立许可，
+        # 其实际静态编译的 C 来源与构建文件一并保存，避免只留下 Rust 包装层说明。
+        if package.get('license') == 'MPL-2.0' or package['name'] == 'libdbus-sys':
             for source in directory.rglob('*'):
                 if source.is_file():
                     files[f"third-party-source/{package['name']}-{package['version']}/{source.relative_to(directory).as_posix()}"] = (source.read_bytes(), False)

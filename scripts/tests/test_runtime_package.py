@@ -177,6 +177,19 @@ class RuntimePackageTests(unittest.TestCase):
         self.assertEqual(files['third-party-licenses/same-name-1.0.0/nested/LICENSE-MIT'][0].decode(),'另一版权所有人')
         self.assertNotEqual(files['third-party-licenses/same-name-1.0.0/LICENSE-MIT'][0],files['third-party-licenses/same-name-1.0.0/nested/LICENSE-MIT'][0])
 
+    def test_vendored_dbus_keeps_native_source_and_its_separate_notice(self):
+        metadata=json.loads(self.metadata[0].read_text())
+        metadata['packages'][0].update(name='libdbus-sys',version='0.2.7',id='libdbus-sys@0.2.7')
+        metadata['resolve']['nodes']=[{'id':'libdbus-sys@0.2.7'}]
+        self.metadata[0].write_text(json.dumps(metadata))
+        native=self.root/'dependency0/vendor/dbus'
+        native.mkdir(parents=True)
+        (native/'COPYING').write_text('合成独立原生许可')
+        (native/'dbus.c').write_text('/* 合成原生来源 */')
+        files=verify.archive_files(self.build())
+        self.assertEqual(files['third-party-source/libdbus-sys-0.2.7/vendor/dbus/dbus.c'][0].decode(),'/* 合成原生来源 */')
+        self.assertIn('third-party-licenses/libdbus-sys-0.2.7/vendor/dbus/COPYING',files)
+
     @unittest.skipUnless(hasattr(os,'mkfifo'),'需要Unix FIFO')
     def test_post_runtime_rejects_nonregular_extra_nodes(self):
         archive=self.build();destination=self.root/'extracted';verify.unpack(archive,destination,self.source)
@@ -193,6 +206,29 @@ class RuntimePackageTests(unittest.TestCase):
         upload=text.split('name: 仅成功后保存版本化运行包与校验清单',1)[1].split('name: 保存隔离验收',1)[0]
         self.assertNotIn('always()',upload)
         self.assertNotIn('validate/desktop-',text)
+
+    def test_v06_delivery_uses_exact_accepted_programs_and_new_isolated_journey(self):
+        text=(ROOT/'.github/workflows/deliver-v06-candidate.yml').read_text()
+        source=json.loads((ROOT/'scripts/validated-runtime-v06-source.json').read_text())
+        self.assertNotIn('cargo build',text)
+        self.assertIn('branches: ["validate/v06-package-20261008"]',text)
+        self.assertIn('git diff --exit-code '+source['application_commit'],text)
+        for path in ['desktop/frontend','desktop/package-lock.json','python extension VERSION']:
+            self.assertIn(path,text)
+        self.assertIn("artifact-ids: '"+str(source['build']['artifact_id'])+"'",text)
+        self.assertIn("run-id: '"+str(source['build']['run_id'])+"'",text)
+        for digest in source['binaries'].values():self.assertIn(digest,text)
+        self.assertIn("build.conclusion !== 'success'",text)
+        self.assertIn('汇总全部必需门禁',text)
+        self.assertIn('--profile release',text)
+        self.assertIn('PYTHONPATH="$PWD/python" /usr/bin/python3 -B -c',text)
+        self.assertIn('desktop/tests/first_use_native.py',text)
+        self.assertNotIn('desktop/tests/native_smoke.py',text)
+        for path in ['ui','frontend','dist']:
+            self.assertIn('test ! -e "$repository/desktop/'+path+'"',text)
+        self.assertIn('--native-summary',text)
+        upload=text.split('name: 仅成功后保存版本化运行包与校验清单',1)[1].split('name: 保存隔离验收',1)[0]
+        self.assertNotIn('always()',upload)
 
     def test_main_guide_local_links_resolve_and_backup_keeps_independent_state(self):
         guide=(ROOT/'docs/desktop-quickstart-v0.5.md').read_text()

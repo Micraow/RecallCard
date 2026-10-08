@@ -1,0 +1,33 @@
+{
+  "schema": "recallcard.validated-runtime/1",
+  "application_version": "0.6.0-dev",
+  "application_commit": "a184d54fbc81c0b471ec03cd6c60034d6751b134",
+  "profile": "release",
+  "binaries": {
+    "recallcard-desktop": "c580eaadd526f294df4a76d60e5f0df34d8046734a26b26093a9b0e7f13e86da",
+    "recallcard": "45e2aa0e21a1b101c4cb8528ab95146e8540011e0f651fdc8a64ca790554bd9b"
+  },
+  "build": {
+    "run_id": 37755614428,
+    "job_id": 113239285700,
+    "artifact_id": 11541261348,
+    "artifact_name": "RecallCard-v06-compiled-a184d54fbc81c0b471ec03cd6c60034d6751b134",
+    "artifact_sha256": "20079531756ad84b0429b780cff739d8689211fca1889532085d90ed5abace4b"
+  },
+  "acceptance": {
+    "commit": "a184d54fbc81c0b471ec03cd6c60034d6751b134",
+    "run_id": 37755614428,
+    "suite": "v0.6-first-use-native",
+    "native_job_id": 113239285700,
+    "browser_job_id": 113239285156,
+    "native_artifact_id": 11540493525,
+    "native_artifact_sha256": "ec02289115a0b034d3e160708241c6713cb64ca25119191bdc6fc28b3ba4d4ff",
+    "browser_artifact_id": 11540047324,
+    "browser_artifact_sha256": "73de2710a1fa78905b6991378008fa8f2fca1b5851a693599972ece119fcf233"
+  },
+  "limitations": [
+    "仅Linux X11/Xvfb的合成官方形状归档完成原生验收",
+    "ChatGPT真实宿主尚未配置或授权",
+    "旧Memory自动过时处理未纳入本次验收"
+  ]
+}
