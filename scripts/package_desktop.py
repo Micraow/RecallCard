@@ -65,6 +65,12 @@ def main():
                 or provenance['acceptance']['run_id'] != args.acceptance_run_id):
             parser.error('成品来源与命令行身份不一致')
     version=json.loads((ROOT/'desktop/src-tauri/tauri.conf.json').read_text())['version']
+    if provenance is not None:
+        if provenance.get('application_version', version) != version:
+            parser.error('包装版本与已验收程序来源不符')
+        if version.startswith('0.6.') and (provenance.get('application_version') != version
+                or provenance.get('acceptance', {}).get('suite') != 'v0.6-first-use-native'):
+            parser.error('v0.6运行包必须绑定明确版本与新版原生验收合同')
     guide_name='desktop-quickstart-v0.6.md' if version.startswith('0.6.') else 'desktop-quickstart-v0.5.md'
     guide = (ROOT/'docs'/guide_name).read_text()
     guide = re.sub(r'\]\(([^)]+)\)', lambda match: match[0] if re.match(r'(?:[a-zA-Z][a-zA-Z0-9+.-]*:|/|#)', match[1]) else f'](docs/{match[1]})', guide)
@@ -131,14 +137,14 @@ def main():
         symbols=subprocess.check_output(['readelf','--version-info',str(binary)],text=True)
         versions.update(re.findall(r'GLIBC_([0-9.]+)',symbols))
     minimum=max(versions,key=lambda s:tuple(map(int,s.split('.'))))
-    info = {'application':f'RecallCard Desktop {version}','commit':args.commit,'packaging_commit':args.packaging_commit or args.commit,'target':'linux-x86_64','profile':args.profile,'gui_sha256':digest(files['recallcard-desktop'][0]),'cli_sha256':digest(files['recallcard'][0]),'requires':['Git',f'GLIBC >= {minimum}','GTK 3','WebKitGTK 4.1'],'optional_requires':{'background_model':'Python 3'},'note':'系统运行库由系统包管理器提供；本包不包含任何用户资料、凭据、浏览器状态或可选API配置。'}
+    info = {'application':f'RecallCard Desktop {version}','application_version':version,'commit':args.commit,'packaging_commit':args.packaging_commit or args.commit,'target':'linux-x86_64','profile':args.profile,'gui_sha256':digest(files['recallcard-desktop'][0]),'cli_sha256':digest(files['recallcard'][0]),'requires':['Git',f'GLIBC >= {minimum}','GTK 3','WebKitGTK 4.1'],'optional_requires':{'background_model':'Python 3.10+'},'note':'系统运行库由系统包管理器提供；本包不包含任何用户资料、凭据、浏览器状态或可选API配置。'}
     if args.acceptance_commit:
         info['native_acceptance'] = {'commit':args.acceptance_commit,'run_id':args.acceptance_run_id,'url':f'https://github.com/Micraow/RecallCard/actions/runs/{args.acceptance_run_id}'}
     if provenance is not None:
         info['validated_source'] = provenance
     info['dependency_metadata'] = {'graphs':len(args.metadata),'resolved_packages':len(packages),'third_party_packages':len(notices),'target':'x86_64-unknown-linux-gnu'}
     if args.packaging_run_id:
-        info['packaging_run'] = {'run_id':args.packaging_run_id,'url':f'https://github.com/Micraow/RecallCard/actions/runs/{args.packaging_run_id}','gate':'仅在本ZIP安全解压后完整37步通过且二次文件校验成功时保存；具体结论以该运行最终状态为准'}
+        info['packaging_run'] = {'run_id':args.packaging_run_id,'url':f'https://github.com/Micraow/RecallCard/actions/runs/{args.packaging_run_id}','gate':'仅在本ZIP安全解压后对应版本的完整原生流程通过且二次文件校验成功时保存；具体结论以该运行最终状态为准'}
     files['build-info.json'] = (json.dumps(info,ensure_ascii=False,indent=2).encode(),False)
     files['SHA256SUMS'] = (''.join(f'{digest(data)}  {name}\n' for name,(data,_) in sorted(files.items())).encode(),False)
     args.out.mkdir(parents=True,exist_ok=True)

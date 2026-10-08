@@ -103,7 +103,8 @@ class FirstUseJourney(NativeSmoke):
         cli_build = cli_status["result"]["build"]
         assert gui_build == {key: cli_build[key] for key in ["version", "commit", "dirty"]}, (gui_build, cli_build)
         assert gui_build["commit"] not in {"unknown", ""}
-        (self.artifacts / "build-identity.json").write_text(json.dumps({"gui": gui_build, "cli": cli_build}, ensure_ascii=False, indent=2))
+        self.build_identity = {"gui": gui_build, "cli": cli_build}
+        (self.artifacts / "build-identity.json").write_text(json.dumps(self.build_identity, ensure_ascii=False, indent=2))
 
         browser.button("回到出处")
         wait_for(lambda: self.content("已定位到这条原话"), "精确定位原话")
@@ -205,7 +206,7 @@ def main():
                 except Exception: pass
             raise
         finally:
-            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.6-first-use-native", "passed_steps": smoke.steps, "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False}, ensure_ascii=False, indent=2))
+            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.6-first-use-native", "passed_steps": smoke.steps, "application": str(smoke.application), "cli": str(smoke.cli), "build": getattr(smoke, "build_identity", None), "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False}, ensure_ascii=False, indent=2))
             try:
                 if smoke.vault.exists():
                     subprocess.run([str(smoke.cli), "--vault", str(smoke.vault), "--json", "service", "stop"], timeout=15, capture_output=True)

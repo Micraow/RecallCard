@@ -14,6 +14,51 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+FIRST_USE_STEPS = [
+    '首次只需导入不要求格式范围或模型',
+    '官方形状ZIP经真实选择器导入后即刻阅读原话',
+    '从背景一键回到确切原话及原始时间',
+    '取消不写入且近况一次保存原话保持不变',
+    '补充近况立即可搜索',
+    '真实stdioMCP从同一正本读到刚保存近况',
+    'ChatGPT真实宿主未授权保持待连接',
+    '820窗口加载后的背景',
+    '820窗口已加载来源详情',
+    '820详情返回来源列表',
+    '重启恢复已有背景不要求重新导入',
+]
+
+
+def check_native_summary(summary, result, source):
+    if (summary.get('success') is not True or summary.get('synthetic_data_only') is not True
+            or summary.get('application') != result['application']):
+        raise ValueError('原生验收未成功，或不是本解压目录的启动程序')
+    steps = summary.get('passed_steps')
+    version = result.get('application_version', '')
+    suite = source.get('acceptance', {}).get('suite', 'legacy-native-37')
+    if version.startswith('0.6.'):
+        expected_cli = str((Path(result['destination'])/'recallcard').resolve())
+        if (suite != 'v0.6-first-use-native' or summary.get('suite') != suite or steps != FIRST_USE_STEPS
+                or summary.get('cli') != expected_cli or summary.get('invoke_mocked') is not False):
+            raise ValueError('v0.6 原生验收的流程、CLI位置或真实调用证据不符')
+        build = summary.get('build') or {}
+        if source.get('application_version') != version:
+            raise ValueError('v0.6 包版本与已验收程序来源不符')
+        for name in ['gui', 'cli']:
+            identity = build.get(name) or {}
+            if (identity.get('commit') != source['application_commit']
+                    or identity.get('version') != version or identity.get('dirty') is not False):
+                raise ValueError('v0.6 GUI与CLI不是同一已验收构建身份')
+    elif version.startswith('0.5.') and suite == 'legacy-native-37':
+        if (source.get('application_version', version) != version
+                or summary.get('suite') is not None or not isinstance(steps, list)
+                or len(steps) != 37 or len(set(steps)) != 37):
+            raise ValueError('历史原生验收不是完整37步，不能代替v0.6流程')
+    else:
+        raise ValueError('未识别的原生验收合同')
+    return {'native_suite': suite, 'native_steps': len(steps), 'post_native_verified': True}
+
+
 def safe_name(name):
     path = PurePosixPath(name)
     if (not name or '\\' in name or '\x00' in name or path.is_absolute()
@@ -61,6 +106,17 @@ def check_files(files, source):
     info = json.loads(files['build-info.json'][0])
     if info.get('validated_source') != source or info['commit'] != source['application_commit']:
         raise ValueError('成品来源不符')
+    # 版本来自已校验的包元数据，不能因外部旧格式来源缺字段而退回旧流程。
+    label = re.fullmatch(r'RecallCard Desktop (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)', info.get('application', ''))
+    if label is None:
+        raise ValueError('包应用版本无效')
+    version = info.get('application_version', label[1])
+    if version != label[1] or source.get('application_version', version) != version:
+        raise ValueError('包应用版本与成品来源不符')
+    if version.startswith('0.6.') and (source.get('application_version') != version
+            or source.get('acceptance', {}).get('suite') != 'v0.6-first-use-native'):
+        raise ValueError('v0.6包不能使用缺少版本或新版验收合同的历史来源')
+    info['application_version'] = version
     return info
 
 
@@ -92,6 +148,7 @@ def unpack(archive, destination, source, verify_only=False):
     return {'archive_sha256':sha(archive.read_bytes()),'files':len(files),
             'destination':str(destination.resolve()),'application':str((destination/'运行桌面版.sh').resolve()),
             'gui_sha256':source['binaries']['recallcard-desktop'],'cli_sha256':source['binaries']['recallcard'],
+            'application_version':info['application_version'],
             'packaging_commit':info['packaging_commit'],'verified':True}
 
 
@@ -108,13 +165,8 @@ def main():
     result = unpack(args.archive, args.destination, source, args.verify_only)
     if args.native_summary:
         summary = json.loads(args.native_summary.read_text())
-        steps = summary['passed_steps']
-        if (summary.get('success') is not True or len(steps) != 37 or len(set(steps)) != 37
-                or summary['application'] != result['application'] or not summary.get('synthetic_data_only')):
-            raise ValueError('原生验收不是本解压目录完整37步成功')
-        result['native_steps'] = len(steps)
+        result.update(check_native_summary(summary, result, source))
         result['native_summary_sha256'] = sha(args.native_summary.read_bytes())
-        result['post_native_verified'] = True
     args.report.write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n')
     print(json.dumps(result, ensure_ascii=False))
 

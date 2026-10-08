@@ -1,5 +1,6 @@
 """不启动程序或网络：运行包精确来源、可复现与恶意归档负向合同。"""
 import hashlib
+from copy import deepcopy
 import importlib.util
 import json
 import os
@@ -79,6 +80,9 @@ class RuntimePackageTests(unittest.TestCase):
 
     def test_reboot_includes_current_guide_public_worker_and_frontend_licenses(self):
         (self.root/'desktop/src-tauri/tauri.conf.json').write_text(json.dumps({'version':'0.6.0-dev'}))
+        self.source['application_version']='0.6.0-dev'
+        self.source['acceptance']['suite']='v0.6-first-use-native'
+        self.provenance.write_text(json.dumps(self.source))
         (self.root/'docs/desktop-quickstart-v0.6.md').write_text('合成新版导入说明')
         (self.root/'desktop/package.json').write_text(json.dumps({'version':'0.6.0-dev'}))
         for name in ['react','react-dom','scheduler']:
@@ -197,6 +201,82 @@ class RuntimePackageTests(unittest.TestCase):
             if not re.match(r'^[a-z]+:|^#|^/',target):self.assertTrue((ROOT/'docs'/target).is_file(),target)
         for token in ['RECALLCARD_STATE_DIR','XDG_STATE_HOME','recent-workspace.json','隐藏的 `.git`','不能只换回旧程序','不会自动更新已连接客户端']:
             self.assertIn(token,guide)
+
+    def test_v06_native_gate_requires_complete_real_journey_and_exact_package_identity(self):
+        destination=self.root/'isolated'
+        result={'application':str(destination/'运行桌面版.sh'),'destination':str(destination),
+                'application_version':'0.6.0-dev'}
+        source={**self.source,'application_version':'0.6.0-dev',
+                'acceptance':{**self.source['acceptance'],'suite':'v0.6-first-use-native'}}
+        identity={'version':'0.6.0-dev','commit':'a'*40,'dirty':False}
+        summary={'success':True,'suite':'v0.6-first-use-native',
+                 'passed_steps':verify.FIRST_USE_STEPS.copy(),'application':result['application'],
+                 'cli':str(destination/'recallcard'),'build':{'gui':identity.copy(),'cli':identity.copy()},
+                 'synthetic_data_only':True,'invoke_mocked':False,'external_chatgpt_verified':False}
+        checked=verify.check_native_summary(summary,result,source)
+        self.assertTrue(checked['post_native_verified'])
+        self.assertEqual(checked['native_suite'],'v0.6-first-use-native')
+        cases=[]
+        for key,value in [('success',False),('suite','legacy-native-37'),('application','/tmp/wrong-app'),
+                          ('cli','/tmp/wrong-cli'),('invoke_mocked',True),('synthetic_data_only',False),
+                          ('passed_steps',verify.FIRST_USE_STEPS[:-1]),
+                          ('passed_steps',list(reversed(verify.FIRST_USE_STEPS)))]:
+            invalid=deepcopy(summary);invalid[key]=value;cases.append(invalid)
+        for component,key,value in [('gui','commit','c'*40),('cli','commit','c'*40),
+                                    ('gui','dirty',True),('cli','version','0.5.0')]:
+            invalid=deepcopy(summary);invalid['build'][component][key]=value;cases.append(invalid)
+        for invalid in cases:
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
+                verify.check_native_summary(invalid,result,source)
+
+    def test_legacy_37_steps_cannot_substitute_for_reboot(self):
+        result={'application':'/tmp/isolated/运行桌面版.sh','destination':'/tmp/isolated',
+                'application_version':'0.5.0'}
+        summary={'success':True,'synthetic_data_only':True,'application':result['application'],
+                 'passed_steps':[f'合成历史步骤{i}' for i in range(37)]}
+        self.assertEqual(verify.check_native_summary(summary,result,self.source)['native_steps'],37)
+        with self.assertRaises(ValueError):
+            verify.check_native_summary(summary,result,{**self.source,'application_version':'0.6.0-dev'})
+
+    def test_actual_v06_package_never_falls_back_to_legacy_summary_or_provenance(self):
+        (self.root/'desktop/src-tauri/tauri.conf.json').write_text(json.dumps({'version':'0.6.0-dev'}))
+        (self.root/'docs/desktop-quickstart-v0.6.md').write_text('合成新版说明')
+        with self.assertRaises(SystemExit):self.build()
+        self.source['application_version']='0.6.0-dev'
+        self.source['acceptance']['suite']='v0.6-first-use-native'
+        self.provenance.write_text(json.dumps(self.source))
+        archive=self.build();destination=self.root/'extracted-v06'
+        result=verify.unpack(archive,destination,self.source)
+        self.assertEqual(result['application_version'],'0.6.0-dev')
+        legacy={'success':True,'synthetic_data_only':True,'application':result['application'],
+                'passed_steps':[f'合成历史步骤{i}' for i in range(37)]}
+        with self.assertRaises(ValueError):verify.check_native_summary(legacy,result,self.source)
+
+    def test_self_consistent_v06_archive_with_old_provenance_is_rejected_on_unpack(self):
+        files=verify.archive_files(self.build())
+        info=json.loads(files['build-info.json'][0])
+        info.update(application='RecallCard Desktop 0.6.0-dev',application_version='0.6.0-dev')
+        files['build-info.json']=(json.dumps(info).encode(),0o644)
+        files['SHA256SUMS']=(''.join(f'{verify.sha(data)}  {name}\n'
+                                    for name,(data,_) in sorted(files.items())
+                                    if name!='SHA256SUMS').encode(),0o644)
+        archive=self.root/'v06-with-old-source.zip'
+        with zipfile.ZipFile(archive,'w') as z:
+            for name,(data,mode) in files.items():
+                entry=zipfile.ZipInfo(name);entry.create_system=3;entry.external_attr=(stat.S_IFREG|mode)<<16
+                z.writestr(entry,data)
+        with self.assertRaisesRegex(ValueError,'v0.6包'):
+            verify.unpack(archive,self.root/'rejected',self.source)
+        self.assertFalse((self.root/'rejected').exists())
+
+    def test_v06_package_contract_tracks_all_actual_driver_checkpoints(self):
+        import ast
+        tree=ast.parse((ROOT/'desktop/tests/first_use_native.py').read_text())
+        exercise=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='exercise')
+        calls=sorted((node for node in ast.walk(exercise) if isinstance(node,ast.Call)
+                      and isinstance(node.func,ast.Attribute) and node.func.attr=='checkpoint'),
+                     key=lambda node:node.lineno)
+        self.assertEqual([ast.literal_eval(call.args[0]) for call in calls],verify.FIRST_USE_STEPS)
 
 
 if __name__=='__main__':unittest.main()
