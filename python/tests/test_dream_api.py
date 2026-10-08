@@ -690,6 +690,54 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(connection.request.call_args.args[0], "POST")
         connection.close.assert_called_once()
 
+    def test_complete_connection_close_body_does_not_touch_closed_socket(self):
+        # A real local socket descriptor makes a redundant settimeout fail EBADF.
+        # The protocol response is synthetic; no listener or network request exists.
+        import socket
+        for declared in ("2", None):
+            with self.subTest(content_length=declared):
+                sock = socket.socket()
+                self.addCleanup(sock.close)
+                response = Mock(status=200)
+                response.getheader.return_value = declared
+                reads = []
+                def read(limit):
+                    reads.append(limit)
+                    if len(reads) == 1:
+                        if declared is not None:
+                            sock.close()
+                        return b"{}"
+                    sock.close()
+                    return b""
+                response.read1.side_effect = read
+                connection = Mock(sock=sock)
+                connection.getresponse.return_value = response
+                with patch("recallcard_dream.client.http.client.HTTPSConnection", return_value=connection):
+                    result = https_transport(ENDPOINT, b"synthetic", KEY, 30, 20)
+                self.assertEqual(result.body, b"{}")
+                self.assertEqual(len(reads), 1 if declared is not None else 2)
+                response.close.assert_called_once()
+                connection.close.assert_called_once()
+
+    def test_complete_closed_response_still_enforces_whole_operation_deadline(self):
+        import socket
+        sock = socket.socket()
+        self.addCleanup(sock.close)
+        response = Mock(status=200)
+        response.getheader.return_value = "2"
+        def finish(_):
+            sock.close()
+            return b"{}"
+        response.read1.side_effect = finish
+        connection = Mock(sock=sock)
+        connection.getresponse.return_value = response
+        with patch("recallcard_dream.client.http.client.HTTPSConnection", return_value=connection), patch("recallcard_dream.client.time.monotonic", side_effect=[0,0,0,0,31]):
+            with self.assertRaises(DreamError) as error:
+                https_transport(ENDPOINT,b"synthetic",KEY,30,20)
+        self.assertEqual(error.exception.code,"timeout")
+        response.close.assert_called_once()
+        connection.close.assert_called_once()
+
     def test_https_rejects_partial_declared_response(self):
         response = Mock(status=200)
         response.getheader.return_value = "9"

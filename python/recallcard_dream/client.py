@@ -440,11 +440,14 @@ def https_transport(endpoint: str, payload: bytes, key: str, timeout: float, res
         connection.connect()
         sock = connection.sock
 
-        def remaining():
+        def remaining_seconds():
             seconds = deadline - time.monotonic()
             if seconds <= 0:
                 fail("timeout", "供应商请求超时；不会自动重试")
-            sock.settimeout(min(seconds, read_timeout or timeout))
+            return seconds
+
+        def remaining():
+            sock.settimeout(min(remaining_seconds(), read_timeout or timeout))
 
         remaining()
         connection.request("POST", url.path, payload, {"Authorization": "Bearer " + key, "Content-Type": "application/json",
@@ -463,15 +466,21 @@ def https_transport(endpoint: str, payload: bytes, key: str, timeout: float, res
                 if expected_length > response_limit:
                     fail("response_limit", "供应商响应超过字节预算")
             data = bytearray()
-            while True:
+            while expected_length is None or len(data) < expected_length:
                 remaining()
-                chunk = response.read1(min(65536, response_limit + 1 - len(data)))
+                chunk_limit = min(65536, response_limit + 1 - len(data))
+                if expected_length is not None:
+                    chunk_limit = min(chunk_limit, expected_length - len(data))
+                chunk = response.read1(chunk_limit)
                 if not chunk:
                     break
                 data.extend(chunk)
                 if len(data) > response_limit:
                     fail("response_limit", "供应商响应超过字节预算")
-            remaining()
+            # HTTPResponse may close its final socket reference after a complete
+            # Connection: close body or EOF. Check the deadline without touching
+            # that now-closed socket; never add a redundant read after Content-Length.
+            remaining_seconds()
             if expected_length is not None and len(data) != expected_length:
                 fail("incomplete_response", "供应商响应字节数不完整")
             return TransportResponse(response.status, bytes(data))
