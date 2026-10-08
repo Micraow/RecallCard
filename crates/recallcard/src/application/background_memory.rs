@@ -14,6 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 const CONFIG_SCHEMA: &str = "recallcard.memory-runtime/1";
@@ -313,6 +314,19 @@ impl<'a> MemoryRuntime<'a> {
         Ok(dir)
     }
     fn lock(&self, name: &str) -> AppResult<RuntimeGuard> {
+        let wait = if name == "state.lock" {
+            Duration::from_secs(5)
+        } else {
+            Duration::ZERO
+        };
+        self.acquire_lock(name, false, wait)
+    }
+    fn read_lock(&self) -> AppResult<RuntimeGuard> {
+        // 多文件状态保持同一提交边界；普通轮询至多短暂等待本地写入。
+        // 网络模型调用在 state.lock 之外，不会占用此等待预算。
+        self.acquire_lock("state.lock", true, Duration::from_secs(1))
+    }
+    fn acquire_lock(&self, name: &str, shared: bool, wait: Duration) -> AppResult<RuntimeGuard> {
         let path = self.directory()?.join(name);
         reject_symlink(&path).map_err(storage)?;
         let mut options = OpenOptions::new();
@@ -328,14 +342,37 @@ impl<'a> MemoryRuntime<'a> {
         if !file.metadata().map_err(storage)?.is_file() {
             return Err(storage("invalid lease"));
         }
-        file.try_lock().map_err(|_| {
-            AppError::new(
-                ErrorCode::Conflict,
-                "另一进程正在处理后台整理",
-                "稍后读取同一任务；不要重复启动",
-            )
-        })?;
-        Ok(RuntimeGuard(file))
+        let until = Instant::now() + wait;
+        loop {
+            let acquired = if shared {
+                file.try_lock_shared()
+            } else {
+                file.try_lock()
+            };
+            match acquired {
+                Ok(()) => return Ok(RuntimeGuard(file)),
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < until => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    let (message, action) = if name == "runner.lock" {
+                        (
+                            "已有后台整理任务正在执行",
+                            "等待当前任务完成后重试；不要重复启动模型调用",
+                        )
+                    } else {
+                        (
+                            "后台整理状态正在更新，请稍后重试",
+                            "当前操作尚未取得状态锁；已提交内容与已经记录的停止请求保留",
+                        )
+                    };
+                    let mut error = AppError::new(ErrorCode::Conflict, message, action);
+                    error.retryable = true;
+                    return Err(error);
+                }
+                Err(error) => return Err(storage(error)),
+            }
+        }
     }
     fn vault_identity(&self) -> AppResult<(FileIdentity, FileIdentity)> {
         Ok((
@@ -369,8 +406,25 @@ impl<'a> MemoryRuntime<'a> {
         Ok(record.config)
     }
     pub fn configuration(&self) -> AppResult<MemoryConfig> {
-        let _guard = self.lock("state.lock")?;
+        let _guard = self.read_lock()?;
         self.read_config()
+    }
+    /// 停止只修改暂停位；在同一写锁内读取最新配置，保留同期目的地与预算更改。
+    pub(crate) fn pause(&self) -> AppResult<()> {
+        let _guard = self.lock("state.lock")?;
+        let mut config = self.read_config()?;
+        config.paused = true;
+        let (root_identity, marker) = self.vault_identity()?;
+        self.vault
+            .write_replace(
+                &self.directory()?.join("config.json"),
+                &MemoryConfigRecord {
+                    config,
+                    root_identity,
+                    marker,
+                },
+            )
+            .map_err(storage)
     }
     pub fn configure(&self, config: MemoryConfig) -> AppResult<MemoryRuntimeStatus> {
         config.validate()?;
@@ -404,7 +458,7 @@ impl<'a> MemoryRuntime<'a> {
         self.status()
     }
     pub fn status(&self) -> AppResult<MemoryRuntimeStatus> {
-        let _guard = self.lock("state.lock")?;
+        let _guard = self.read_lock()?;
         let config = self.read_config()?;
         let jobs = self
             .records()?

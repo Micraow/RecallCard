@@ -46,6 +46,9 @@ pub struct ServiceStatus {
     #[serde(default)]
     pub provider_ready: bool,
     pub running: bool,
+    /// 已持久记录停止请求；running 仍由 OS 租约表示是否到达停稳边界。
+    #[serde(default)]
+    pub stop_requested: bool,
     pub pid: Option<u32>,
     pub started_at: Option<DateTime<Utc>>,
     pub heartbeat_at: Option<DateTime<Utc>>,
@@ -62,6 +65,7 @@ impl Default for ServiceStatus {
             credential: Default::default(),
             provider_ready: false,
             running: false,
+            stop_requested: false,
             pid: None,
             started_at: None,
             heartbeat_at: None,
@@ -150,6 +154,9 @@ fn save_status(vault: &Vault, status: &ServiceStatus) -> AppResult<()> {
 pub fn service_status(vault: &Vault) -> AppResult<ServiceStatus> {
     let mut status = read_status(vault)?;
     status.running = try_lease(&directory(vault)?.join("service.lock"))?.is_none();
+    let stop = directory(vault)?.join("stop.json");
+    reject_symlink(&stop).map_err(|_| storage())?;
+    status.stop_requested = stop.exists();
     if !status.running {
         status.pid = None;
         status.provider_ready = false;
@@ -205,10 +212,7 @@ pub fn request_service_stop(vault: &Vault) -> AppResult<()> {
             &serde_json::json!({"requested_at":Utc::now()}),
         )
         .map_err(|_| storage())?;
-    let memory = MemoryRuntime::new(vault);
-    let mut config = memory.status()?.config;
-    config.paused = true;
-    memory.configure(config)?;
+    MemoryRuntime::new(vault).pause()?;
     ImportService::new(vault)?.pause_all_pending()?;
     Ok(())
 }
@@ -341,6 +345,7 @@ pub fn run_service<P: MemoryProvider + ?Sized>(
         std::thread::sleep(Duration::from_millis(options.poll_interval_ms));
     }
     status.running = false;
+    status.stop_requested = stop.exists();
     status.pid = None;
     status.heartbeat_at = Some(Utc::now());
     save_status(vault, &status)?;

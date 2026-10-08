@@ -200,8 +200,63 @@ fn service_stop_during_provider_blocks_late_commit() {
     )
     .unwrap();
     assert!(!result.running);
+    assert!(result.stop_requested);
     assert_eq!(result.last_memory_job.unwrap().state, JobState::Paused);
     assert!(vault.memories().unwrap().is_empty());
+    let stopped = service_status(&vault).unwrap();
+    assert!(stopped.stop_requested);
+    assert!(!stopped.running);
+    assert!(MemoryRuntime::new(&vault).configuration().unwrap().paused);
+}
+#[test]
+fn stop_waits_for_current_writer_without_overwriting_new_configuration() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&root.path().join("vault")).unwrap();
+    MemoryRuntime::new(&vault)
+        .configure(configuration())
+        .unwrap();
+    let directory = vault.state_dir().unwrap().join("background-memory");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(directory.join("state.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let path = vault.root().to_path_buf();
+    let (sent, received) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let vault = Vault::open_existing(&path).unwrap();
+        sent.send(request_service_stop(&vault)).unwrap();
+    });
+    let until = Instant::now() + Duration::from_secs(2);
+    while !service_status(&vault).unwrap().stop_requested {
+        assert!(Instant::now() < until, "停止请求尚未持久记录");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // 先收到停止请求，再等当前本地事务完成；不能因瞬态忙碌直接报错。
+    assert!(matches!(
+        received.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    let config_path = directory.join("config.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    record["config"]["budget"]["max_calls_per_month"] = 37.into();
+    let mut replacement = tempfile::NamedTempFile::new_in(&directory).unwrap();
+    replacement
+        .write_all(&serde_json::to_vec(&record).unwrap())
+        .unwrap();
+    replacement.persist(&config_path).unwrap();
+    lock.unlock().unwrap();
+    received
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    worker.join().unwrap();
+    let config = MemoryRuntime::new(&vault).configuration().unwrap();
+    assert!(config.paused);
+    assert_eq!(config.budget.max_calls_per_month, 37);
 }
 #[test]
 fn one_service_lease_prevents_duplicate_runtime_hosts() {

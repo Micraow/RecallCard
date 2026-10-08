@@ -95,6 +95,123 @@ fn unconfigured_preserves_immediate_raw_search_without_manual_fallback() {
     assert!(!raw_search(&vault)["results"].as_array().unwrap().is_empty());
 }
 #[test]
+fn state_readers_wait_for_the_writer_and_read_one_complete_commit() {
+    use std::{io::Write, sync::mpsc, time::Duration};
+    let (_dir, vault) = vault();
+    MemoryRuntime::new(&vault).configure(config()).unwrap();
+    let directory = vault.state_dir().unwrap().join("background-memory");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(directory.join("state.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let path = vault.root().to_path_buf();
+    let (started, waiting) = mpsc::channel();
+    let (sent, received) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let vault = Vault::open_existing(&path).unwrap();
+        let runtime = MemoryRuntime::new(&vault);
+        started.send(()).unwrap();
+        sent.send((runtime.status(), runtime.configuration(), runtime.jobs()))
+            .unwrap();
+    });
+    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(matches!(
+        received.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    // 模拟持有正常写锁的事务：配置和预算文件须一起发布完毕才能读。
+    let config_path = directory.join("config.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    record["config"]["budget"]["max_calls_per_month"] = 37.into();
+    let mut replacement = tempfile::NamedTempFile::new_in(&directory).unwrap();
+    replacement
+        .write_all(&serde_json::to_vec(&record).unwrap())
+        .unwrap();
+    replacement.persist(&config_path).unwrap();
+    let month = Utc::now().format("%Y-%m").to_string();
+    let usage = MemoryUsage {
+        month: month.clone(),
+        reserved_calls: 2,
+        ..Default::default()
+    };
+    fs::write(
+        directory.join(format!("usage-{month}.json")),
+        serde_json::to_vec(&usage).unwrap(),
+    )
+    .unwrap();
+    lock.unlock().unwrap();
+    let (status, configuration, jobs) = received.recv_timeout(Duration::from_secs(2)).unwrap();
+    reader.join().unwrap();
+    let status = status.unwrap();
+    assert_eq!(status.config.budget.max_calls_per_month, 37);
+    assert_eq!(status.usage.reserved_calls, 2);
+    assert_eq!(configuration.unwrap().budget.max_calls_per_month, 37);
+    assert!(jobs.unwrap().is_empty());
+    // 普通读者互不排斥，也不会抢走后台单实例 runner 租约。
+    lock.lock_shared().unwrap();
+    assert!(MemoryRuntime::new(&vault).status().is_ok());
+    lock.unlock().unwrap();
+}
+#[test]
+fn persistent_state_contention_is_bounded_and_retryable() {
+    let (_dir, vault) = vault();
+    MemoryRuntime::new(&vault).configure(config()).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(
+            vault
+                .state_dir()
+                .unwrap()
+                .join("background-memory/state.lock"),
+        )
+        .unwrap();
+    lock.lock().unwrap();
+    let error = MemoryRuntime::new(&vault).status().unwrap_err();
+    lock.unlock().unwrap();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.retryable);
+}
+#[test]
+fn polling_and_stop_do_not_wait_for_a_slow_provider_or_allow_its_late_result() {
+    use std::{sync::mpsc, time::Duration};
+    let (_dir, vault) = vault();
+    source(&vault, "slow", "personal", "user");
+    MemoryRuntime::new(&vault).configure(config()).unwrap();
+    let path = vault.root().to_path_buf();
+    let (entered, waiting) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let vault = Vault::open_existing(&path).unwrap();
+        let mut provider = Fake {
+            calls: 0,
+            handler: |_: &MemoryConfig, job: &DreamJob| {
+                entered.send(()).unwrap();
+                blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(add(job))
+            },
+        };
+        MemoryRuntime::new(&vault).tick(&mut provider)
+    });
+    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    let runtime = MemoryRuntime::new(&vault);
+    for _ in 0..10 {
+        assert_eq!(runtime.status().unwrap().jobs[0].state, JobState::Running);
+        assert_eq!(runtime.jobs().unwrap().len(), 1);
+        assert!(!runtime.configuration().unwrap().paused);
+    }
+    recallcard::application::runtime::request_service_stop(&vault).unwrap();
+    assert!(runtime.configuration().unwrap().paused);
+    release.send(()).unwrap();
+    let status = worker.join().unwrap().unwrap().unwrap();
+    assert_eq!(status.state, JobState::Paused);
+    assert_eq!(status.progress.provider_calls, 1);
+    assert!(vault.memories().unwrap().is_empty());
+    assert!(vault.events().unwrap().len() == 1);
+}
+#[test]
 fn configured_increment_commits_with_receipt_and_never_replays() {
     let (_dir, vault) = vault();
     let event = source(&vault, "first", "personal", "user");
