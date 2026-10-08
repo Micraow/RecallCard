@@ -49,9 +49,16 @@ fn list_read_and_sources_share_readable_metadata_without_inventing_a_memory_conv
         "evidence":"observed","scope":"personal"
     })).unwrap()).unwrap();
     let memory_ref = format!("memory:{}@{}", memory.id, memory.revision);
+    let grouped = session
+        .search(&info.session_id, "personal", "合成共同检索词", "all")
+        .unwrap();
+    assert_eq!(grouped["results"].as_array().unwrap().len(), 1);
+    let related = grouped["results"][0]["related_refs"].as_array().unwrap();
+    assert!(related.contains(&json!(reference(&user))));
+    assert!(related.contains(&json!(reference(&assistant))));
     for response in [
         session
-            .search(&info.session_id, "personal", "合成共同检索词", "all")
+            .search(&info.session_id, "personal", "合成共同检索词", "events")
             .unwrap(),
         session.browse(&info.session_id, "personal", "all").unwrap(),
     ] {
@@ -66,6 +73,12 @@ fn list_read_and_sources_share_readable_metadata_without_inventing_a_memory_conv
         assert_eq!(row["platform"], "synthetic-platform");
         assert_eq!(row["role"], "user");
         assert!(row["occurred_at"].is_null());
+    }
+    for response in [
+        grouped,
+        session.browse(&info.session_id, "personal", "all").unwrap(),
+    ] {
+        let rows = response["results"].as_array().unwrap();
         let row = rows.iter().find(|row| row["ref"] == memory_ref).unwrap();
         assert!(row["session_ref"].is_null());
         assert!(row.get("conversation_ref").is_none());

@@ -76,6 +76,9 @@ impl Drop for ConnectionLock {
     }
 }
 fn paths(vault: &Vault) -> AppResult<(PathBuf, ConnectionLock)> {
+    paths_with_lock(vault, false)
+}
+fn paths_with_lock(vault: &Vault, shared: bool) -> AppResult<(PathBuf, ConnectionLock)> {
     let root = vault.state_dir().map_err(storage)?;
     let lock = root.join("connections.lock");
     crate::vault::reject_symlink(&lock).map_err(storage)?;
@@ -86,8 +89,30 @@ fn paths(vault: &Vault) -> AppResult<(PathBuf, ConnectionLock)> {
         .write(true)
         .open(lock)
         .map_err(storage)?;
-    file.try_lock()
-        .map_err(|_| error(ErrorCode::Conflict, "连接设置正在更新，请稍后重试"))?;
+    if !file.metadata().map_err(storage)?.is_file() {
+        return Err(storage("invalid connection lock"));
+    }
+    let until =
+        std::time::Instant::now() + std::time::Duration::from_secs(if shared { 1 } else { 5 });
+    loop {
+        let acquired = if shared {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        };
+        match acquired {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let mut busy = error(ErrorCode::Conflict, "连接设置仍在处理中，请稍后重试");
+                busy.retryable = true;
+                return Err(busy);
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(storage(error)),
+        }
+    }
     let path = root.join("connections-v1.json");
     crate::vault::reject_symlink(&path).map_err(storage)?;
     Ok((path, ConnectionLock(file)))
@@ -253,7 +278,8 @@ pub fn has_browser_binding(vault: &Vault, extension: &str) -> AppResult<bool> {
 }
 
 pub fn inventory(vault: &Vault) -> AppResult<Value> {
-    let (path, _lock) = paths(vault)?;
+    // 轮询读取同一完整状态；共享读者不互斥，撤权提交期间短暂有界等待。
+    let (path, _lock) = paths_with_lock(vault, true)?;
     let store = load(vault, &path)?;
     Ok(
         json!({"entries":store.entries,"pending_pairings":store.pending_pairings.into_iter().filter(|request|request.expires_at>Utc::now()).collect::<Vec<_>>(),"supported_protocols":["recallcard.action/1","recallcard.conversation/1","claude-code.SessionStart"],"identity_notice":"浏览器连接绑定本机扩展与网站；不读取账号凭证，无法核验网站登录账号。最终网页发送始终由人完成。"}),

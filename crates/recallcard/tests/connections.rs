@@ -682,3 +682,100 @@ fn real_cli_connected_hook_and_mcp_use_the_fixed_grant_without_external_agents()
     let response: Value = serde_json::from_str(lines.lines().last().unwrap()).unwrap();
     assert_eq!(response["result"]["isError"], true);
 }
+
+#[test]
+fn inventory_shares_readers_and_waits_for_a_short_update_without_false_failure() {
+    use std::{
+        fs::OpenOptions,
+        time::{Duration, Instant},
+    };
+    let (_d, v) = setup();
+    connections::configure(&v, grant(), None).unwrap();
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(v.state_dir().unwrap().join("connections.lock"))
+        .unwrap();
+    lock.lock_shared().unwrap();
+    let began = Instant::now();
+    assert_eq!(
+        connections::inventory(&v).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(began.elapsed() < Duration::from_millis(500));
+    lock.unlock().unwrap();
+    lock.lock().unwrap();
+    std::thread::scope(|scope| {
+        let read = scope.spawn(|| connections::inventory(&v));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!read.is_finished());
+        lock.unlock().unwrap();
+        assert_eq!(
+            read.join().unwrap().unwrap()["entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    });
+}
+#[test]
+fn connection_busy_is_retryable_but_corrupt_state_is_a_storage_failure() {
+    use std::{
+        fs::OpenOptions,
+        time::{Duration, Instant},
+    };
+    let (_d, v) = setup();
+    let entry = connections::configure(&v, grant(), None).unwrap();
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(v.state_dir().unwrap().join("connections.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let began = Instant::now();
+    let busy = connections::inventory(&v).unwrap_err();
+    assert_eq!(busy.code, ErrorCode::Conflict);
+    assert!(busy.retryable);
+    assert!(began.elapsed() < Duration::from_secs(2));
+    lock.unlock().unwrap();
+    connections::revoke(&v, &entry.id, entry.permission_revision).unwrap();
+    assert_eq!(
+        connections::inventory(&v).unwrap()["entries"][0]["revoked"],
+        true
+    );
+    std::fs::write(
+        v.state_dir().unwrap().join("connections-v1.json"),
+        "invalid synthetic json",
+    )
+    .unwrap();
+    let bad = connections::inventory(&v).unwrap_err();
+    assert_eq!(bad.code, ErrorCode::Storage);
+    assert!(!bad.retryable);
+}
+#[test]
+fn revoke_waits_for_existing_shared_reader_and_does_not_lose_the_user_action() {
+    use std::{fs::OpenOptions, time::Duration};
+    let (_d, v) = setup();
+    let entry = connections::configure(&v, grant(), None).unwrap();
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(v.state_dir().unwrap().join("connections.lock"))
+        .unwrap();
+    lock.lock_shared().unwrap();
+    std::thread::scope(|scope| {
+        let revoked = scope.spawn(|| connections::revoke(&v, &entry.id, entry.permission_revision));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!revoked.is_finished());
+        lock.unlock().unwrap();
+        assert!(revoked.join().unwrap().unwrap().revoked);
+    });
+    assert_eq!(
+        connections::inventory(&v).unwrap()["entries"][0]["revoked"],
+        true
+    );
+}
