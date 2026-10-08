@@ -1,6 +1,7 @@
 /** 仅由 demo.html 引入。生产 index.html 不引用此模块，演示内容不进入发行包。 */
 import { createRoot } from "react-dom/client";
 import { App } from "../App";
+import { createConnectionDemo } from "./connections";
 import { RecallService, type Transport } from "../service/client";
 import type {
   Memory,
@@ -148,6 +149,7 @@ const completeJob: JobStatus = {
   updated_at: "2026-10-08T08:11:00Z",
 };
 const mode = new URLSearchParams(location.search).get("state") || "normal";
+const connectionDemo = createConnectionDemo(mode);
 let imported = !["first-use", "empty"].includes(mode);
 let jobs: JobStatus[] = imported ? [completeJob] : [];
 let notePreview: {
@@ -227,7 +229,7 @@ const transport: Transport = {
   async invoke<T>(command: string, args = {}): Promise<T> {
     calls.push({ command, args });
     await new Promise((resolve) =>
-      setTimeout(resolve, command === "import_sources" ? 350 : 55),
+      setTimeout(resolve, (command === "apply_connection_setup" && mode.startsWith("slow-") || command === "connection_approve_pairing" && mode === "slow-pairing") ? 1500 : command === "import_sources" ? 350 : 55),
     );
     const value = await invoke(command, args);
     return structuredClone(value) as T;
@@ -237,6 +239,8 @@ async function invoke(
   command: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
+  const connection = await connectionDemo(command, args);
+  if (connection.handled) return connection.value;
   const rows =
     !imported || ["first-use", "imported"].includes(mode) ? [] : memories;
   const scope = String(args.scope || "personal");
@@ -571,6 +575,12 @@ async function invoke(
       capture_enabled: args.allowCapture,
       note: "示例注册完成，尚无浏览器调用回执。",
     };
+  if (command === "model_setup_status") return {
+    runtime: await invoke("memory_runtime_status", args),
+    credential: { present: false, storage: "unavailable", lifetime: "not_configured", os_protected_available: false, message: "合成界面未提供任何模型密钥" },
+    service: null,
+    service_error: null,
+  };
   if (command === "memory_runtime_status")
     return {
       schema: "recallcard.memory-runtime/1",

@@ -8,7 +8,7 @@ let browser;
 before(async()=>{browser=await chromium.launch(process.env.RECALLCARD_CHROMIUM_PATH?{executablePath:process.env.RECALLCARD_CHROMIUM_PATH}:{});});
 after(async()=>{await browser?.close();});
 const EXT='abcdefghijklmnopabcdefghijklmnop';
-const initial='<div data-message-author-role="user" data-message-id="u1"><p>合成用户决定</p></div><div data-message-author-role="assistant" data-message-id="a1"><p>合成回答</p></div><textarea id="mobile-composer-prompt">原有草稿</textarea>';
+const initial='<div data-message-author-role="user" data-message-id="u1"><p>合成用户决定</p></div><div data-message-author-role="assistant" data-message-id="a1" data-is-streaming="false"><p>合成回答</p></div><textarea id="mobile-composer-prompt">原有草稿</textarea>';
 async function harness(authorized=true){
   const page=await browser.newPage();let state;let now=10000;
   const nativeCalls=[],saved=[],inserts=[];
@@ -50,10 +50,10 @@ test('上下文块不回流为新用户事实；模型完成的只读请求自�
     const request='```recallcard-action\n'+JSON.stringify({protocol:'recallcard.action/1',request_id:'r_search',nonce:state.nonce,session_ref:state.session_ref,action:'search',arguments:{query:'合成'}})+'\n```';
     await h.page.evaluate(({draft,request})=>{
       document.querySelector('textarea').value='接下来的用户草稿';
-      for(const [role,id,text] of [['user','u2',draft],['assistant','a2',request]]){const node=document.createElement('div');node.setAttribute('data-message-author-role',role);node.setAttribute('data-message-id',id);node.textContent=text;document.body.append(node);}
+      for(const [role,id,text] of [['user','u2',draft],['assistant','a2',request]]){const node=document.createElement('div');node.setAttribute('data-message-author-role',role);node.setAttribute('data-message-id',id);if(role==='assistant')node.setAttribute('data-is-streaming','false');node.textContent=text;document.body.append(node);}
     },{draft,request});await h.tick();await h.tick();
     assert.equal(h.inserts.length,2);assert.match(await h.page.locator('textarea').inputValue(),/合成召回/);assert.ok(h.saved.at(-1).messages.every(m=>!m.text.includes('[RecallCard ')));assert.equal(h.saved.at(-1).messages.find(m=>m.id==='u2').text,'原有草稿');
-    assert.equal(h.state().bootstrap.delivery,'left_draft');assert.deepEqual(await h.page.evaluate(()=>sendEvents),[]);
+    assert.equal(h.state().bootstrap.delivery,'observed_sent');assert.deepEqual(await h.page.evaluate(()=>sendEvents),[]);
   }finally{await h.page.close();}
 });
 test('SPA换会话自动重绑，旧nonce请求不能查询，持久授权不需要再次点击',async()=>{

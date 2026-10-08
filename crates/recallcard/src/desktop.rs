@@ -6,6 +6,8 @@
 //! 多文件导入的后台线程不持桌面会话锁；宿主应轮询状态，不能持锁等待任务完成。
 mod application;
 mod application_connections;
+mod connection_operation;
+pub use connection_operation::ConnectionOperation;
 mod background;
 mod branches;
 mod handoff;

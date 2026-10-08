@@ -1,6 +1,7 @@
-import { automaticCycle } from './automatic.js';
+import { automaticCycle, prepareAutomaticRequest } from './automatic.js';
 import { parseAction, validateAction, routeFor, siteFor, newNonce, reserveRequest, makeCapsule, byteLength, fail, PROTOCOL } from './protocol.js';
 import './conversation-format.js';
+import { relayState, setRelay, capsuleText, finalReceipt } from './relay-state.js';
 const conversationFormat = globalThis.RecallCardConversationFormat;
 export const HOST = 'com.recallcard.host';
 export function verifyPopup(sender, extensionId, popupUrl) {
@@ -21,7 +22,7 @@ export function bindSession(previous, { route, token, documentId, installationId
 }
 export function publicState(state) {
   const preview = state.preview && Object.fromEntries(Object.entries(state.preview).filter(([key]) => !['source_request', 'result_fingerprint'].includes(key)));
-  return { installation_id: state.installation_id || null, extension_id: state.extension_id || null, route: state.route, platform: siteFor(state.route).id, platform_name: siteFor(state.route).name, nonce: state.nonce, session_ref: state.session_ref, preview, connection: state.connection || null, capture_confirmation_valid: !!state.capture_approval, last_capture_at: state.last_capture_at || null, last_read_at: state.last_read_at || null, auto_capture_note: state.auto_capture_note || null, automatic_status: state.automatic_status || null, automatic_error: state.automatic_error || null };
+  return { installation_id: state.installation_id || null, extension_id: state.extension_id || null, route: state.route, platform: siteFor(state.route).id, platform_name: siteFor(state.route).name, capabilities: siteFor(state.route).capabilities, nonce: state.nonce, session_ref: state.session_ref, preview, connection: state.connection || null, capture_confirmation_valid: !!state.capture_approval, last_capture_at: state.last_capture_at || null, last_read_at: state.last_read_at || null, auto_capture_note: state.auto_capture_note || null, automatic_status: state.automatic_status || null, automatic_error: state.automatic_error || null, relay: relayState(state) };
 }
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
@@ -127,6 +128,8 @@ export class Broker {
     if (!state || state.nonce !== session.nonce || state.session_ref !== session.session_ref) return warning;
     state.preview = null;
     state.bootstrap = null;
+    state.relay_sent_message = null;
+    setRelay(state, 'blocked', '旧资料或权限已失效，请重新准备', { request_id: null, manual_fallback: true });
     await this.api.save(tabId, state);
     return warning;
   }
@@ -143,7 +146,72 @@ export class Broker {
       fail(`${error.message}；旧预览已废弃。${warning}请重新请求并检查资料，扩展没有发送任何内容`);
     }
   }
+  async relayCommand(tabId, message) {
+    let state = await this.current(tabId, message);
+    const command = message.command;
+    if (command === 'inspect') return publicState(state);
+    if (['pause', 'resume', 'disable', 'enable'].includes(command)) {
+      const old = relayState(state);
+      const paused = ['pause', 'disable'].includes(command);
+      state.relay = { ...old, enabled: command === 'disable' ? false : command === 'enable' ? true : old.enabled, paused };
+      setRelay(state, paused ? 'paused' : state.preview ? 'awaiting_user_send' : 'idle', paused ? '接力已暂停，恢复后会重新核对当前会话与权限' : '接力已恢复，正在重新核对当前会话');
+      await this.api.save(tabId, state);
+      return publicState(state);
+    }
+    if (relayState(state).paused || !relayState(state).enabled) fail('接力已暂停，请先恢复');
+    if (command === 'delivered') {
+      if (!state.preview) fail('没有待确认的本轮资料');
+      const reply = await this.api.content(tabId, { kind: 'delivered', route: state.route, nonce: state.nonce, session_ref: state.session_ref, id: state.preview.id }, state.documentId);
+      if (!reply?.ok) fail(reply?.error || '请先自己点击网页发送');
+      state = await this.current(tabId, message);
+      state.preview.delivery = 'user_confirmed_sent';
+      if (state.bootstrap?.id === state.preview.id) state.bootstrap.delivery = 'user_confirmed_sent';
+      setRelay(state, 'waiting_reply', '已按你的确认记录发送，等待完整回复');
+      await this.api.save(tabId, state);
+      return publicState(state);
+    }
+    if (!['copy', 'execute', 'bootstrap'].includes(command)) fail('不支持的接力操作');
+    const checked = await this.readConnection(tabId, message, state);
+    state = checked.state;
+    const grant = checked.connection.automation;
+    if (!grant?.recall || !grant.provider_disclosure || grant.platform !== siteFor(state.route).id || !Number.isSafeInteger(grant.permission_revision)) fail('请在桌面确认此网站的读取和提供资料权限');
+    if (command === 'bootstrap') {
+      if (state.bootstrap || state.preview) fail('本会话已有使用说明或本轮资料，请继续当前轮；重新开始需显式重置');
+      const request = validateAction({ protocol: PROTOCOL, request_id: `b_${newNonce()}`, nonce: state.nonce, session_ref: state.session_ref, action: 'bootstrap', arguments: {} }, state);
+      await prepareAutomaticRequest(this, tabId, message, state, request, grant);
+      return publicState(await this.current(tabId, message));
+    }
+    if (command === 'copy') {
+      const capsule = state.preview;
+      if (!capsule || capsule.automatic_revision !== grant.permission_revision) fail('本轮资料或权限已变化，请重新准备');
+      const result = await this.userNative(tabId, message, state, 'authorized_read', { action: capsule.source_request.action, arguments: capsule.source_request.arguments, permission_revision: grant.permission_revision });
+      if (await resultFingerprint(capsule.action, result) !== capsule.result_fingerprint) {
+        await this.discardStale(tabId, state, capsule);
+        fail('资料已变化，旧副本已废弃，请重新准备');
+      }
+      return { text: capsuleText(capsule), request_id: capsule.id };
+    }
+    if (state.preview && ['observed_sent', 'user_confirmed_sent'].includes(state.preview.delivery) && finalReceipt(message.text, state, state.preview.id)) {
+      setRelay(state, 'result_ready', '已收到你粘贴的本轮完整回答标记，可回到对话阅读');
+      await this.api.save(tabId, state);
+      return publicState(state);
+    }
+    if (state.preview?.delivery === 'draft') fail('本轮资料仍在草稿，请先手动发送');
+    const request = parseAction(message.text, state);
+    if (request.action === 'bootstrap' && state.bootstrap) fail('本会话已有使用说明；如需重新开始请显式重置会话');
+    await prepareAutomaticRequest(this, tabId, message, state, request, grant);
+    return publicState(await this.current(tabId, message));
+  }
   async handle(message, sender) {
+    if (message?.kind === 'relay_control') {
+      const tab = await this.api.getTab(sender.tab?.id);
+      verifyContent(sender, this.api.id, tab.url, message.route);
+      return this.serial(tab.id, async () => {
+        const state = await this.current(tab.id, message);
+        if (state.documentId !== sender.documentId) fail('接力操作来自过期文档');
+        return this.relayCommand(tab.id, message);
+      });
+    }
     if (message?.kind === 'automatic_tick') {
       const tab = await this.api.getTab(sender.tab?.id);
       verifyContent(sender, this.api.id, tab.url, message.route);
@@ -161,6 +229,7 @@ export class Broker {
           const current = await this.api.load(tab.id);
           if (current?.nonce === message.nonce) {
             current.automatic_status = 'failed';
+            setRelay(current, 'blocked', error.message, { manual_fallback: true });
             current.automatic_error = '自动接入未完成；打开连接检查，确认授权、身份与页面是否稳定';
             await this.api.save(tab.id, current);
           }

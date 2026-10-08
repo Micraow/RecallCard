@@ -23,9 +23,19 @@
   let automationObserved = false;
   let lastMutationAt = Date.now();
   let automaticBusy = false;
+  let locallyPaused = false;
+  let overlay = null;
+  const composerFingerprint = async () => {
+    try {
+      const node = adapter.find(), text = adapter.text(node);
+      const fingerprint = await format.hash(text);
+      return adapter.find() === node && adapter.text(node) === text ? fingerprint : null;
+    } catch { return null; }
+  };
   const invalidate = () => {
     warnings = adapter.reset();
     token = crypto.randomUUID(); binding = null; manualConfirmed = false; capture = null; automationObserved = false; lastMutationAt = Date.now();
+    overlay?.reset();
   };
   const checkNavigation = () => {
     const current = currentRoute();
@@ -55,6 +65,7 @@
     if (!result?.ok) throw new Error(result?.error || '无法绑定当前会话');
     if (binding && binding.nonce !== result.result.nonce) { warnings = adapter.reset(); capture = null; }
     binding = result.result;
+    overlay?.update(binding);
     return { ...binding, inserted: adapter.status(), warnings, composer_available: !!composer };
   };
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -67,27 +78,46 @@
       if (message?.kind === 'reset') { invalidate(); return bind(true); }
       if (!binding || message.nonce !== binding.nonce || message.session_ref !== binding.session_ref || message.route !== route) throw new Error('页面或会话已变化；请重新打开扩展');
       if (message.kind === 'check') return { status: 'current' };
+      if (message.kind === 'clipboard_capability') return globalThis.RecallCardClipboard?.capability(document, navigator) || { write: false, read: 'paste_only' };
       if (message.kind === 'automatic_snapshot') {
-        if (!conversation || !format || !['chatgpt', 'deepseek'].includes(globalThis.RecallCardSites.forUrl(location.href).id)) throw new Error('此平台未支持自动接入');
+        if (locallyPaused) return { status: 'paused' };
+        if (!conversation || !format || !['chatgpt', 'deepseek'].includes(globalThis.RecallCardSites.forUrl(location.href).id)) return { status: 'manual_fallback' };
         automationObserved = true;
         if (navigationIdentity) return { status: 'waiting_for_conversation_identity' };
         if (document.visibilityState === 'hidden' || conversation.streaming() || Date.now() - lastMutationAt < 1500) return { status: 'waiting_for_stable_page' };
         const selectedToken = token;
         const draft_ids = adapter.draftIds();
-        if (!conversation.nodes().length) return { status: 'stable', conversation: null, requests: [], draft_ids };
+        const composer_fingerprint = await composerFingerprint();
+        if (!conversation.nodes().length) return { status: composer ? 'stable' : 'manual_fallback', conversation: null, requests: [], draft_ids, composer_fingerprint };
         const raw = conversation.read(token, new Date().toISOString());
         // Exact bounded context markers identify synthetic inserted material.
         // Do not allow it to become another user assertion or a tool request.
         const strip = text => text.replace(/\[RecallCard ([a-f0-9]{48}:[A-Za-z0-9_-]{1,96})\][\s\S]*?\[\/RecallCard \1\]/gu, '').trim();
         const requests = [];
         const last = raw.messages.at(-1);
-        if (message.recall && last?.role === 'assistant' && !last.metadata?.weaker_identity) {
-          for (const match of strip(last.text).matchAll(/```recallcard-action\n[\s\S]*?\n```/gu)) requests.push(match[0]);
+        const nodes = conversation.nodes();
+        const lastNode = nodes.find(node => node.getAttribute('data-message-id') === last?.id);
+        const complete = !!lastNode && conversation.completed(lastNode);
+        if (message.recall && last?.role === 'assistant' && !last.metadata?.weaker_identity && complete) {
+          // Require one whole response, not a complete-looking block embedded in
+          // an unfinished answer. The protocol parser applies its own limits.
+          const text = strip(last.text).trim();
+          if (/^```recallcard-action\n[^]*\n```$/u.test(text)) requests.push(text);
         }
+        const sent = [];
+        let sentIndex = -1;
+        for (const [index, item] of raw.messages.entries()) {
+          if (item.role !== 'user' || item.metadata?.weaker_identity) continue;
+          if (item.id === message.sent_message_id) sentIndex = index;
+          if (message.capsule_id && item.text.includes(`[RecallCard ${binding.nonce}:${message.capsule_id}]`) && item.text.includes(`[/RecallCard ${binding.nonce}:${message.capsule_id}]`)) {
+            sent.push({ id: message.capsule_id, message_id: item.id }); sentIndex = index;
+          }
+        }
+        const relay_observation = { sent, last: last && !last.metadata?.weaker_identity ? { id: last.id, role: last.role, text: last.text, complete, after_sent: sentIndex >= 0 && raw.messages.length - 1 > sentIndex } : null };
         const originalCount = raw.messages.length;
-        raw.messages = raw.messages.filter(item => ['user','assistant'].includes(item.role) && !item.metadata?.weaker_identity).map(item => ({ ...item, text: strip(item.text) })).filter(item => item.text && !item.text.includes('[RecallCard ') && !item.text.includes('[/RecallCard '));
+        raw.messages = raw.messages.filter(item => (item.role !== 'assistant' || conversation.completed(nodes.find(node => node.getAttribute('data-message-id') === item.id) || lastNode)) && ['user','assistant'].includes(item.role) && !item.metadata?.weaker_identity).map(item => ({ ...item, text: strip(item.text) })).filter(item => item.text && !item.text.includes('[RecallCard ') && !item.text.includes('[/RecallCard '));
         const skipped = originalCount - raw.messages.length;
-        let capture_note = skipped ? `${skipped} 条消息因身份、角色或资料标记不明确而跳过` : null;
+        let capture_note = skipped ? `${skipped} 条消息因身份、角色、完成凭据或资料标记不明确而跳过` : null;
         raw.coverage.reason = '已授权后自动读取稳定完成的可见文字；未验证全部历史是否已加载。';
         if (skipped) raw.coverage.warnings.push(capture_note);
         let value = null;
@@ -95,7 +125,7 @@
         else if (message.capture && raw.metadata.weaker_conversation_identity) capture_note = '页面尚无稳定会话编号，等待网站建立会话后捕获';
         checkNavigation();
         if (token !== selectedToken || Date.now() - lastMutationAt < 1500) throw new Error('读取期间页面已变化，请等待稳定后重试');
-        return { status: 'stable', conversation: value, requests, draft_ids, capture_note };
+        return { status: 'stable', conversation: value, requests, draft_ids, capture_note, composer_fingerprint, relay_observation, completion_unknown: last?.role === 'assistant' && !complete };
       }
       if (message.kind === 'capture') {
         if (navigationIdentity) throw new Error('会话网址已切换，消息身份尚未更新；请等待网站完成加载');
@@ -122,6 +152,12 @@
       }
       if (message.kind === 'insert') {
         if (message.capsule?.nonce !== binding.nonce || message.capsule?.session_ref !== binding.session_ref) throw new Error('上下文来自其他会话');
+        if (message.automatic) {
+          if (locallyPaused || document.visibilityState === 'hidden') throw new Error('接力已暂停或页面不再活动');
+          if (!message.expected_composer_fingerprint || await composerFingerprint() !== message.expected_composer_fingerprint) throw new Error('输入框已被编辑；不会覆盖或追加，请复制完整资料');
+          checkNavigation();
+          if (!binding || message.nonce !== binding.nonce) throw new Error('输入框或会话在准备期间变化');
+        }
         return adapter.insert(message.capsule);
       }
       if (message.kind === 'remove') return adapter.remove(message.id);
@@ -131,6 +167,19 @@
     run().then((result) => respond({ ok: true, result }), (error) => respond({ ok: false, error: error.message }));
     return true;
   });
+  if (globalThis.RecallCardRelayOverlay && document.body) {
+    overlay = new globalThis.RecallCardRelayOverlay(document, async (command, extra = {}) => {
+      if (['pause', 'disable'].includes(command)) locallyPaused = true;
+      const state = await bind(true);
+      const result = await chrome.runtime.sendMessage({ kind: 'relay_control', route, nonce: state.nonce, session_ref: state.session_ref, command, ...extra });
+      checkNavigation();
+      if (!binding || binding.nonce !== state.nonce || binding.session_ref !== state.session_ref) throw new Error('操作期间会话已变化，旧结果已废弃');
+      if (!result?.ok) throw new Error(result?.error || '接力操作未完成');
+      if (['resume', 'enable'].includes(command)) locallyPaused = false;
+      if (result.result?.relay) overlay.update(result.result);
+      return result.result;
+    });
+  }
   // Observe identity/mutation only. Message text is read solely after capture,
   // and for revalidation of that same user-selected snapshot.
   if (typeof MutationObserver !== 'undefined') new MutationObserver(records => {
@@ -149,8 +198,11 @@
     automaticBusy = true;
     try {
       const state = await bind();
-      await chrome.runtime.sendMessage({ kind: 'automatic_tick', route, nonce: state.nonce, session_ref: state.session_ref });
-    } catch { /* Popup/native observations expose unavailable or revoked state. */ }
+      const response = await chrome.runtime.sendMessage({ kind: 'automatic_tick', route, nonce: state.nonce, session_ref: state.session_ref });
+      if (!response?.ok) throw new Error(response?.error || '自动接力暂不可用');
+      const current = await chrome.runtime.sendMessage({ kind: 'relay_control', command: 'inspect', route, nonce: state.nonce, session_ref: state.session_ref });
+      if (current?.ok) overlay?.update(current.result);
+    } catch (error) { overlay?.error(error.message); }
     finally { automaticBusy = false; }
   }, 3000);
   window.addEventListener('popstate', checkNavigation);

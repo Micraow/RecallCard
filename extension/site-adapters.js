@@ -15,7 +15,7 @@
     if (!site || parsed.username || parsed.password || !site.paths.test(parsed.pathname) || parsed.pathname.includes('//') || (site.id !== 'chatgpt' && (parsed.search || parsed.hash))) {
       throw new Error('此网站或路径尚未支持；请打开 ChatGPT、DeepSeek、Qwen 或 Z.ai 的对话页面');
     }
-    return Object.freeze({ id: site.id, name: site.name, origin: site.origin, selector: site.selector, richText: site.richText, route: parsed.origin + parsed.pathname.replace(/\/$/u, '') });
+    return Object.freeze({ id: site.id, name: site.name, origin: site.origin, selector: site.selector, richText: site.richText, route: parsed.origin + parsed.pathname.replace(/\/$/u, ''), capabilities: Object.freeze({ composer: 'synthetic_verified', conversation: ['chatgpt', 'deepseek'].includes(site.id) ? 'completed_visible_text' : 'manual_only', clipboard_read: 'explicit_paste_only', clipboard_write: 'explicit_button', account: 'unverified', live_site: 'not_verified', product_scope: site.id === 'qwen' ? 'chat.qwen.ai only; Qwen Studio unconfirmed' : site.origin }) });
   }
   globalThis.RecallCardSites = Object.freeze({ forUrl });
 })();

@@ -29,14 +29,17 @@ export function MemoriesPage({
   selected,
   refresh,
   changed,
+  initialFilter,
 }: {
   service: ScopedService;
   selected: string;
   refresh: number;
   changed: () => void;
+  initialFilter?: string;
 }) {
-  const [filter, setFilter] = useState<Filter>("current");
+  const [filter, setFilter] = useState<Filter>(initialFilter === "tentative" ? "tentative" : "current");
   const [offset, setOffset] = useState(0);
+  useEffect(() => { if (initialFilter === "tentative") { setFilter("tentative"); setOffset(0); } }, [initialFilter]);
   const records = useResource(
     () => service.memories(offset, filter),
     [service, offset, filter, refresh],

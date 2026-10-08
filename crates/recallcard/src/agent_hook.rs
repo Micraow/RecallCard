@@ -24,6 +24,7 @@ enum SessionSource {
     Resume,
     Compact,
     Clear,
+    Fork,
 }
 
 /// 固定 Vault、授权范围和预算必须来自可信启动配置，不能从 Hook JSON 取值。
@@ -59,7 +60,8 @@ pub fn session_start<R: Read>(
         SessionSource::Startup
         | SessionSource::Resume
         | SessionSource::Compact
-        | SessionSource::Clear => {}
+        | SessionSource::Clear
+        | SessionSource::Fork => {}
     }
     let bootstrap = Context::new(vault, access)
         .bootstrap(BootstrapArgs { budget_tokens })

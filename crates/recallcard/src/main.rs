@@ -80,9 +80,30 @@ enum Command {
     },
     /// 查看真实连接配置、授权和最近握手状态
     Connections,
+    /// 预览并确认项目内 Agent 入口；不执行外部 Agent、不修改全局配置
+    ConnectionSetup {
+        #[command(subcommand)]
+        action: ConnectionSetupCommand,
+    },
+    /// 自动刷新按连接过滤的文件背景；供 Agent 入口直接调用
+    ConnectionContext {
+        id: String,
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+        #[arg(long, default_value_t = 4096)]
+        budget_bytes: usize,
+    },
+    /// 检查配置及实际本机读取，不能代替宿主账号验证
+    ConnectionCheck {
+        id: String,
+        #[arg(long)]
+        scope: String,
+        #[arg(long)]
+        verify: bool,
+    },
     /// 明确配置一个客户端的读取和捕获范围，不自动授予网页发送权
     Connect {
-        #[arg(value_parser=["browser","claude-code","chatgpt-mcp"])]
+        #[arg(value_parser=["browser","claude-code","codex","chatgpt-mcp"])]
         client: String,
         #[arg(long)]
         host_identity: String,
@@ -286,6 +307,20 @@ enum ServiceCommand {
     Stop,
 }
 #[derive(Subcommand)]
+enum ConnectionSetupCommand {
+    /// 只预览将合并的项目文件与一次授权范围
+    Plan {
+        #[arg(value_parser = ["codex", "claude_code"])]
+        client: String,
+        #[arg(long)]
+        scope: String,
+        #[arg(long)]
+        project_dir: PathBuf,
+    },
+    /// 明确确认预览中的文件变更与读取授权；必须使用仍有效的计划编号
+    Apply { plan_id: String },
+}
+#[derive(Subcommand)]
 enum JobsCommand {
     List {
         #[arg(long, default_value = "personal")]
@@ -430,6 +465,9 @@ fn run(cli: Cli) -> Result<Value> {
         | Command::Jobs { .. }
         | Command::Background { .. }
         | Command::Connections
+        | Command::ConnectionSetup { .. }
+        | Command::ConnectionContext { .. }
+        | Command::ConnectionCheck { .. }
         | Command::Connect { .. }
         | Command::ConnectionRevoke { .. } => Err("请通过共同应用服务调用此命令".into()),
         Command::Capture { file } => value(vault.capture(input::<EventInput>(&file)?)?),
@@ -854,6 +892,9 @@ fn run_application(cli: &Cli) -> Option<recallcard::application::AppResult<Value
                 | Command::Jobs { .. }
                 | Command::Background { .. }
                 | Command::Connections
+                | Command::ConnectionSetup { .. }
+                | Command::ConnectionContext { .. }
+                | Command::ConnectionCheck { .. }
                 | Command::Connect { .. }
                 | Command::ConnectionRevoke { .. }
         )
@@ -901,6 +942,59 @@ fn run_application(cli: &Cli) -> Option<recallcard::application::AppResult<Value
                 )
             }
             Command::Connections => recallcard::application::connections::inventory(&vault),
+            Command::ConnectionContext {
+                id,
+                scope,
+                budget_bytes,
+            } => Ok(json!(recallcard::application::agent_entry::refresh(
+                &vault,
+                id,
+                scope.clone(),
+                *budget_bytes
+            )?)),
+            Command::ConnectionCheck { id, scope, verify } => {
+                let health = if *verify {
+                    let binary = std::env::current_exe().map_err(|_| {
+                        AppError::new(
+                            ErrorCode::Storage,
+                            "无法定位当前读取程序",
+                            "使用完整RecallCard安装包",
+                        )
+                    })?;
+                    recallcard::application::connection_setup::verify(&vault, id, scope, &binary)?
+                } else {
+                    recallcard::application::connection_setup::health(&vault, id, scope)?
+                };
+                Ok(json!(health))
+            }
+            Command::ConnectionSetup { action } => match action {
+                ConnectionSetupCommand::Plan {
+                    client,
+                    scope,
+                    project_dir,
+                } => {
+                    let binary_path = std::env::current_exe().map_err(|_| {
+                        AppError::new(
+                            ErrorCode::Storage,
+                            "无法定位当前读取程序",
+                            "使用完整RecallCard安装包",
+                        )
+                    })?;
+                    Ok(json!(recallcard::application::agent_install::plan(
+                        &vault,
+                        &recallcard::application::agent_install::InstallRequest {
+                            client: client.clone(),
+                            connection_id: String::new(),
+                            scope: scope.clone(),
+                            project_dir: project_dir.clone(),
+                            binary_path
+                        }
+                    )?))
+                }
+                ConnectionSetupCommand::Apply { plan_id } => {
+                    recallcard::application::connection_setup::apply(&vault, plan_id)
+                }
+            },
             Command::Connect {
                 client,
                 host_identity,

@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-const openDemo = async (page, state = "normal", route = "") => {
+const openDemo = async (page, state = "normal", route = "memories") => {
   await page.goto(`/demo.html?state=${state}${route ? "#" + route : ""}`);
   await expect(
     page.getByText(
@@ -36,7 +36,7 @@ test("记忆主界面可读、来源可展开且合成数据有标识", async ({
 
 test("导航、返回和搜索指向真实内容阅读路径", async ({ page }) => {
   await openDemo(page);
-  await page.getByRole("button", { name: "来源", exact: true }).click();
+  await page.getByRole("button", { name: "原始资料", exact: true }).click();
   await expect(page.locator(".source-row")).toHaveCount(8);
   await page.locator(".source-row").nth(1).click();
   await expect(page.locator(".conversation-article h1")).toHaveText(
@@ -129,7 +129,7 @@ test("导入错误靠近任务，保留文件、成员、原因和下一步", as
     "重新下载完整的官方导出包",
   );
   await expect(
-    page.getByRole("button", { name: "添加来源", exact: true }),
+    page.getByRole("button", { name: "添加记录", exact: true }),
   ).toHaveCount(1);
   await page.screenshot({
     path: info.outputPath("02-source-import-error.png"),
@@ -169,12 +169,12 @@ test("重复添加只产生一次请求，取消选择不增加任务", async ({
       ).length,
   );
   await page
-    .getByRole("button", { name: "添加来源" })
+    .getByRole("button", { name: "添加记录" })
     .evaluate((button: HTMLButtonElement) => {
       button.click();
       button.click();
     });
-  await expect(page.getByRole("button", { name: "添加来源" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "添加记录" })).toBeEnabled();
   const after = await page.evaluate(
     () =>
       (window as any).__DEMO_CALLS__.filter(
@@ -183,6 +183,7 @@ test("重复添加只产生一次请求，取消选择不增加任务", async ({
   );
   expect(after - before).toBe(1);
   await expect(page.locator(".job-row")).toHaveCount(0);
+  await expect(page.locator(".memory-article h1")).toHaveText("秋季研究报告已交付");
 });
 
 test("服务不可用显示错误，不显示零任务冒充成功", async ({ page }) => {
@@ -191,35 +192,21 @@ test("服务不可用显示错误，不显示零任务冒充成功", async ({ pa
   await expect(page.getByText("这里会留下处理记录")).toHaveCount(0);
 });
 
-test("连接配置和注册不冒充实际连接", async ({ page }, info) => {
+test("连接中心不把未安装或未授权当作实际连接", async ({ page }, info) => {
   await openDemo(page, "normal", "connections");
-  await expect(page.getByText("尚未验证", { exact: true })).toHaveCount(2);
-  await page.getByRole("button", { name: "设置连接" }).first().click();
-  await page.getByRole("button", { name: "生成本地配置" }).click();
-  await expect(page.getByRole("dialog")).toContainText("尚未收到宿主读取回执");
-  await page.getByRole("button", { name: "完成", exact: true }).click();
-  await expect(
-    page.getByText("配置已生成 · 未验证", { exact: true }),
-  ).toBeVisible();
-  await page.screenshot({
-    path: info.outputPath("04-connections-unverified.png"),
-    fullPage: true,
-  });
-  await page.getByRole("button", { name: "设置连接" }).nth(1).click();
-  await expect(page.getByRole("checkbox")).not.toBeChecked();
-  await expect(
-    page.getByRole("button", { name: "检查并注册连接" }),
-  ).toBeDisabled();
-  await page.getByLabel("RecallCard 扩展 ID").fill("a".repeat(32));
-  await page.getByRole("button", { name: "检查并注册连接" }).click();
-  await expect(page.getByRole("dialog")).toContainText(
-    "已注册，等待浏览器检查",
-  );
+  await expect(page.getByRole('heading', { name: '连接你常用的 AI' })).toBeVisible();
+  await expect(page.getByText('最近读取成功', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: '连接 Codex', exact: true }).click();
+  await expect(page.getByRole('button', { name: '选择项目文件夹' })).toBeVisible();
+  await page.screenshot({ path: info.outputPath("04-connections-unverified.png"), fullPage: true });
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
 test("项目范围切换不保留旧记忆或未提交编辑", async ({ page }) => {
   await openDemo(page);
   await page.getByLabel("资料范围").selectOption("project:atlas");
+  await page.getByRole("button", { name: "记忆", exact: true }).click();
   await expect(page.locator(".memory-row")).toHaveCount(1);
   await expect(page.locator(".memory-article h1")).toContainText("Atlas v0.8");
   await expect(page.locator(".breadcrumb")).toContainText("atlas");

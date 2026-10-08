@@ -19,6 +19,17 @@
       if (node.nodeType === 3) { text += node.nodeValue || ''; return; }
       if (node.nodeType !== 1 || node.matches(SKIP) || !visible(node, doc)) return;
       if (node.tagName === 'BR') { text += '\n'; return; }
+      if (node.tagName === 'PRE') {
+        const code = node.querySelector('code');
+        if (code && visible(code, doc)) {
+          const raw = code.textContent.trim();
+          try {
+            const protocol = JSON.parse(raw)?.protocol;
+            const label = protocol === 'recallcard.action/1' ? 'recallcard-action' : protocol === 'recallcard.final/1' ? 'recallcard-final' : null;
+            if (label) { text += `\n\`\`\`${label}\n${raw}\n\`\`\`\n`; return; }
+          } catch { /* Incomplete rendered JSON is not a complete request. */ }
+        }
+      }
       const block = BLOCK.has(node.tagName);
       if (block && text && !text.endsWith('\n')) text += '\n';
       for (const child of node.childNodes) walk(child);
@@ -39,6 +50,16 @@
     }
     streaming() {
       return [...this.doc.querySelectorAll('[data-is-streaming="true"], [aria-busy="true"], button[aria-label="Stop generating"], button[aria-label="停止生成"], button[aria-label="停止回答"], .ds-markdown + .cursor, .cursor.streaming')].some(node => visible(node, this.doc));
+    }
+    completed(node) {
+      if (!node || this.streaming() || node.getAttribute('data-is-streaming') === 'true' || node.getAttribute('aria-busy') === 'true') return false;
+      // Silence is not completion. Only narrowly recognized per-turn receipts
+      // are accepted; changed layouts use explicit pasted replies instead.
+      if (node.getAttribute('data-is-streaming') === 'false') return true;
+      const site = this.site();
+      const scope = site.id === 'chatgpt' ? node.closest('[data-testid^="conversation-turn-"]') || node : node;
+      const selector = site.id === 'chatgpt' ? 'button[data-testid="copy-turn-action-button"]' : '.ds-icon-button[aria-label="复制"], button[data-testid="copy-message"]';
+      return [...scope.querySelectorAll(selector)].some(button => visible(button, this.doc));
     }
     read(captureId, capturedAt) {
       const site = this.site();

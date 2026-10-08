@@ -9,6 +9,11 @@ import type {
   ConnectionEntry,
   ConnectionInventory,
   AgentConnectionConfigs,
+  AgentClient,
+  ConnectionSetupPlan,
+  ConnectionSetupResult,
+  ConnectionHealth,
+  BrowserSetupInfo,
 } from "./connections";
 import { validateJobs, type JobStatus, type ImportResult } from "./contracts";
 import type { RuntimeStatus, MemoryJob, MemoryConfig } from "./runtime";
@@ -40,10 +45,17 @@ declare global {
 export function nativeTransport(): Transport | null {
   return window.__TAURI__?.core || null;
 }
+export interface ConnectionSetupOperation {
+  plan: ConnectionSetupPlan;
+  result: ConnectionSetupResult | null;
+  error: unknown;
+}
 interface ModelOperationState {
   pending: Promise<ModelSetupSnapshot> | null;
   lastError: unknown;
   draft: MemoryConfig | null;
+  connectionPending: Promise<ConnectionSetupResult> | null;
+  connectionSetup: ConnectionSetupOperation | null;
 }
 export class RecallService {
   private modelOperations = new Map<string, ModelOperationState>();
@@ -68,7 +80,7 @@ export class RecallService {
   scoped(workspace: Workspace, scope: string) {
     let operation = this.modelOperations.get(workspace.session_id);
     if (!operation) {
-      operation = { pending: null, lastError: null, draft: null };
+      operation = { pending: null, lastError: null, draft: null, connectionPending: null, connectionSetup: null };
       this.modelOperations.set(workspace.session_id, operation);
     }
     return new ScopedService(this.transport, workspace, scope, operation);
@@ -95,6 +107,8 @@ export class ScopedService {
       pending: null,
       lastError: null,
       draft: null,
+      connectionPending: null,
+      connectionSetup: null,
     },
   ) {}
   private call<T>(command: string, args: Record<string, unknown> = {}) {
@@ -275,6 +289,50 @@ export class ScopedService {
       last_local_read_at: string | null;
       last_local_bootstrap_at: string | null;
     }>("chatgpt_connection_plan");
+  }
+  browserSetupInfo() {
+    return this.call<BrowserSetupInfo>("browser_setup_info");
+  }
+  openBrowserExtensionDirectory() {
+    return this.call<void>("open_browser_extension_directory");
+  }
+  chooseConnectionProject() {
+    return this.call<string | null>("choose_connection_project");
+  }
+  connectionSetupPlan(client: AgentClient, projectDir: string) {
+    return this.call<ConnectionSetupPlan>("connection_setup_plan", { client, projectDir });
+  }
+  get connectionSetupPending() {
+    return this.modelOperation.connectionPending;
+  }
+  connectionSetupState(client: AgentClient): ConnectionSetupOperation | null {
+    const state = this.modelOperation.connectionSetup;
+    return state?.plan.client === client && state.plan.scope === this.scope ? state : null;
+  }
+  dismissConnectionSetup(client: AgentClient) {
+    if (!this.modelOperation.connectionPending && this.connectionSetupState(client)) this.modelOperation.connectionSetup = null;
+  }
+  recordConnectionHealth(client: AgentClient, health: ConnectionHealth) {
+    const state = this.connectionSetupState(client);
+    if (state?.result && state.plan.connection_id === health.connection_id) {
+      state.result = { ...state.result, health, verification_error: health.readiness === 'read_verified' ? null : state.result.verification_error };
+      if (health.readiness === 'read_verified') state.error = null;
+    }
+  }
+  applyConnectionSetup(plan: ConnectionSetupPlan) {
+    if (this.modelOperation.connectionPending) return Promise.reject(new Error("已有项目连接正在安装，请等待结果后检查状态，不要重复提交。"));
+    const state: ConnectionSetupOperation = { plan, result: null, error: null };
+    this.modelOperation.connectionSetup = state;
+    const pending = this.call<ConnectionSetupResult>("apply_connection_setup", { planId: plan.plan_id });
+    this.modelOperation.connectionPending = pending;
+    pending.then(result => { state.result = result; state.error = result.verification_error || null; this.modelOperation.connectionPending = null; }, reason => { state.error = reason; this.modelOperation.connectionPending = null; });
+    return pending;
+  }
+  connectionHealth(connectionId: string) {
+    return this.call<ConnectionHealth>("connection_health", { connectionId });
+  }
+  verifyConnection(connectionId: string) {
+    return this.call<ConnectionHealth>("verify_connection", { connectionId });
   }
   agentConfigs(id: string) {
     return this.call<AgentConnectionConfigs>("connection_agent_configs", {

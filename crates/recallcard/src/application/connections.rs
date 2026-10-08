@@ -164,7 +164,17 @@ fn validate(grant: &ConnectionGrant) -> AppResult<()> {
             })?;
         }
         ("claude_code", "claude_code")
-            if grant.host_identity == "claude-code" && grant.installation_id.is_none() => {}
+            if grant.host_identity == "claude-code"
+                && grant
+                    .installation_id
+                    .as_deref()
+                    .is_none_or(valid_installation_id) => {}
+        ("codex", "codex")
+            if grant.host_identity == "codex"
+                && grant
+                    .installation_id
+                    .as_deref()
+                    .is_none_or(valid_installation_id) => {}
         ("chatgpt_mcp", "chatgpt")
             if grant.host_identity == "openai-chatgpt" && grant.installation_id.is_none() => {}
         _ => {
@@ -201,8 +211,10 @@ fn validate(grant: &ConnectionGrant) -> AppResult<()> {
             "自动准备资料需要读取范围及向所选网站或宿主模型提供资料的授权",
         ));
     }
-    if matches!(grant.client_kind.as_str(), "claude_code" | "chatgpt_mcp")
-        && !grant.capture_scopes.is_empty()
+    if matches!(
+        grant.client_kind.as_str(),
+        "claude_code" | "codex" | "chatgpt_mcp"
+    ) && !grant.capture_scopes.is_empty()
     {
         return Err(error(
             ErrorCode::InvalidRequest,
@@ -256,6 +268,9 @@ pub fn configure(
     let (path, _lock) = paths(vault)?;
     let mut store = load(vault, &path)?;
     let entry = configure_store(&mut store, grant, expected_revision)?;
+    if Some(entry.permission_revision) != expected_revision {
+        super::agent_entry::invalidate(vault, &entry.id).map_err(storage)?;
+    }
     save_store(vault, &path, &store)?;
     Ok(entry)
 }
@@ -273,6 +288,11 @@ fn configure_store(
     let previous = store.entries.iter().position(|e| e.id == id);
     if previous.map(|i| store.entries[i].permission_revision) != expected_revision {
         return Err(error(ErrorCode::Conflict, "连接授权已变化，请刷新后再确认"));
+    }
+    if let Some(i) = previous {
+        if !store.entries[i].revoked && store.entries[i].grant == grant {
+            return Ok(store.entries[i].clone());
+        }
     }
     if previous.is_none() && store.entries.len() >= 128 {
         return Err(error(ErrorCode::ResourceLimit, "本机连接数量已达 128 个"));
@@ -312,6 +332,7 @@ pub fn revoke(vault: &Vault, id: &str, expected_revision: u64) -> AppResult<Conn
     entry.revoked = true;
     entry.state = "revoked".into();
     let result = entry.clone();
+    super::agent_entry::invalidate(vault, id).map_err(storage)?;
     save_store(vault, &path, &store)?;
     Ok(result)
 }
@@ -396,8 +417,10 @@ pub fn invoke_agent(
     let authorization =
         authorize(vault, id, entry.permission_revision).map_err(|e| e.to_string())?;
     let grant = &authorization.entry.grant;
-    if !matches!(grant.client_kind.as_str(), "claude_code" | "chatgpt_mcp")
-        || !grant.auto_recall
+    if !matches!(
+        grant.client_kind.as_str(),
+        "claude_code" | "codex" | "chatgpt_mcp"
+    ) || !grant.auto_recall
         || !grant.provider_disclosure
     {
         return Err("此客户端的读取或接收方授权已暂停".into());
@@ -539,6 +562,9 @@ pub fn approve_pairing(
     store
         .pending_pairings
         .retain(|request| request.request_id != request_id);
+    if Some(entry.permission_revision) != expected_revision {
+        super::agent_entry::invalidate(vault, &entry.id).map_err(storage)?;
+    }
     save_store(vault, &path, &store)?;
     Ok(entry)
 }

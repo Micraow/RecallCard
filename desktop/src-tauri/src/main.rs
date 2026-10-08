@@ -985,6 +985,72 @@ fn prepare_client_binary(app: &AppHandle) -> Result<std::path::PathBuf, String> 
     Ok(binary)
 }
 
+fn packaged_extension(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let mut candidates = vec![executable.parent()?.join("extension")];
+    if let Ok(resources) = app.path().resource_dir() {
+        candidates.push(resources.join("说明与许可证/extension"));
+    }
+    candidates.into_iter().find(|root| {
+        if root
+            .ancestors()
+            .any(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_symlink()))
+        {
+            return false;
+        }
+        let manifest = root.join("manifest.json");
+        if std::fs::symlink_metadata(&manifest).is_ok_and(|m| m.is_symlink()) {
+            return false;
+        }
+        let Ok(bytes) = std::fs::read(manifest) else {
+            return false;
+        };
+        if bytes.len() > 64 * 1024 {
+            return false;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            return false;
+        };
+        value["manifest_version"] == 3
+            && value["name"] == "RecallCard 会话与上下文"
+            && value["version_name"] == recallcard::build_info().version
+            && ["background.js", "content.js", "popup.html", "protocol.js"]
+                .iter()
+                .all(|name| {
+                    let p = root.join(name);
+                    p.is_file() && !std::fs::symlink_metadata(p).is_ok_and(|m| m.is_symlink())
+                })
+    })
+}
+#[tauri::command]
+async fn browser_setup_info(app: AppHandle) -> Value {
+    let directory = packaged_extension(&app);
+    serde_json::json!({"distribution":"unpublished_test_package","available":directory.is_some(),"open_directory_available":directory.is_some(),"extension_dir":directory,"store_url":null,"fixed_extension_id":null,"instructions":["这是尚未上架商店的测试扩展。","在浏览器扩展管理页启用开发者模式，选择加载已解压扩展并选择本包extension目录。","本机桥首次注册仍需核对扩展ID；注册后从扩展发起连接申请，再在这里确认范围。","配置文件写入不代表浏览器已连接；必须收到实际握手与读取回执。"]})
+}
+#[tauri::command]
+async fn open_browser_extension_directory(app: AppHandle) -> Result<(), String> {
+    let path = packaged_extension(&app).ok_or("当前安装包没有可核验的测试扩展目录")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let program = if cfg!(target_os = "windows") {
+            "explorer"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        std::process::Command::new(program)
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "系统文件管理器未能启动，请复制显示的目录路径".to_string())
+    })
+    .await
+    .map_err(|_| "目录打开操作未完成".to_string())?
+}
+
 #[tauri::command]
 async fn prepare_client_config(
     app: AppHandle,
@@ -1040,6 +1106,125 @@ async fn connection_agent_configs(
         service.connection_agent_configs(&session_id, &scope, &id, &binary)
     })
     .await
+}
+
+#[tauri::command]
+async fn choose_connection_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<Option<String>> {
+    use recallcard::application::{AppError, ErrorCode};
+    execute_application(state.service.clone(), move |s| {
+        s.connection_operation(&session_id, &scope)
+    })
+    .await?;
+    let guard = dialog_guard(&state)
+        .map_err(|message| AppError::new(ErrorCode::Conflict, message, "关闭已有选择窗口后重试"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        app.dialog()
+            .file()
+            .set_title("选择此 Agent 工作的项目目录")
+            .blocking_pick_folder()
+            .map(|p| {
+                p.into_path()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .map_err(|_| {
+                        AppError::new(ErrorCode::InvalidRequest, "请选择本机项目目录", "重新选择")
+                    })
+            })
+            .transpose()
+    })
+    .await
+    .map_err(|_| AppError::new(ErrorCode::Internal, "目录选择未完成", "重试选择项目目录"))?
+}
+#[tauri::command]
+async fn connection_setup_plan(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    client: String,
+    project_dir: String,
+) -> recallcard::application::AppResult<recallcard::application::agent_install::InstallPlan> {
+    use recallcard::application::{AppError, ErrorCode};
+    let binary = prepare_client_binary(&app).map_err(|message| {
+        AppError::new(
+            ErrorCode::Storage,
+            message,
+            "使用含本机读取组件的完整安装包",
+        )
+    })?;
+    let operation = execute_application(state.service.clone(), move |s| {
+        s.connection_operation(&session_id, &scope)
+    })
+    .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        operation.plan(&client, std::path::Path::new(&project_dir), &binary)
+    })
+    .await
+    .map_err(|_| AppError::new(ErrorCode::Internal, "连接预览未完成", "重新预览后确认"))?
+}
+#[tauri::command]
+async fn apply_connection_setup(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    plan_id: String,
+) -> recallcard::application::AppResult<Value> {
+    use recallcard::application::{AppError, ErrorCode};
+    let operation = execute_application(state.service.clone(), move |s| {
+        s.connection_operation(&session_id, &scope)
+    })
+    .await?;
+    tauri::async_runtime::spawn_blocking(move || operation.apply(&plan_id))
+        .await
+        .map_err(|_| {
+            AppError::new(
+                ErrorCode::Internal,
+                "连接配置结果尚未确认",
+                "先检查连接状态，不要重复提交",
+            )
+        })?
+}
+#[tauri::command]
+async fn connection_health(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    connection_id: String,
+) -> recallcard::application::AppResult<recallcard::application::connection_setup::ConnectionHealth>
+{
+    use recallcard::application::{AppError, ErrorCode};
+    let operation = execute_application(state.service.clone(), move |s| {
+        s.connection_operation(&session_id, &scope)
+    })
+    .await?;
+    tauri::async_runtime::spawn_blocking(move || operation.health(&connection_id))
+        .await
+        .map_err(|_| AppError::new(ErrorCode::Internal, "连接状态暂不可读取", "稍后刷新"))?
+}
+#[tauri::command]
+async fn verify_connection(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    connection_id: String,
+) -> recallcard::application::AppResult<recallcard::application::connection_setup::ConnectionHealth>
+{
+    use recallcard::application::{AppError, ErrorCode};
+    let binary = prepare_client_binary(&app)
+        .map_err(|message| AppError::new(ErrorCode::Storage, message, "使用完整安装包"))?;
+    let operation = execute_application(state.service.clone(), move |s| {
+        s.connection_operation(&session_id, &scope)
+    })
+    .await?;
+    tauri::async_runtime::spawn_blocking(move || operation.verify(&connection_id, &binary))
+        .await
+        .map_err(|_| AppError::new(ErrorCode::Internal, "本机试读暂未完成", "检查状态后重试"))?
 }
 
 #[tauri::command]
@@ -1353,6 +1538,13 @@ fn main() {
             connection_inventory,
             connection_configure,
             connection_agent_configs,
+            choose_connection_project,
+            connection_setup_plan,
+            apply_connection_setup,
+            connection_health,
+            verify_connection,
+            browser_setup_info,
+            open_browser_extension_directory,
             chatgpt_connection_plan,
             connection_approve_pairing,
             connection_revoke,

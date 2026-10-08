@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 export type IconName =
+  | "home"
   | "memory"
   | "sources"
   | "link"
@@ -28,6 +29,7 @@ export type IconName =
   | "book"
   | "globe";
 const paths: Record<IconName, string> = {
+  home: "M3 10 12 3l9 7 M5 9v12h5v-7h4v7h5V9",
   memory: "M6 3h9l3 3v15H6z M14 3v5h4 M9 12h6 M9 16h6",
   sources: "M3 6h6l2 2h10v12H3z M3 6V4h6l2 2h8v2",
   link: "M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2 M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2",

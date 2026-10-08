@@ -12,7 +12,7 @@ async function harness(grant = { capture:true, recall:true, provider_disclosure:
   const tab={id:1,active:true,url:state.route};
   const sender={id:extensionId,origin:'https://chatgpt.com',url:tab.url,tab,frameId:0,documentId:'doc-1'};
   const conversation=await format.seal({ schema:format.SCHEMA,capture_id:'synthetic',captured_at:'2026-01-01T00:00:00Z',title:'合成会话',source:{platform:'chatgpt',conversation_id:'synthetic',url:tab.url},coverage:{extent:'visible_only',complete:false,reason:'合成稳定DOM',warnings:[]},messages:[{id:'u1',role:'user',text:'合成决定',occurred_at:null},{id:'a1',role:'assistant',text:'合成回答',occurred_at:null}],metadata:{} });
-  const snapshot={status:'stable',conversation,requests:[],draft_ids:[]};
+  const snapshot={status:'stable',conversation,requests:[],draft_ids:[],composer_fingerprint:'synthetic-fingerprint'};
   const api={id:extensionId,popupUrl:`chrome-extension://${extensionId}/popup.html`,getTab:async()=>tab,load:async()=>structuredClone(state),save:async(_,next)=>{state=structuredClone(next);},now:()=>time+=2000,
     content:async(_,message)=>{content.push(message);if(message.kind==='automatic_snapshot')return{ok:true,result:structuredClone(snapshot)};if(message.kind==='insert')snapshot.draft_ids=[message.capsule.id];return{ok:true,result:{status:'current'}};},
     native:async(_,request)=>{calls.push(request);if(request.action==='connection')return{ok:true,result:{connection_id:'c'.repeat(64),capture_enabled:!!grant?.capture,automation:grant,state:grant?'reachable':'revoked'}};if(request.action==='automatic_capture')return{ok:true,result:{events_added:2,events_seen:2}};if(request.action==='authorized_read')return{ok:true,result:{bootstrap_version:'v1',stable_text:'合成偏好',refs:[]}};throw new Error('不支持的测试请求');}};
@@ -60,4 +60,42 @@ test('保存失败不标记成功，下一次相同快照可幂等重试',async(
   h.api.native=async(host,request)=>{if(failed&&request.action==='automatic_capture')throw new Error('合成失败');return native(host,request);};
   await assert.rejects(h.tick(),/合成失败/);assert.equal(h.state().auto_capture_hash,undefined);assert.equal(h.state().automatic_status,'failed');
   failed=false;await h.tick();assert.ok(h.state().auto_capture_hash);assert.equal(h.state().automatic_error,null);
+});
+test('DOM写入失败保留完整结果且重复tick不重新读取或重放插入',async()=>{
+  const h=await harness();const content=h.api.content;
+  h.api.content=async(tab,message)=>message.kind==='insert'?{ok:false,error:'输入框已被编辑'}:content(tab,message);
+  assert.equal((await h.tick()).status,'manual_fallback');assert.equal(h.state().preview.delivery,'prepared');assert.match(h.state().preview.text,/合成偏好/);
+  assert.equal(h.state().relay.phase,'awaiting_user_send');assert.equal(h.state().relay.manual_fallback,true);
+  const reads=h.calls.filter(r=>r.action==='authorized_read').length;await h.tick();assert.equal(h.calls.filter(r=>r.action==='authorized_read').length,reads);
+});
+test('悬浮暂停不再读取、保存或写入；恢复沿用request_id与轮数',async()=>{
+  const h=await harness();await h.tick();const prior=h.state();
+  const command=command=>h.broker.handle({...h.message(),kind:'relay_control',command},h.sender);
+  await command('pause');const count=h.calls.length;assert.equal((await h.tick()).status,'paused');assert.equal(h.calls.length,count);
+  assert.equal(h.state().relay.phase,'paused');await command('resume');await h.tick();assert.equal(h.state().preview.id,prior.preview.id);assert.equal(h.state().relay.round,1);assert.equal(h.content.filter(m=>m.kind==='insert').length,1);
+});
+test('悬浮命令严格核验文档、tab、nonce；复制仍复查当前授权与完整资料',async()=>{
+  const h=await harness();await h.tick();
+  const message={...h.message(),kind:'relay_control',command:'copy'};
+  await assert.rejects(h.broker.handle(message,{...h.sender,documentId:'old-doc'}));
+  await assert.rejects(h.broker.handle({...message,nonce:'other'},h.sender));
+  await assert.rejects(h.broker.handle(message,{...h.sender,origin:'https://chat.deepseek.com'}));
+  const copy=await h.broker.handle(message,h.sender);assert.match(copy.text,/^\[RecallCard /);assert.match(copy.text,/合成偏好/);assert.equal(h.state().preview.delivery,'draft');
+  h.setGrant(null);await assert.rejects(h.broker.handle(message,h.sender),/权限/);
+});
+test('手动粘贴只允许授权只读请求，新结果保留全文且不猜测编辑器',async()=>{
+  const h=await harness();await h.tick();h.snapshot.draft_ids=[];await h.tick();
+  const request={protocol:'recallcard.action/1',nonce:h.state().nonce,session_ref:h.state().session_ref,request_id:'r_manual_read',action:'read',arguments:{refs:['event:evt_synthetic'],cursor:'next-page',budget_bytes:4000}};
+  const message={...h.message(),kind:'relay_control',command:'execute',text:'```recallcard-action\n'+JSON.stringify(request)+'\n```'};
+  const result=await h.broker.handle(message,h.sender);assert.equal(result.relay.phase,'awaiting_user_send');assert.equal(result.preview.id,'r_manual_read');assert.equal(result.preview.delivery,'prepared');
+  assert.equal(h.content.filter(m=>m.kind==='insert').length,1);await assert.rejects(h.broker.handle(message,h.sender),/已处理/);
+  const write={...request,request_id:'r_write',action:'automatic_capture'};await assert.rejects(h.broker.handle({...message,text:'```recallcard-action\n'+JSON.stringify(write)+'\n```'},h.sender),/只支持/);
+});
+test('权限修订或结果改变后，已准备复制内容不能继续发送到网页',async()=>{
+  for(const change of ['grant','data']){
+    const h=await harness();await h.tick();
+    if(change==='grant')h.setGrant({capture:true,recall:true,provider_disclosure:true,permission_revision:2,platform:'chatgpt'});
+    else{const native=h.api.native;h.api.native=async(host,request)=>request.action==='authorized_read'?{ok:true,result:{bootstrap_version:'v2',stable_text:'新资料',refs:[]}}:native(host,request);}
+    await assert.rejects(h.broker.handle({...h.message(),kind:'relay_control',command:'copy'},h.sender),/变化/);
+  }
 });

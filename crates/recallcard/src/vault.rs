@@ -538,7 +538,9 @@ impl Vault {
             .map_err(err)?;
         file.try_lock()
             .map_err(|e| format!("Vault 正在被另一个写入操作使用：{e}"))?;
-        Ok(WriteGuard(file))
+        let guard = WriteGuard(file);
+        crate::application::agent_entry::invalidate_all(self)?;
+        Ok(guard)
     }
     pub(crate) fn memory_path(&self, id: &str) -> PathBuf {
         self.root.join("memories").join(format!("{id}.md"))

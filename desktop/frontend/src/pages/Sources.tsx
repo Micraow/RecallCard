@@ -105,7 +105,7 @@ export function SourcesPage({
       <div className="split-view">
         <section className="collection-panel" aria-label="来源列表">
           <div className="collection-heading">
-            <h1>来源</h1>
+            <h1>原始资料</h1>
             <span className="muted count-label">
               {sources.data ? `${sources.data.total} 段会话` : ""}
             </span>

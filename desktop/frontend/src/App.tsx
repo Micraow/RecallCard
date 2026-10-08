@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RecallService, type ScopedService } from "./service/client";
-import { appError, isRunning, type AppError } from "./service/contracts";
+import { appError, type AppError } from "./service/contracts";
 import { useJobs } from "./service/hooks";
 import {
   scopeLabel,
@@ -9,7 +9,7 @@ import {
   type Workspace,
 } from "./service/types";
 import { Icon, type IconName } from "./components/Icon";
-import { Badge, ErrorNotice, Loading } from "./components/common";
+import { ErrorNotice, Loading } from "./components/common";
 import { MemoriesPage } from "./pages/Memories";
 import { SourcesPage } from "./pages/Sources";
 import { ConnectionsPage } from "./pages/Connections";
@@ -18,16 +18,14 @@ import { SearchPage } from "./pages/Search";
 import { BackgroundPage } from "./pages/Background";
 
 const destinations: { id: Destination; label: string; icon: IconName }[] = [
-  { id: "background", label: "背景", icon: "memory" },
-  { id: "sources", label: "来源", icon: "sources" },
+  { id: "background", label: "首页", icon: "home" },
+  { id: "memories", label: "记忆", icon: "book" },
+  { id: "sources", label: "原始资料", icon: "sources" },
 ];
-const extraDestinations: { id: Destination; label: string; icon: IconName }[] =
-  [
-    { id: "memories", label: "记忆管理", icon: "book" },
-    { id: "activity", label: "处理记录", icon: "activity" },
-    { id: "connections", label: "其他连接", icon: "link" },
-    { id: "settings", label: "设置", icon: "settings" },
-  ];
+const extraDestinations: { id: Destination; label: string; icon: IconName }[] = [
+  { id: "connections", label: "连接", icon: "link" },
+  { id: "settings", label: "设置", icon: "settings" },
+];
 export interface Route {
   page: Destination;
   item: string;
@@ -256,10 +254,10 @@ function WorkspaceApp({
     importLock.current = true;
     setImporting(true);
     setImportError(null);
-    navigate("background");
     try {
       const job = await service.importSources(crypto.randomUUID());
       if (job) {
+        navigate("background");
         jobs.refresh();
         changed();
       }
@@ -278,15 +276,12 @@ function WorkspaceApp({
       void importSources();
     }
   }, [importOnOpen]);
-  const runningCount = jobs.jobs.filter(isRunning).length;
-  const attentionCount = jobs.jobs.filter(
-    (job) => job.state === "failed" || job.state === "needs_input",
-  ).length;
   const pageLabel =
     route.page === "settings"
       ? "设置"
       : route.page === "search"
         ? "搜索"
+        : route.page === "activity" ? "处理记录"
         : [...destinations, ...extraDestinations].find(
             (item) => item.id === route.page,
           )!.label;
@@ -301,7 +296,7 @@ function WorkspaceApp({
         <button
           className="brand"
           onClick={() => navigate("background")}
-          aria-label="RecallCard 背景"
+          aria-label="RecallCard 首页"
         >
           <span className="brand-mark">
             <Icon name="memory" size={21} />
@@ -313,38 +308,35 @@ function WorkspaceApp({
             <button
               key={item.id}
               aria-label={item.label}
+              title={item.label}
               className={`nav-item ${route.page === item.id ? "active" : ""}`}
               aria-current={route.page === item.id ? "page" : undefined}
               onClick={() => navigate(item.id)}
             >
               <Icon name={item.icon} />
               <span>{item.label}</span>
-              {item.id === "activity" &&
-                (attentionCount > 0 ? (
-                  <span className="nav-count warning">{attentionCount}</span>
-                ) : runningCount > 0 ? (
-                  <span className="nav-count">{runningCount}</span>
-                ) : null)}
+
             </button>
           ))}
         </nav>
-        <details className="sidebar-tools">
-          <summary>更多</summary>
-          {extraDestinations.map((item) => (
-            <button
-              className={`nav-item ${route.page === item.id ? "active" : ""}`}
-              key={item.id}
-              aria-label={item.label}
-              onClick={() => navigate(item.id)}
-            >
-              <Icon name={item.icon} />
-              <span>{item.label}</span>
-            </button>
-          ))}
+        <div className="sidebar-bottom">
+          <nav aria-label="连接与设置">
+            {extraDestinations.map((item) => (
+              <button
+                className={`nav-item ${route.page === item.id ? "active" : ""}`}
+                key={item.id}
+                aria-label={item.label}
+                aria-current={route.page === item.id ? "page" : undefined}
+                title={item.label}
+                onClick={() => navigate(item.id)}
+              >
+                <Icon name={item.icon} />
+                <span>{item.label}</span>
+              </button>
+            ))}
+          </nav>
           <div className="workspace-switch">
-            <span className="workspace-avatar">
-              <Icon name="folder" size={17} />
-            </span>
+            <span className="workspace-avatar"><Icon name="folder" size={17} /></span>
             <select
               aria-label="资料范围"
               value={service.scope}
@@ -353,17 +345,11 @@ function WorkspaceApp({
                 setScope(event.target.value);
               }}
             >
-              {[...new Set([service.scope, ...service.workspace.scopes])].map(
-                (scope) => (
-                  <option key={scope} value={scope}>
-                    {scopeLabel(scope)}
-                  </option>
-                ),
-              )}
+              {[...new Set([service.scope, ...service.workspace.scopes])].map((scope) => (
+                <option key={scope} value={scope}>{scopeLabel(scope)}</option>
+              ))}
             </select>
           </div>
-        </details>
-        <div className="sidebar-bottom">
           <div className="local-status">
             <span className="status-dot" />
             <span>资料保存在本机</span>
@@ -436,6 +422,7 @@ function WorkspaceApp({
             <MemoriesPage
               service={service}
               selected={route.item}
+              initialFilter={route.focus}
               refresh={refresh}
               changed={changed}
             />

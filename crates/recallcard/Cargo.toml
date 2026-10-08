@@ -17,6 +17,7 @@ zip = { version = "8.6", default-features = false, features = ["deflate-flate2-z
 
 clap = { version = "4", features = ["derive"] }
 serde_yaml = "0.9"
+toml_edit = "=0.25.15"
 regex = "1"
 dirs = "6"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }

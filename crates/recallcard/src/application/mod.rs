@@ -13,4 +13,7 @@ pub mod runtime;
 
 pub mod connections;
 
+pub mod agent_entry;
+pub mod agent_install;
+pub mod connection_setup;
 pub mod credentials;

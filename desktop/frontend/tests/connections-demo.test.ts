@@ -1,0 +1,41 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { createConnectionDemo } from '../src/demo/connections.ts';
+import type { ConnectionEntry, ConnectionHealth, ConnectionInventory, ConnectionSetupPlan } from '../src/service/connections.ts';
+Object.assign(globalThis, { window: {} });
+const inventory = async (invoke: ReturnType<typeof createConnectionDemo>) => (await invoke('connection_inventory', { scope: 'personal' })).value as ConnectionInventory;
+test('合成连接也拒绝过期授权版本，不能把并发覆盖伪装成成功', async () => {
+  const invoke = createConnectionDemo('connected');
+  const entry = (await inventory(invoke)).entries[0];
+  await assert.rejects(invoke('connection_configure', { grant: { ...entry.grant, auto_recall: false }, expectedRevision: 0 }), /授权已变化/);
+  assert.equal((await inventory(invoke)).entries[0].permission_revision, 1);
+  await assert.rejects(invoke('connection_revoke', { id: entry.id, expectedRevision: 0 }), /授权已变化/);
+});
+test('无变化授权保持版本与回执，真实变化使旧回执失效', async () => {
+  const invoke = createConnectionDemo('connected');
+  const entry = (await inventory(invoke)).entries[0];
+  const unchanged = (await invoke('connection_configure', { grant: { ...entry.grant }, expectedRevision: 1 })).value as ConnectionEntry;
+  assert.equal(unchanged.permission_revision, 1);
+  assert.ok(unchanged.last_read_at);
+  const paused = (await invoke('connection_configure', { grant: { ...entry.grant, auto_recall: false }, expectedRevision: 1 })).value as ConnectionEntry;
+  assert.equal(paused.permission_revision, 2);
+  assert.equal(paused.last_read_at, null);
+});
+test('Agent暂停恢复按当前授权版本读取健康，本机试读不制造客户端回执', async () => {
+  const invoke = createConnectionDemo('normal');
+  const plan = (await invoke('connection_setup_plan', { client: 'codex', scope: 'personal', projectDir: '/合成示例/projects/atlas' })).value as ConnectionSetupPlan;
+  await invoke('apply_connection_setup', { planId: plan.plan_id });
+  let entry = (await inventory(invoke)).entries[0];
+  entry = (await invoke('connection_configure', { grant: { ...entry.grant, auto_recall: false }, expectedRevision: entry.permission_revision })).value as ConnectionEntry;
+  let health = (await invoke('connection_health', { connectionId: entry.id })).value as ConnectionHealth;
+  assert.equal(health.permission_revision, entry.permission_revision);
+  assert.equal(health.readiness, 'paused');
+  await assert.rejects(invoke('verify_connection', { connectionId: entry.id }), /尚未允许/);
+  entry = (await invoke('connection_configure', { grant: { ...entry.grant, auto_recall: true }, expectedRevision: entry.permission_revision })).value as ConnectionEntry;
+  health = (await invoke('connection_health', { connectionId: entry.id })).value as ConnectionHealth;
+  assert.equal(health.permission_revision, entry.permission_revision);
+  assert.equal(health.readiness, 'awaiting_host');
+  health = (await invoke('verify_connection', { connectionId: entry.id })).value as ConnectionHealth;
+  assert.equal(health.verification_scope, 'local_cli');
+  assert.equal((await inventory(invoke)).entries[0].last_read_at, null);
+});
