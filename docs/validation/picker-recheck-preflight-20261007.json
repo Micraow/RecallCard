@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at_utc": "2026-10-08T00:03:55.011671+00:00",
+  "checked_at_utc": "2026-10-08T00:23:41.440511+00:00",
   "application_commit": "12f4672fe0f3fe3fac0702c33998501950b01538",
   "application_source_changed": false,
   "local_gate_passed": true,
@@ -9,17 +9,17 @@
     "preflight": 11,
     "dom": 225,
     "javascript_contracts": 111,
-    "native_driver_contracts": 56,
+    "native_driver_contracts": 68,
     "preflight_contracts": 37,
     "independent_review": "passed"
   },
   "prior_actual_run": {
-    "id": 37705172689,
-    "verification_commit": "a64cb53c5496d270293d8b5058ddb779ece09bd1",
+    "id": 37705977272,
+    "verification_commit": "9f168bf4a9a38837eecca23f5e835d99f963dcba",
     "browser_passed": 73,
     "browser_failed": 0,
-    "native_passed_checkpoints": 32,
-    "native_failure": "方向键组合选择分支甲而非指定乙；严格value断言停止"
+    "native_passed_checkpoints": 29,
+    "native_failure": "GTK窗口重映射时一次onlyvisible为空被误判关闭；后续截图证实选择器仍在"
   },
   "reuse": {
     "run_id": 37702406803,
@@ -34,11 +34,17 @@
   "source_sha256": {
     ".github/workflows/desktop.yml": "f96ee0b77a3b2544271a5ab23329c846e1df8517f07d1266e640858cd1d669b1",
     ".github/workflows/recheck-integrated.yml": "eca26eaf1c9c71e97f1a66153ca04379f9aca1a4efed427c187110dd6af030a8",
-    "desktop/tests/native_smoke.py": "044caebfb35ad1c897c7ac8b17db6cd585dd9a4284acf8f3cdf7ccb5ac6cbfdb",
-    "desktop/tests/test_native_workflow_controls.py": "9259c6faa1136c9f3c28e124fb0a5ce71a9a692e3f5a61b2aa60e56e5142fa52",
+    "desktop/tests/native_smoke.py": "fadf4666cc21d16a35b1bd095e42bde79b0b19ef27138ac2537851f000f7e29e",
+    "desktop/tests/test_native_workflow_controls.py": "534526dfd051fd93c2994c894ca511232a2714bd685ed44e68839f73fb8c8acc",
     "desktop/tests/ui.test.mjs": "f84b00c4f303e764fbd87883b9a92b34c309d4353c9fa806d797366119d3c288",
-    "docs/ci.md": "e7afdf177026fcf785ede3c4d2a352c2b58950f450c6e0e4636a0107ff9fbbc5",
+    "docs/ci.md": "bf1dac54f24b2d6e9cf0eba6aa640800b8442061d026f44c37c73081e221b196",
     "scripts/tests/test_preflight.py": "e9d9b7687f6378dbee4a09623bd170e61c5e233b5d5404653017f5740f353973",
     "desktop/tests/NATIVE_ACCEPTANCE.md": "d0dc69e011538ba78315ad913a732af4bc05b616aee633234a5156c630920414"
-  }
+  },
+  "highest_prior_native_run": {
+    "id": 37705172689,
+    "passed_checkpoints": 32,
+    "full_acceptance_passed": false
+  },
+  "driver_readiness_audit": "窗口/位置/选中态/关闭创建例外/尺寸/恢复均完成只读条件审计，动作不重放"
 }
