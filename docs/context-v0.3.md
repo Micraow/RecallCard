@@ -41,7 +41,7 @@
 
 ### 预算与继续读取
 
-`budget_tokens` 仍沿用现有保守 UTF-8 字节上限，而不是声称精确的供应商 token 数。包括外层包装、多个结果、元数据及待处理引用的完整 JSON 均受同一预算约束。
+v0.6 起主参数为 `budget_bytes`，旧 `budget_tokens` 保留为已弃用别名；它们计量 UTF-8 字节，而不是供应商 token 数。包括外层包装、多个结果、元数据及待处理引用的完整 JSON 均受同一预算约束。
 
 标签视图按稳定 ref 顺序返回能放入预算的完整记录。超出预算的记录列入视图自己的 `pending_refs`，同时标记 `truncated`；待处理列表本身放不下时，再标记 `pending_list_truncated`。外层批量读取被裁减的结果也保留对应 pending ref，避免无提示丢失续读入口。
 
@@ -90,3 +90,5 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 这里只验证本机正本到只读上下文的确定性行为；没有调用模型、验证向量语义质量或宣称可以准确理解任意机器/项目的自然语言关系。
+
+长正文和命中定位的新合同见 [模型有界续读](read-pages-v0.6.md)。

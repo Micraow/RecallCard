@@ -82,7 +82,7 @@ enum Command {
     Connections,
     /// 明确配置一个客户端的读取和捕获范围，不自动授予网页发送权
     Connect {
-        #[arg(value_parser=["browser","claude-code"])]
+        #[arg(value_parser=["browser","claude-code","chatgpt-mcp"])]
         client: String,
         #[arg(long)]
         host_identity: String,
@@ -151,12 +151,31 @@ enum Command {
     /// 通过编号读取原始事件或记忆
     Read {
         id: String,
-        /// 读取具名 View 时必须显式给出授权范围
+        /// 具名 View 或有界续读需要明确授权范围
         #[arg(long)]
         scope: Vec<String>,
+        /// 输出 UTF-8 字节预算；与 --scope 一起使用有界读取
+        #[arg(long, alias = "budget-tokens")]
+        budget_bytes: Option<usize>,
+        /// 按 search 返回的 text_range.start_byte 定位正文
+        #[arg(long)]
+        offset_bytes: Option<usize>,
+        /// 使用上一页返回的不透明 next_cursor 继续读取
+        #[arg(long)]
+        cursor: Option<String>,
     },
-    /// 返回记忆的原始证据
-    Sources { id: String },
+    /// 返回原始证据；大记录可按固定范围有界续读
+    Sources {
+        id: String,
+        #[arg(long)]
+        scope: Vec<String>,
+        #[arg(long, alias = "budget-tokens")]
+        budget_bytes: Option<usize>,
+        #[arg(long)]
+        offset_bytes: Option<usize>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// 按当前授权/抑制状态导出可选Embedding输入；不会发送云端
     #[command(hide = true)]
     EmbeddingExport {
@@ -182,12 +201,12 @@ enum Command {
     Views,
     /// 检查 schema、摘要与证据完整性
     Doctor,
-    /// 生成授权范围内的稳定启动资料
-    #[command(hide = true)]
+    /// 为 AI 读取固定范围的启动背景；新信息仍可通过 search 查找
     Bootstrap {
         #[arg(long, required = true)]
         scope: Vec<String>,
-        #[arg(long, default_value_t = 1500)]
+        /// 返回内容的 UTF-8 字节上限；不是模型 token 计数
+        #[arg(long = "budget-bytes", alias = "budget-tokens", default_value_t = 1500)]
         budget_tokens: usize,
     },
     /// 不依赖 Dream 或云 API 的中英文文本检索
@@ -199,7 +218,8 @@ enum Command {
         target: String,
         #[arg(long, default_value_t = 5)]
         limit: usize,
-        #[arg(long, default_value_t = 1500)]
+        /// 返回内容的 UTF-8 字节上限；不是模型 token 计数
+        #[arg(long = "budget-bytes", alias = "budget-tokens", default_value_t = 1500)]
         budget_tokens: usize,
         #[arg(long)]
         session_ref: Option<String>,
@@ -213,8 +233,7 @@ enum Command {
         #[arg(long)]
         semantic_config: Option<PathBuf>,
     },
-    /// 为本地 Agent 提供四个只读工具；范围由此处绑定
-    #[command(hide = true)]
+    /// 启动 AI 只读 MCP 入口；资料库和授权范围在启动时固定
     Mcp {
         #[arg(long)]
         connection_id: Option<String>,
@@ -246,7 +265,8 @@ enum Command {
         connection_id: Option<String>,
         #[arg(long, required = true)]
         scope: Vec<String>,
-        #[arg(long, default_value_t = 1500)]
+        /// 返回内容的 UTF-8 字节上限；不是模型 token 计数
+        #[arg(long = "budget-bytes", alias = "budget-tokens", default_value_t = 1500)]
         budget_tokens: usize,
     },
     /// 抑制记录及其原始证据，防止检索与下一次 Dream 再次提炼
@@ -504,7 +524,26 @@ fn run(cli: Cli) -> Result<Value> {
                 },
             )?),
         },
-        Command::Read { id, scope } => {
+        Command::Read {
+            id,
+            scope,
+            budget_bytes,
+            offset_bytes,
+            cursor,
+        } => {
+            if budget_bytes.is_some() || offset_bytes.is_some() || cursor.is_some() {
+                if scope.is_empty() {
+                    return Err("有界读取需要明确 --scope；请使用授权范围".into());
+                }
+                return Context::new(&vault, Access::new(scope)?).read_page(
+                    recallcard::context::ReadPageArgs {
+                        refs: vec![id],
+                        budget_tokens: budget_bytes.unwrap_or(1500),
+                        offset_bytes,
+                        cursor,
+                    },
+                );
+            }
             let _read_guard = vault.read_guard()?;
             let (kind, record_id, revision) = parse_ref(&id)?;
             if kind == "view" {
@@ -522,7 +561,30 @@ fn run(cli: Cli) -> Result<Value> {
             }
             vault.read(record_id)
         }
-        Command::Sources { id } => {
+        Command::Sources {
+            id,
+            scope,
+            budget_bytes,
+            offset_bytes,
+            cursor,
+        } => {
+            if budget_bytes.is_some()
+                || offset_bytes.is_some()
+                || cursor.is_some()
+                || !scope.is_empty()
+            {
+                if scope.is_empty() {
+                    return Err("有界来源读取需要明确 --scope；请使用授权范围".into());
+                }
+                return Context::new(&vault, Access::new(scope)?).sources_page(
+                    recallcard::context::ReadPageArgs {
+                        refs: vec![id],
+                        budget_tokens: budget_bytes.unwrap_or(1500),
+                        offset_bytes,
+                        cursor,
+                    },
+                );
+            }
             let _read_guard = vault.read_guard()?;
             let (kind, record_id, revision) = parse_ref(&id)?;
             if kind == "view" {
@@ -728,7 +790,7 @@ fn main() {
         match result {
             Ok(value) => {
                 let output = if cli.json {
-                    serde_json::to_string_pretty(
+                    serde_json::to_string(
                         &json!({"schema":"recallcard.cli/1","ok":true,"result":value}),
                     )
                     .expect("可序列化结果")
@@ -752,9 +814,15 @@ fn main() {
         }
         return;
     }
+    let machine_output = cli.json;
     match run(cli) {
         Ok(result) => {
-            let result = serde_json::to_string_pretty(&result).expect("可序列化的输出");
+            let result = if machine_output {
+                serde_json::to_string(&result)
+            } else {
+                serde_json::to_string_pretty(&result)
+            }
+            .expect("可序列化的输出");
             if let Err(error) = writeln!(std::io::stdout().lock(), "{result}") {
                 if error.kind() != std::io::ErrorKind::BrokenPipe {
                     eprintln!("输出失败：{error}");

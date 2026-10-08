@@ -528,5 +528,12 @@ fn ordinary_cli_still_displays_help_and_does_not_load_native_config() {
         &[],
     );
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("native-install"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("mcp"));
+    let legacy = launch(
+        env!("CARGO_BIN_EXE_recallcard"),
+        directory.path(),
+        &["native-install", "--help"],
+        &[],
+    );
+    assert!(legacy.status.success());
 }

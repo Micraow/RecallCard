@@ -65,6 +65,78 @@ fn wait_running(vault: &Vault) {
     }
     panic!("服务未取得租约");
 }
+// 租约先于 worker 预检与完整程序 hash。需要凭据/调度就绪的测试等待
+// 明确的启动发布，而不是在租约出现后给另一个任意的 5 秒窗口。
+fn wait_started(
+    vault: &Vault,
+    pid: u32,
+    not_before: chrono::DateTime<Utc>,
+    mut child: Option<&mut std::process::Child>,
+) -> ServiceStatus {
+    let until = Instant::now() + SERVICE_STARTUP_TIMEOUT;
+    loop {
+        if let Some(process) = child.as_deref_mut() {
+            assert!(
+                process.try_wait().unwrap().is_none(),
+                "服务在发布启动信息前退出"
+            );
+        }
+        let status = service_status(vault).unwrap();
+        if status.startup_published()
+            && status.pid == Some(pid)
+            && status.heartbeat_at.is_some_and(|at| at >= not_before)
+        {
+            return status;
+        }
+        assert!(
+            Instant::now() < until,
+            "服务启动信息未完整发布：leased={} pid_matches={} heartbeat={} hash_bytes={}",
+            status.running,
+            status.pid == Some(pid),
+            status.heartbeat_at.is_some(),
+            status.binary_hash.len()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+struct TestChild(std::process::Child);
+impl std::ops::Deref for TestChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for TestChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for TestChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+#[test]
+fn a_running_lease_is_not_a_published_startup_or_a_model_approval() {
+    let mut status = ServiceStatus {
+        running: true,
+        ..Default::default()
+    };
+    assert!(!status.startup_published());
+    status.pid = Some(std::process::id());
+    status.started_at = Some(Utc::now());
+    status.heartbeat_at = status.started_at;
+    assert!(!status.startup_published());
+    status.binary_hash = "invalid".into();
+    assert!(!status.startup_published());
+    status.binary_hash = "a".repeat(64);
+    assert!(status.startup_published());
+    assert!(!status.credential.present);
+    assert!(!status.provider_ready);
+}
 #[test]
 fn service_keeps_discovering_new_evidence_without_a_gui_tick() {
     let root = tempfile::tempdir().unwrap();
@@ -74,6 +146,7 @@ fn service_keeps_discovering_new_evidence_without_a_gui_tick() {
         .unwrap();
     let path = vault.root().to_path_buf();
     let (done, received) = mpsc::channel();
+    let launched_at = Utc::now();
     let thread = std::thread::spawn(move || {
         let vault = Vault::open_existing(&path).unwrap();
         run_service(
@@ -88,7 +161,7 @@ fn service_keeps_discovering_new_evidence_without_a_gui_tick() {
         )
         .unwrap()
     });
-    wait_running(&vault);
+    wait_started(&vault, std::process::id(), launched_at, None);
     source(&vault);
     received.recv_timeout(Duration::from_secs(5)).unwrap();
     let until = Instant::now() + Duration::from_secs(5);
@@ -235,27 +308,29 @@ fn real_cli_session_credential_pipe_is_not_persisted_and_restart_requests_input(
     MemoryRuntime::new(&vault)
         .configure(config.clone())
         .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_recallcard"))
-        .arg("--vault")
-        .arg(vault.root())
-        .args(["start", "--foreground", "--credential-stdin", "--json"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .env_remove("RECALLCARD_DREAM_API_KEY")
-        .spawn()
-        .unwrap();
+    let launched_at = Utc::now();
+    let mut child = TestChild(
+        Command::new(env!("CARGO_BIN_EXE_recallcard"))
+            .arg("--vault")
+            .arg(vault.root())
+            .args(["start", "--foreground", "--credential-stdin", "--json"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env_remove("RECALLCARD_DREAM_API_KEY")
+            .spawn()
+            .unwrap(),
+    );
     let secret = "SYNTHETIC_PIPE_KEY_NEVER_SENT";
     let credential =
         PreparedCredential::session(config.provider.clone().unwrap(), secret.into()).unwrap();
     write_handoff(&mut child.stdin.take().unwrap(), &credential).unwrap();
-    wait_running(&vault);
-    let until = Instant::now() + Duration::from_secs(5);
-    while !service_status(&vault).unwrap().credential.present {
-        assert!(Instant::now() < until);
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let running = service_status(&vault).unwrap();
+    let pid = child.id();
+    let running = wait_started(&vault, pid, launched_at, Some(&mut child));
+    assert!(
+        running.credential.present,
+        "启动已发布但会话凭据没有接收成功"
+    );
     assert_eq!(running.credential.storage, CredentialStorage::SessionOnly);
     assert_eq!(running.credential.lifetime, "background_service_exit");
     assert_eq!(running.build["version"], env!("CARGO_PKG_VERSION"));

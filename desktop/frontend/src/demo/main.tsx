@@ -396,9 +396,11 @@ async function invoke(
       }),
     );
     const sourceIndex = sources.indexOf(source);
+    // 来源列表与记忆列表并非相同顺序，显式对应每段合成原话。
+    const entryBySource = [0, 1, 3, 2, 4, 5, 6, 7];
     if (sourceIndex > 0)
       messages.forEach((message) => {
-        message.text = entries[(sourceIndex + 1) % entries.length][1];
+        message.text = entries[entryBySource[sourceIndex]][1];
       });
     if (mode === "assets" && messages[0]) messages[0].text = "";
     return {

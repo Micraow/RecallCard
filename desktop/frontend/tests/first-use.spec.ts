@@ -19,6 +19,9 @@ test("首次导入不要求选择格式、空间或模型，直接显示有出�
     "正文撰写可以标为完成",
   );
   await expect(page.locator(".background-fact")).toHaveCount(0);
+  await expect(page.locator(".context-conversation").nth(1)).toContainText("德语课");
+  await expect(page.locator(".context-conversation").nth(1)).toContainText("19:30");
+  await expect(page.locator(".context-conversation").nth(3)).toContainText("销售额统一使用");
   const calls = await page.evaluate(() => (window as any).__DEMO_CALLS__);
   expect(
     calls.filter((call: any) => call.command === "open_default_workspace"),
@@ -47,12 +50,12 @@ test("首次导入不要求选择格式、空间或模型，直接显示有出�
 test("近况一次保存，立即搜索可见；取消不保存", async ({ page }, info) => {
   await page.goto("/demo.html?state=imported");
   await page.getByRole("button", { name: "补充最新情况" }).click();
-  await page.getByLabel("最新情况").fill("这段草稿不会保存");
+  await page.getByRole("textbox", { name: "最新情况", exact: true }).fill("这段草稿不会保存");
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("button", { name: "补充最新情况" }).click();
   await page
-    .getByLabel("最新情况")
+    .getByRole("textbox", { name: "最新情况", exact: true })
     .fill("合成最新情况：琥珀计划已经交付，改为周四回访。");
   await page.getByRole("button", { name: "保存近况" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);

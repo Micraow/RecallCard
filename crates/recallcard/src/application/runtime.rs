@@ -18,6 +18,9 @@ use std::{
 };
 
 const SCHEMA: &str = "recallcard.local-service/1";
+/// 启动包含本地 worker 预检与完整程序摘要校验。慢 CPU 上的 debug 程序
+/// 可能超过 5 秒；持有租约不表示上述工作已完成。调用方共用同一有界预算。
+pub const SERVICE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceOptions {
     pub once: bool,
@@ -66,6 +69,21 @@ impl Default for ServiceStatus {
             last_memory_job: None,
             error: None,
         }
+    }
+}
+impl ServiceStatus {
+    /// 仅表示本实例已发布启动信息；不代表模型已配置或远程调用成功。
+    /// 真正的启动握手还必须核对期望的程序摘要和本次启动时间。
+    pub fn startup_published(&self) -> bool {
+        self.running
+            && self.pid.is_some()
+            && self.started_at.is_some()
+            && self.heartbeat_at.is_some()
+            && self.binary_hash.len() == 64
+            && self
+                .binary_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     }
 }
 struct ServiceLease(File);
@@ -582,12 +600,11 @@ fn ensure_service_inner(
             ));
         }
     }
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + SERVICE_STARTUP_TIMEOUT;
     loop {
         let status = service_status(vault)?;
-        if status.running
+        if status.startup_published()
             && status.binary_hash == expected_hash
-            && status.pid.is_some()
             && status.heartbeat_at.is_some_and(|at| at >= launched_at)
         {
             std::thread::spawn(move || {
