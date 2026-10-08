@@ -1,0 +1,131 @@
+name: 已验收 Linux 运行包隔离交付
+on:
+  workflow_dispatch:
+  push:
+    branches: ["deliver/validated-runtime-20261008"]
+concurrency:
+  group: validated-runtime-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  package:
+    name: 复用精确程序 / 解压包完整37步
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 核对应用源码未变且包装合同通过
+        run: |
+          git diff --exit-code 12f4672fe0f3fe3fac0702c33998501950b01538 -- crates Cargo.toml Cargo.lock desktop/ui desktop/src-tauri
+          python3 -m unittest discover -s scripts/tests -p 'test_runtime_package.py' -v
+          python3 -m unittest discover -s desktop/tests -p 'test_native_*.py' -v
+      - name: 核对原构建、同轮37步和固定产物来源
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const source = JSON.parse(fs.readFileSync('scripts/validated-runtime-source.json', 'utf8'));
+            const {data: build} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: source.build.run_id});
+            if (build.head_sha !== source.application_commit) throw new Error('原构建提交不符');
+            const {data: buildJobs} = await github.rest.actions.listJobsForWorkflowRun({...context.repo, run_id: source.build.run_id, per_page: 100});
+            const buildJob = buildJobs.jobs.find(item => item.id === source.build.job_id);
+            for (const name of ['安装官方系统依赖', 'Run cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check', 'Run cargo clippy --locked --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings', 'Run cargo build --locked --manifest-path desktop/src-tauri/Cargo.toml', '编译合成资料库初始化 CLI']) {
+              if (!buildJob?.steps.some(step => step.name === name && step.conclusion === 'success')) throw new Error('原构建步骤未通过：' + name);
+            }
+            const {data: artifacts} = await github.rest.actions.listWorkflowRunArtifacts({...context.repo, run_id: source.build.run_id, per_page: 100});
+            const artifact = artifacts.artifacts.find(item => item.id === source.build.artifact_id);
+            if (!artifact || artifact.expired || artifact.name !== source.build.artifact_name || artifact.digest !== 'sha256:' + source.build.artifact_sha256) throw new Error('原程序产物不可验证');
+            const {data: accepted} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: source.acceptance.run_id});
+            if (accepted.head_sha !== source.acceptance.commit || accepted.status !== 'completed' || accepted.conclusion !== 'success') throw new Error('原生与浏览器同轮验收未成功');
+            const {data: acceptedJobs} = await github.rest.actions.listJobsForWorkflowRun({...context.repo, run_id: source.acceptance.run_id, per_page: 100});
+            for (const id of [source.acceptance.native_job_id, source.acceptance.browser_job_id]) {
+              if (!acceptedJobs.jobs.some(job => job.id === id && job.conclusion === 'success')) throw new Error('验收作业未成功');
+            }
+            const {data: acceptedArtifacts} = await github.rest.actions.listWorkflowRunArtifacts({...context.repo, run_id: source.acceptance.run_id, per_page: 100});
+            for (const kind of ['native', 'browser']) {
+              const entry = acceptedArtifacts.artifacts.find(item => item.id === source.acceptance[kind + '_artifact_id']);
+              if (!entry || entry.expired || entry.digest !== 'sha256:' + source.acceptance[kind + '_artifact_sha256']) throw new Error('原验收证据产物不符');
+            }
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: '11517704706'
+          run-id: '37702406803'
+          github-token: ${{ github.token }}
+          path: compiled
+          merge-multiple: true
+      - name: 核对两份程序摘要
+        run: |
+          printf '%s  %s\n' '43b173b96502e04b41ebf9057e892393b92075f6b6ead83b486aaca5a61c5569' compiled/recallcard-desktop '8e58de814c9e47309aa61e800686d799389971005671fd6fb643026397c17a78' compiled/recallcard | sha256sum --check --strict
+      - name: 仅解析GUI与CLI的锁定Linux依赖，不重新编译
+        timeout-minutes: 8
+        env:
+          CARGO_NET_RETRY: '2'
+          CARGO_HTTP_TIMEOUT: '30'
+        run: |
+          timeout --kill-after=15s 3m cargo metadata --locked --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$RUNNER_TEMP/gui-metadata.json"
+          timeout --kill-after=15s 3m cargo metadata --locked --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$RUNNER_TEMP/cli-metadata.json"
+      - name: 同一输入打包两次并核对ZIP完全一致
+        timeout-minutes: 4
+        run: |
+          args=(--binary compiled/recallcard-desktop --cli compiled/recallcard --metadata "$RUNNER_TEMP/gui-metadata.json" --metadata "$RUNNER_TEMP/cli-metadata.json" --commit 12f4672fe0f3fe3fac0702c33998501950b01538 --packaging-commit "$GITHUB_SHA" --packaging-run-id "$GITHUB_RUN_ID" --acceptance-commit 76756867201aa91ed5494a9fab953beba97ac541 --acceptance-run-id 37707650839 --gui-sha256 43b173b96502e04b41ebf9057e892393b92075f6b6ead83b486aaca5a61c5569 --cli-sha256 8e58de814c9e47309aa61e800686d799389971005671fd6fb643026397c17a78 --provenance scripts/validated-runtime-source.json --profile dev)
+          python3 scripts/package_desktop.py "${args[@]}" --out "$RUNNER_TEMP/runtime-first" > "$RUNNER_TEMP/package-first.json"
+          python3 scripts/package_desktop.py "${args[@]}" --out "$RUNNER_TEMP/runtime-second" > "$RUNNER_TEMP/package-second.json"
+          cmp "$RUNNER_TEMP/runtime-first/RecallCard-Desktop-0.5.0-linux-x86_64-12f4672.zip" "$RUNNER_TEMP/runtime-second/RecallCard-Desktop-0.5.0-linux-x86_64-12f4672.zip"
+          mkdir "$RUNNER_TEMP/runtime-evidence"
+          cp "$RUNNER_TEMP/package-first.json" "$RUNNER_TEMP/package-second.json" "$RUNNER_TEMP/runtime-evidence/"
+      - name: 安全解压并核对文件摘要与执行权限
+        run: |
+          python3 scripts/verify_runtime_package.py --archive "$RUNNER_TEMP/runtime-first/RecallCard-Desktop-0.5.0-linux-x86_64-12f4672.zip" --destination "$RUNNER_TEMP/isolated-runtime" --provenance scripts/validated-runtime-source.json --report "$RUNNER_TEMP/runtime-evidence/extraction.json"
+      - name: 安装官方原生运行依赖
+        timeout-minutes: 16
+        run: |
+          source_list="$RUNNER_TEMP/recallcard-ubuntu-official.list"
+          cat > "$source_list" <<'EOF'
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy-updates main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu jammy-security main universe
+          EOF
+          apt_options=(-o "Dir::Etc::sourcelist=$source_list" -o Dir::Etc::sourceparts=- -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          for attempt in 1 2; do
+            if sudo timeout --kill-after=30s 3m apt-get "${apt_options[@]}" --error-on=any update; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then exit 1; fi
+            sleep 5
+          done
+          sudo timeout --kill-after=30s 8m apt-get "${apt_options[@]}" install -y --no-install-recommends libwebkit2gtk-4.1-0 libgtk-3-0 webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
+      - name: 移走开发界面后从解压目录经启动脚本完整验收
+        timeout-minutes: 8
+        env:
+          LANG: C.UTF-8
+          GDK_BACKEND: x11
+        run: |
+          repository="$PWD"
+          mv "$repository/desktop/ui" "$RUNNER_TEMP/hidden-desktop-ui"
+          trap 'mv "$RUNNER_TEMP/hidden-desktop-ui" "$repository/desktop/ui"' EXIT
+          test ! -e "$repository/desktop/ui"
+          cd "$RUNNER_TEMP/isolated-runtime"
+          printf '%s\n' '开发界面目录已移走，工作目录为新解压目录，启动脚本exec同目录GUI；CLI也来自同目录。' > "$RUNNER_TEMP/runtime-evidence/isolation.txt"
+          pwd >> "$RUNNER_TEMP/runtime-evidence/isolation.txt"
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" /usr/bin/python3 "$repository/desktop/tests/native_smoke.py" --application "$PWD/运行桌面版.sh" --cli "$PWD/recallcard" --artifacts "$RUNNER_TEMP/runtime-evidence/native"
+          test ! -e "$repository/desktop/ui"
+          python3 "$repository/scripts/verify_runtime_package.py" --verify-only --archive "$RUNNER_TEMP/runtime-first/RecallCard-Desktop-0.5.0-linux-x86_64-12f4672.zip" --destination "$PWD" --provenance "$repository/scripts/validated-runtime-source.json" --native-summary "$RUNNER_TEMP/runtime-evidence/native/summary.json" --report "$RUNNER_TEMP/runtime-evidence/post-native.json"
+      - name: 仅成功后保存版本化运行包与校验清单
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-validated-runtime-${{ github.sha }}
+          path: ${{ runner.temp }}/runtime-first/
+          if-no-files-found: error
+          retention-days: 30
+      - name: 保存隔离验收与打包证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-runtime-isolation-${{ github.sha }}
+          path: ${{ runner.temp }}/runtime-evidence/
+          if-no-files-found: ignore
+          retention-days: 30

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "checked_at_utc": "2026-10-08T01:05:13.282979+00:00",
+  "application_commit": "12f4672fe0f3fe3fac0702c33998501950b01538",
+  "application_source_changed": false,
+  "previous_full_acceptance": {
+    "run_id": 37707650839,
+    "verification_commit": "76756867201aa91ed5494a9fab953beba97ac541",
+    "native_steps": 37,
+    "chromium_tests": 73,
+    "passed": true
+  },
+  "runtime_package_acceptance_passed": false,
+  "local_preflight": {
+    "passed": true,
+    "checks": 11,
+    "dom": 225,
+    "javascript_contracts": 111,
+    "native_contracts": 68,
+    "package_contracts": 15
+  },
+  "source_sha256": {
+    "desktop/tests/NATIVE_ACCEPTANCE.md": "7636cb8def6fa46e52a9ed46933c6bd0c3c715206727eb9df9571980d483423c",
+    "docs/desktop-quickstart-v0.5.md": "063bf70a121fab4e69b62a0b4eaf498c9d13ca8d342995168a766298bddfeb90",
+    "docs/progress.md": "f63a6ee95f20dce2c28687e4fadd30819ab6e97c8bd50bac7705e1e10db4ac9c",
+    "scripts/package_desktop.py": "18088ba384b230a59ccd2027a129a1eec10046060fda8048c95227b958806826",
+    ".github/workflows/deliver-validated-runtime.yml": "28900d7cda382e239eb60298e96eaaa9537f8d04721203c93c90282444a2ca43",
+    "docs/desktop-acceptance-v0.5.md": "70b98974ef99033a944dd7177368381cb811b38bcc1d172a8a025c3feb9f02b5",
+    "scripts/tests/test_runtime_package.py": "d5f962b6e6305bcd89b10e2190939a5ef75085baa9260107d9e723a400045714",
+    "scripts/validated-runtime-source.json": "8c94f4ad97fba7cdef2ca0c3b0acfecd68153d0cceba870ccc7102425a731eb9",
+    "scripts/verify_runtime_package.py": "6d17db7ff7b9e72f4089299e4979cfa69e33dd1607f9bf4ea66baa149e801c2b"
+  },
+  "package_review": "补齐嵌套许可正文并保留相对路径，拒绝运行后额外特殊节点；同一输入双打包和安全解压已验证，真实包装隔离运行待CI"
+}
