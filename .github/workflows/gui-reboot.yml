@@ -1,0 +1,46 @@
+name: 新 GUI 合成资料与交互验证
+on:
+  workflow_dispatch:
+  push:
+    branches: ["validate/reboot-ui-*"]
+    paths: ["desktop/frontend/**", "desktop/package*.json", ".github/workflows/gui-reboot.yml"]
+  pull_request:
+    paths: ["desktop/frontend/**", "desktop/package*.json", ".github/workflows/gui-reboot.yml"]
+permissions:
+  contents: read
+concurrency:
+  group: gui-reboot-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  gui:
+    name: 类型检查 / 生产打包 / 真实 Chromium 合成界面
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+      - run: npm run test:contracts
+      - name: 确认合成内容未进入生产包
+        run: |
+          if grep -R -n 'demo_session\|mem_demo_\|合成示例/RecallCard\|__DEMO_CALLS__' dist; then exit 1; fi
+      - name: 安装真实 Chromium 与系统依赖
+        timeout-minutes: 5
+        run: npx playwright install --with-deps chromium
+      - run: npm run test:frontend
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gui-reboot-synthetic-evidence
+          path: |
+            desktop/test-results/
+            desktop/playwright-report/
+          retention-days: 14
