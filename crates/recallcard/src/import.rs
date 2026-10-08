@@ -2,7 +2,7 @@
 use crate::{model::*, Vault};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub fn import_text(vault: &Vault, format: &str, text: &str, scope: &str) -> Result<Value> {
     let inputs = parse_text(format, text, scope)?;
@@ -179,11 +179,12 @@ fn claude_code(text: &str, scope: &str) -> Result<Vec<EventInput>> {
     }
     Ok(out)
 }
-/// 只包括当前分支；不会把丢失的时间替换成导入时间。
+/// 记录已选路径与其他分支的覆盖；不会把丢失时间替换成导入时间。
 #[derive(Debug, Default, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct ChatgptCoverage {
     pub selected_branch_messages: usize,
     pub other_branch_messages_skipped: usize,
+    pub other_branch_messages_imported: usize,
     pub hidden_reasoning_messages_skipped: usize,
     pub unsupported_messages_skipped: usize,
     pub empty_messages_skipped: usize,
@@ -210,6 +211,21 @@ pub(crate) fn chatgpt_source_id(conv: &Value) -> Result<&str> {
 }
 
 pub(crate) fn parse_chatgpt_conversation(conv: &Value, scope: &str) -> Result<ChatgptConversation> {
+    parse_chatgpt_conversation_mode(conv, scope, false)
+}
+
+pub(crate) fn parse_chatgpt_conversation_all(
+    conv: &Value,
+    scope: &str,
+) -> Result<ChatgptConversation> {
+    parse_chatgpt_conversation_mode(conv, scope, true)
+}
+
+fn parse_chatgpt_conversation_mode(
+    conv: &Value,
+    scope: &str,
+    all: bool,
+) -> Result<ChatgptConversation> {
     let session = chatgpt_source_id(conv)?;
     let mapping = conv["mapping"]
         .as_object()
@@ -227,7 +243,7 @@ pub(crate) fn parse_chatgpt_conversation(conv: &Value, scope: &str) -> Result<Ch
         if !item.is_object() {
             return Err("ChatGPT 分支节点必须是对象".into());
         }
-        chain.push(item);
+        chain.push((node, item));
         match item.get("parent") {
             Some(Value::String(parent)) if !parent.is_empty() => node = parent,
             Some(Value::Null) => break,
@@ -235,22 +251,58 @@ pub(crate) fn parse_chatgpt_conversation(conv: &Value, scope: &str) -> Result<Ch
         }
     }
     chain.reverse();
+    let mut graph_children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    if all {
+        let mut roots = BTreeSet::new();
+        for (id, item) in mapping {
+            if !item.is_object() {
+                return Err("ChatGPT 分支节点必须是对象".into());
+            }
+            match item.get("parent") {
+                Some(Value::Null) => {
+                    roots.insert(id.as_str());
+                }
+                Some(Value::String(parent)) if mapping.contains_key(parent) => {
+                    graph_children.entry(parent).or_default().push(id);
+                }
+                _ => return Err("ChatGPT 分支引用缺失节点".into()),
+            }
+        }
+        chain.clear();
+        while let Some(id) = roots.pop_first() {
+            chain.push((id, &mapping[id]));
+            if let Some(children) = graph_children.get(id) {
+                roots.extend(children.iter().copied());
+            }
+        }
+        if chain.len() != mapping.len() {
+            return Err("ChatGPT 分支包含循环引用".into());
+        }
+    }
+    let mut budget = NormalizedBudget::default();
     let mut out = ChatgptConversation {
         source_id: session.into(),
         title: conv["title"].as_str().map(str::to_owned),
         events: Vec::new(),
         coverage: ChatgptCoverage::default(),
     };
-    out.coverage.other_branch_messages_skipped = mapping
-        .iter()
-        .filter(|(id, item)| !seen.contains(id.as_str()) && !item["message"].is_null())
-        .count();
-    for item in chain {
+    out.coverage.other_branch_messages_skipped = if all {
+        0
+    } else {
+        mapping
+            .iter()
+            .filter(|(id, item)| !seen.contains(id.as_str()) && !item["message"].is_null())
+            .count()
+    };
+    for (node_id, item) in chain {
         let message = &item["message"];
         if message.is_null() {
             continue;
         }
-        out.coverage.selected_branch_messages += 1;
+        let on_current_path = seen.contains(node_id);
+        if on_current_path {
+            out.coverage.selected_branch_messages += 1;
+        }
         let metadata = &message["metadata"];
         let ctype = message["content"]["content_type"].as_str().unwrap_or("");
         // 某些第三方备份将 analysis 的 channel 清空，但保留 reasoning_status。
@@ -309,7 +361,7 @@ pub(crate) fn parse_chatgpt_conversation(conv: &Value, scope: &str) -> Result<Ch
             Role::Assistant => Origin::AssistantOutput,
             _ => Origin::ToolOutput,
         };
-        let event = input(
+        let mut event = input(
             "chatgpt-export",
             session,
             id,
@@ -322,7 +374,19 @@ pub(crate) fn parse_chatgpt_conversation(conv: &Value, scope: &str) -> Result<Ch
             json!({"branch":"current_node", "conversation_title":out.title,
                 "citations":metadata["citations"]}),
         )?;
+        if all {
+            event.metadata["branch"] = json!("all_exported_nodes");
+            event.metadata["previous_message_id"] = item["parent"]
+                .as_str()
+                .and_then(|p| mapping[p]["message"]["id"].as_str())
+                .into();
+            event.metadata["chatgpt"] = json!({"node_id":node_id,"parent_id":item["parent"],"children_ids":graph_children.get(node_id).cloned().unwrap_or_default(),"on_current_path":on_current_path});
+        }
         event.validate()?;
+        budget.add(&event)?;
+        if all && !on_current_path {
+            out.coverage.other_branch_messages_imported += 1;
+        }
         out.events.push(event);
     }
     Ok(out)
@@ -344,4 +408,35 @@ fn chatgpt_time(value: &Value) -> Result<Option<DateTime<Utc>>> {
     )
     .map(Some)
     .ok_or_else(|| "ChatGPT create_time 超出可表示范围".into())
+}
+
+/// 规范化时逐条计费，避免小消息重复长标题后先构造数百 MiB 再拒绝。
+/// 每条预留后续分支注释空间；暂存编码仍有独立硬上限。
+#[derive(Default)]
+pub(crate) struct NormalizedBudget {
+    bytes: usize,
+}
+impl NormalizedBudget {
+    pub(crate) fn add(&mut self, event: &EventInput) -> Result<()> {
+        struct Counter(usize);
+        impl std::io::Write for Counter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 += bytes.len();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut counter = Counter(0);
+        serde_json::to_writer(&mut counter, event).map_err(|e| e.to_string())?;
+        self.bytes = self
+            .bytes
+            .checked_add(counter.0 + 1024)
+            .ok_or("规范化会话超过 60 MiB 规范化输出预算")?;
+        if self.bytes > 60 * 1024 * 1024 {
+            return Err("规范化会话超过 60 MiB 规范化输出预算".into());
+        }
+        Ok(())
+    }
 }

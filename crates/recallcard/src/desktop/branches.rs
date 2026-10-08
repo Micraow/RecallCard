@@ -149,7 +149,8 @@ impl ConversationBranches {
             "relationship_known":self.explicit_graph,
             "child_count":self.child_counts[index],
             "omitted_parent_nodes":self.omitted[index],
-            "gap_before":self.gaps[index]
+            "gap_before":self.gaps[index],
+            "on_current_path":self.events[index].data.metadata.pointer("/chatgpt/on_current_path")
         })
     }
 

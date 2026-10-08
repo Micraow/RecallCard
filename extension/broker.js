@@ -1,3 +1,4 @@
+import { automaticCycle } from './automatic.js';
 import { parseAction, validateAction, routeFor, siteFor, newNonce, reserveRequest, makeCapsule, byteLength, fail, PROTOCOL } from './protocol.js';
 import './conversation-format.js';
 const conversationFormat = globalThis.RecallCardConversationFormat;
@@ -12,15 +13,15 @@ export function verifyContent(sender, extensionId, liveUrl, requestedRoute) {
   if (routeFor(sender.url) !== route || routeFor(sender.tab.url) !== route || requestedRoute !== route) fail('页面地址或标签身份已变化');
   return route;
 }
-export function bindSession(previous, { route, token, documentId }) {
+export function bindSession(previous, { route, token, documentId, installationId = null }) {
   if (typeof token !== 'string' || !/^[a-f0-9-]{36}$/u.test(token)) fail('文档会话标识无效');
   const platform = siteFor(route);
-  if (previous?.route === route && previous.token === token && previous.documentId === documentId) return previous;
-  return { route, token, documentId, nonce: newNonce(), session_ref: `${platform.id}:${token}`, used: [], preview: null, bootstrap: null, last_request_at: 0 };
+  if (previous?.route === route && previous.token === token && previous.documentId === documentId && (previous.installation_id || null) === installationId) return previous;
+  return { route, token, documentId, installation_id: installationId, nonce: newNonce(), session_ref: `${platform.id}:${token}`, used: [], preview: null, bootstrap: null, last_request_at: 0 };
 }
 export function publicState(state) {
   const preview = state.preview && Object.fromEntries(Object.entries(state.preview).filter(([key]) => !['source_request', 'result_fingerprint'].includes(key)));
-  return { route: state.route, platform: siteFor(state.route).id, platform_name: siteFor(state.route).name, nonce: state.nonce, session_ref: state.session_ref, preview, connection: state.connection || null, capture_confirmation_valid: !!state.capture_approval };
+  return { installation_id: state.installation_id || null, extension_id: state.extension_id || null, route: state.route, platform: siteFor(state.route).id, platform_name: siteFor(state.route).name, nonce: state.nonce, session_ref: state.session_ref, preview, connection: state.connection || null, capture_confirmation_valid: !!state.capture_approval, last_capture_at: state.last_capture_at || null, last_read_at: state.last_read_at || null, auto_capture_note: state.auto_capture_note || null, automatic_status: state.automatic_status || null, automatic_error: state.automatic_error || null };
 }
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
@@ -52,6 +53,7 @@ export class Broker {
     if (!Number.isInteger(tabId)) fail('标签页编号无效');
     const tab = await this.api.getTab(tabId);
     const state = await this.api.load(tabId);
+    if (this.api.installationId && (!state?.installation_id || state.installation_id !== await this.api.installationId())) fail('安装绑定已变化，请重新连接；旧请求不会继续');
     if (!state || routeFor(tab.url) !== state.route || message.nonce !== state.nonce || message.session_ref !== state.session_ref) fail('会话已过期，请重新打开扩展');
     if (!tab.active) fail('请回到目标对话标签页再操作');
     const check = await this.api.content(tabId, { kind: 'check', route: state.route, nonce: state.nonce, session_ref: state.session_ref }, state.documentId);
@@ -69,7 +71,7 @@ export class Broker {
     // actions are intentionally absent from validateAction / model requests.
     const request = { protocol: PROTOCOL, request_id: `u_${newNonce()}`, nonce: state.nonce, session_ref: state.session_ref, action, arguments: args };
     if (byteLength(JSON.stringify(request)) > 200 * 1024) fail('此会话较大，请导出 JSON 后在桌面导入；本机直存上限约 200 KiB，没有截断内容');
-    const response = await this.api.native(HOST, request);
+    const response = await this.api.native(HOST, { ...request, ...(state.installation_id ? { installation_id: state.installation_id } : {}) });
     await this.current(tabId, message);
     if (!response || byteLength(JSON.stringify(response)) > 900 * 1024 || typeof response.ok !== 'boolean') fail('本机桥响应无效');
     if (!response.ok) fail(`本机操作未完成：${typeof response.error === 'string' ? response.error.slice(0, 400) : '未知错误'}`);
@@ -103,7 +105,7 @@ export class Broker {
     }
     state = reserveRequest(state, request, this.api.now());
     await this.api.save(tabId, state); // Reserve before I/O, including failed checks.
-    const response = await this.api.native(HOST, request);
+    const response = await this.api.native(HOST, { ...request, ...(state.installation_id ? { installation_id: state.installation_id } : {}) });
     if (!response || byteLength(JSON.stringify(response)) > 900 * 1024 || typeof response.ok !== 'boolean') fail('本机桥返回了无效或过大的响应');
     state = await this.current(tabId, message); // Navigation/reset invalidates late results.
     if (!response.ok) fail(`本机读取失败：${typeof response.error === 'string' ? response.error.slice(0, 400) : '未知错误'}`);
@@ -142,18 +144,43 @@ export class Broker {
     }
   }
   async handle(message, sender) {
+    if (message?.kind === 'automatic_tick') {
+      const tab = await this.api.getTab(sender.tab?.id);
+      verifyContent(sender, this.api.id, tab.url, message.route);
+      return this.serial(tab.id, async () => {
+        const state = await this.current(tab.id, message);
+        if (state.documentId !== sender.documentId) fail('自动请求来自过期文档');
+        try {
+          const result = await automaticCycle(this, tab.id, message);
+          const current = await this.current(tab.id, message);
+          current.automatic_status = result.status; current.automatic_error = null;
+          current.auto_capture_note = result.capture_note || current.auto_capture_note || null;
+          await this.api.save(tab.id, current);
+          return result;
+        } catch (error) {
+          const current = await this.api.load(tab.id);
+          if (current?.nonce === message.nonce) {
+            current.automatic_status = 'failed';
+            current.automatic_error = '自动接入未完成；打开连接检查，确认授权、身份与页面是否稳定';
+            await this.api.save(tab.id, current);
+          }
+          throw error;
+        }
+      });
+    }
     if (message?.kind === 'bind') {
       const tab = await this.api.getTab(sender.tab?.id);
       const route = verifyContent(sender, this.api.id, tab.url, message.route);
       return this.serial(tab.id, async () => {
-        const state = bindSession(await this.api.load(tab.id), { route, token: message.token, documentId: sender.documentId });
+        const state = bindSession(await this.api.load(tab.id), { route, token: message.token, documentId: sender.documentId, installationId: this.api.installationId ? await this.api.installationId() : null });
+        state.extension_id = this.api.id;
         await this.api.save(tab.id, state);
         const { preview: _preview, ...binding } = publicState(state);
         return binding;
       });
     }
     verifyPopup(sender, this.api.id, this.api.popupUrl);
-    if (!['inspect', 'reset', 'bootstrap', 'execute', 'insert', 'remove', 'delivered', 'capture', 'capture_check', 'check_state', 'conversation', 'connection', 'capture_preview', 'capture_save'].includes(message?.kind)) fail('不支持的扩展操作');
+    if (!['inspect', 'reset', 'bootstrap', 'execute', 'insert', 'remove', 'delivered', 'capture', 'capture_check', 'check_state', 'conversation', 'connection', 'pair', 'capture_preview', 'capture_save'].includes(message?.kind)) fail('不支持的扩展操作');
     const tabId = message.tabId;
     if (!Number.isInteger(tabId)) fail('标签页编号无效');
     const tab = await this.api.getTab(tabId);
@@ -168,6 +195,11 @@ export class Broker {
     return this.serial(tabId, async () => {
       let state = await this.current(tabId, message);
       if (message.kind === 'check_state') return { status: 'current' };
+      if (message.kind === 'pair') {
+        const pending = await this.userNative(tabId, message, state, 'request_pairing', {});
+        if (pending?.status !== 'pending' || pending.data_access !== false) fail('连接请求没有确认进入待批准状态');
+        return pending;
+      }
       if (message.kind === 'connection') {
         return publicState((await this.readConnection(tabId, message, state)).state);
       }

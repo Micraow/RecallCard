@@ -7,12 +7,14 @@
     <div class="eyebrow">当前会话</div><strong id="site">正在确认网站…</strong>
     <p id="route" class="route"></p>
     <p id="connection-state" class="muted">本机连接尚未检查 · 导出无需连接</p>
+    <button id="request-pairing" class="primary wide" type="button">请求桌面连接</button><p class="muted">首次使用请在桌面确认网站、读取和保存范围。批准前不会读取本机资料或保存会话。</p>
+    <details><summary>备用：手动填写连接编号</summary><p class="muted">在桌面“连接”中粘贴此编号。它绑定本机安装，不核验网站账号；重新安装后需要重新授权。</p><pre id="connection-code"></pre><button id="copy-connection" class="secondary" type="button">复制连接编号</button></details>
     <div class="row"><button id="connection" class="quiet" type="button">检查本机连接</button><button id="reset" class="quiet" type="button">重新连接当前对话</button></div>
   </section>
   <p id="status" role="status" aria-live="polite">正在确认当前标签页…</p>
   <section class="card">
-    <h2>保存 / 导出当前会话</h2>
-    <p>点击后才读取当前页面的可见文字。先看内容，再决定保存哪些消息。</p>
+    <h2>手动检查 / 导出</h2>
+    <p>在桌面连接设置中一次授权后，稳定可见消息会自动保存，资料请求会自动准备成草稿。这里保留人工预览与导出。</p>
     <button id="capture" class="primary wide" type="button">读取当前可见会话</button>
     <p id="capture-support" class="muted">支持 ChatGPT 和 DeepSeek。不会自动滚动加载历史。</p>
     <div id="capture-panel" hidden>
@@ -38,7 +40,7 @@
     <div id="handoff-panel" hidden><label for="handoff">可复制的上下文</label><textarea id="handoff" readonly rows="9"></textarea><button id="copy-handoff" type="button">复制上下文</button><p class="muted">粘贴到另一个网站后，该网站即可读取这些内容。请先确认适合分享。</p></div>
   </section>
   <details id="advanced" class="card"><summary>高级：查找本机资料并加入当前草稿</summary>
-    <p>需要已连接的本机桥。先把使用说明给当前 AI，再粘贴它的资料请求。</p>
+    <p>已授权的自动接入会准备使用说明并处理完成的只读请求。以下是手动备用入口。网站内部压缩无法观察；需要时重新连接以重附背景。</p>
     <button id="bootstrap" class="secondary" type="button">准备使用说明</button>
     <details><summary>当前连接标识</summary><pre id="binding"></pre></details>
     <label for="action">AI 的资料请求</label><textarea id="action" rows="5" spellcheck="false" placeholder="粘贴完整 recallcard-action 代码块（含首尾标记）"></textarea><button id="execute" type="button">查找资料</button>
@@ -46,7 +48,7 @@
     <p id="privacy" class="muted">加入草稿后，当前网站即可读取这些资料。确认可以分享后，再在网页点击发送。</p>
     <div class="row"><button id="insert" type="button">加入草稿</button><button id="remove" class="secondary" type="button">移除已加入的资料</button></div><button id="delivered" class="quiet" type="button">我已发送</button>
   </details>
-  <details class="help"><summary>支持范围与使用帮助</summary><p>ChatGPT 和 DeepSeek 支持用户主动读取可见文字；DeepSeek 缺少明确角色时，需要你确认“我 / AI”。Qwen、Z.ai 目前仅支持实验性草稿功能。</p><p>不读取私有 API、网络内容、Cookie、令牌或推理过程。未加载历史不会被自动补全；图片与附件原件不包含在本文件中。各网站的功能与条款可能变化，请按自己的账号授权和网站规则使用。</p><p>导出失败时预览仍保留，可以重试。切换对话、输入框重建或可见消息发生变化会废弃旧预览，需要重新读取。扩展从不点击网页发送按钮。</p></details>
+  <details class="help"><summary>支持范围与使用帮助</summary><p>ChatGPT 和 DeepSeek 支持可见文字适配。自动路径只捕获角色与网站消息 ID 都明确的消息；不明确的片段须手动检查。账号身份未核验，授权绑定当前浏览器扩展与所选网站。Qwen、Z.ai 目前仅支持实验性草稿功能。</p><p>不读取私有 API、网络内容、Cookie、令牌或推理过程。未加载历史不会被自动补全；图片与附件原件不包含在本文件中。各网站的功能与条款可能变化，请按自己的账号授权和网站规则使用。</p><p>导出失败时预览仍保留，可以重试。切换对话、输入框重建或可见消息发生变化会废弃旧预览，需要重新读取。扩展从不点击网页发送按钮。</p></details>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/请替换为绝对路径/recallcard",
+            "args": ["--vault", "/请替换为绝对路径/资料库", "agent-hook", "--connection-id", "请替换为连接设置返回的conn编号", "--scope", "project:请替换为已授权项目", "--budget-tokens", "1500"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

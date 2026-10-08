@@ -1,0 +1,38 @@
+/* 连接页使用同一套阅读变量；独立样式避免影响记忆与来源页面。 */
+.connection-inventory { margin: 28px 0; }
+.connection-inventory > .section-heading { gap: 12px; flex-wrap: wrap; }
+.connection-inventory > .section-heading h2 { margin-right: auto; }
+.pairing-requests { display: grid; gap: 10px; margin: 18px 0; }
+.pairing-request { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 16px 0; border-bottom: 1px solid var(--border); }
+.pairing-request p { margin: 4px 0; color: var(--muted); font-size: var(--font-meta); }
+.pairing-request span { color: var(--text-secondary); font-size: var(--font-label); }
+.registered-connections { border-top: 1px solid var(--border); }
+.registered-connection { padding: 20px 0; border-bottom: 1px solid var(--border); }
+.registered-heading { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.registered-heading h3 { margin: 0; font-size: 15px; }
+.registered-heading > span:not(.badge) { color: var(--muted); font-size: var(--font-meta); }
+.connection-permissions, .connection-controls { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 12px; }
+.connection-permissions { font-size: var(--font-label); color: var(--text-secondary); }
+.connection-observations { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 18px 0 10px; }
+.connection-observations dt { color: var(--muted); font-size: var(--font-meta); }
+.connection-observations dd { margin: 5px 0 0; color: var(--text-secondary); font-size: var(--font-label); overflow-wrap: anywhere; }
+.connection-operation-error { color: var(--warning-fg); font-size: var(--font-label); }
+.connection-empty { color: var(--muted); padding: 14px 0; }
+.manual-connection { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 14px; color: var(--muted); font-size: var(--font-label); }
+.manual-connection summary { cursor: pointer; }
+.connection-inventory .permission-dialog { display: grid; gap: 16px; }
+.connection-inventory .permission-dialog > p { margin: 0; }
+.connection-inventory .sub-permission { padding-left: 24px; }
+.connection-inventory .provider-disclosure { padding: 15px; background: var(--surface-subtle); border: 1px solid var(--border); border-radius: var(--radius); }
+.connection-inventory .provider-disclosure p { color: var(--text-secondary); font-size: var(--font-label); }
+.connection-inventory .model-destination { display: flex; align-items: flex-start; gap: 12px; }
+.connection-inventory .model-destination span { display: block; margin-top: 4px; color: var(--muted); font-size: var(--font-label); overflow-wrap: anywhere; }
+.connections-page pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+@media (max-width: 1000px) { .connection-observations { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) {
+  .pairing-request { grid-template-columns: 20px minmax(0, 1fr); }
+  .pairing-request > button { grid-column: 2; justify-self: start; }
+  .connection-inventory > .section-heading h2 { flex-basis: 100%; }
+  .connection-observations { gap: 12px 18px; }
+  .connection-controls { gap: 10px; }
+}

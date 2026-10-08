@@ -15,7 +15,7 @@ with zipfile.ZipFile(archives[0]) as archive:
         path = pathlib.PurePosixPath(entry.filename)
         if path.is_absolute() or '..' in path.parts:
             raise ValueError('打包路径无效')
-        if entry.is_dir() or not (entry.filename.startswith(('third-party-licenses/', 'third-party-source/')) or entry.filename in ('开始使用-中文.md', 'build-info.json', 'recallcard')):
+        if entry.is_dir() or not (entry.filename.startswith(('third-party-licenses/', 'third-party-source/', 'python/')) or entry.filename in ('开始使用-中文.md', 'build-info.json', 'recallcard')):
             continue
         output = destination / pathlib.Path(*path.parts)
         output.parent.mkdir(parents=True, exist_ok=True)

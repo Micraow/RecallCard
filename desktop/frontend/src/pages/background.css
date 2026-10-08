@@ -1,0 +1,295 @@
+/* 主要旅程：先获得可读背景，再按需连接。系统管理不占据首屏。 */
+.background-page {
+  max-width: 1050px;
+  margin: 0 auto;
+  padding: 34px 42px 48px;
+}
+.background-heading {
+  display: flex;
+  gap: 28px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 25px;
+}
+.background-heading h1 {
+  color: var(--text);
+  font-size: 28px;
+  line-height: 1.5;
+  margin: 8px 0 11px;
+}
+.background-heading p {
+  font-size: 14px;
+  color: var(--muted);
+  line-height: 1.9;
+}
+.background-heading > .button {
+  flex-shrink: 0;
+}
+.background-current {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 32px;
+}
+.background-current > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.background-current > div > span:first-of-type {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.background-section {
+  margin-top: 30px;
+}
+.background-section > .section-heading {
+  justify-content: space-between;
+}
+.background-section > .section-heading h2 {
+  color: var(--text);
+  font-size: 15px;
+}
+.background-facts {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--border);
+}
+.background-fact {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--border);
+}
+.fact-heading {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.fact-heading h3 {
+  font-size: 16px;
+  font-weight: 550;
+  color: var(--text);
+}
+.background-fact > p {
+  font-size: 15px;
+  color: var(--text-secondary);
+  line-height: 1.95;
+  white-space: pre-wrap;
+  margin-top: 11px;
+}
+.background-fact footer {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+  margin-top: 15px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.background-fact footer > button:last-child {
+  margin-left: auto;
+}
+.background-conversations {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.context-conversation {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 19px 20px 16px;
+  background: var(--surface);
+}
+.context-conversation-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+}
+.context-conversation-heading h3 {
+  font-size: 15px;
+  font-weight: 550;
+  line-height: 1.7;
+  color: var(--text);
+}
+.context-conversation-heading p {
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--muted);
+  margin-top: 3px;
+}
+.context-excerpt {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.9;
+  margin: 18px 0;
+}
+.context-excerpt > span {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.context-excerpt > p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.context-conversation footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-top: auto;
+}
+.background-boundary {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.9;
+  margin-top: 24px;
+}
+.background-start {
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.background-start h1 {
+  font-size: 26px;
+  color: var(--text);
+}
+.background-start p {
+  font-size: 15px;
+  color: var(--text-secondary);
+  line-height: 2;
+  margin: 18px 0 24px;
+}
+.background-start > span:last-child {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 15px;
+}
+.background-import {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 25px;
+  padding-bottom: 18px;
+}
+.import-reading {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  color: var(--text-secondary);
+}
+.import-reading strong {
+  font-size: 14px;
+  font-weight: 550;
+}
+.import-reading p {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 5px;
+}
+.import-reading > button {
+  margin-left: auto;
+}
+.background-saved {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--success-fg);
+  background: var(--success-bg);
+  font-size: 13px;
+  padding: 11px 14px;
+  border-radius: 6px;
+  margin-bottom: 20px;
+}
+.chatgpt-connection-state {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+  padding: 20px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin: 22px 0;
+}
+.chatgpt-connection-state > div {
+  flex: 1;
+}
+.chatgpt-connection-state strong {
+  color: var(--text);
+  font-size: 15px;
+}
+.chatgpt-connection-state p {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 7px;
+}
+.sidebar-tools {
+  margin-top: auto;
+  padding: 10px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.sidebar-tools > summary {
+  padding: 9px 11px;
+  cursor: pointer;
+}
+.sidebar-tools .workspace-switch {
+  margin: 8px;
+}
+@media (max-width: 1100px) {
+  .background-page {
+    padding: 30px;
+  }
+  .background-conversations {
+    grid-template-columns: 1fr;
+  }
+  .background-heading {
+    align-items: flex-start;
+  }
+}
+@media (max-width: 740px) {
+  .background-page {
+    padding: 26px 20px;
+  }
+  .background-heading {
+    flex-direction: column;
+    gap: 18px;
+  }
+  .background-heading h1 {
+    font-size: 24px;
+  }
+  .background-current {
+    align-items: flex-start;
+  }
+  .background-current > .text-button {
+    white-space: nowrap;
+  }
+  .context-conversation {
+    padding: 17px;
+  }
+  .sidebar-tools > summary {
+    padding: 9px 1px;
+    text-align: center;
+    font-size: 10px;
+  }
+}
+.sidebar > nav {
+  margin-top: 32px;
+}
+.source-position {
+  color: var(--accent);
+  font-size: 12px;
+  margin-bottom: 15px;
+}
+.focused-message {
+  border-left: 3px solid var(--accent);
+  padding-left: 16px;
+}

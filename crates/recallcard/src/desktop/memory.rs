@@ -50,6 +50,32 @@ impl DesktopSession {
         include_hidden: bool,
         offset: usize,
     ) -> Result<Value> {
+        self.memory_page(
+            session_id,
+            scope,
+            if include_hidden { "all" } else { "current" },
+            offset,
+        )
+    }
+    pub fn manage_memories_filtered(
+        &self,
+        session_id: &str,
+        scope: &str,
+        filter: &str,
+        offset: usize,
+    ) -> Result<Value> {
+        if !matches!(filter, "current" | "tentative" | "hidden") {
+            return Err("记忆筛选条件无效".into());
+        }
+        self.memory_page(session_id, scope, filter, offset)
+    }
+    fn memory_page(
+        &self,
+        session_id: &str,
+        scope: &str,
+        filter: &str,
+        offset: usize,
+    ) -> Result<Value> {
         check_scope(scope)?;
         if offset > 1_000_000 {
             return Err("记忆分页参数无效".into());
@@ -70,7 +96,13 @@ impl DesktopSession {
                     .iter()
                     .any(|id| suppressed.contains(id));
             let inactive = !matches!(memory.state, MemoryState::Active | MemoryState::Tentative);
-            if !include_hidden && (hidden || inactive) {
+            let included = match filter {
+                "all" => true,
+                "hidden" => hidden || inactive,
+                "tentative" => !hidden && memory.state == MemoryState::Tentative,
+                _ => !hidden && !inactive,
+            };
+            if !included {
                 continue;
             }
             let can_restore = own_rule(vault, &memory.id)?.is_some_and(|r| r.active);
@@ -96,6 +128,23 @@ impl DesktopSession {
         let vault = self.vault(session_id)?;
         let _guard = vault.read_guard()?;
         scoped_memory(vault, scope, id)
+    }
+
+    /// 深链与列表使用同一隐藏/恢复状态，不能因打开详情而显示为有效。
+    pub fn managed_memory_view(&self, session_id: &str, scope: &str, id: &str) -> Result<Value> {
+        check_scope(scope)?;
+        let vault = self.vault(session_id)?;
+        let _guard = vault.read_guard()?;
+        let memory = scoped_memory(vault, scope, id)?;
+        let suppressed = vault.suppressed_ids()?;
+        let hidden = suppressed.contains(id)
+            || memory
+                .data
+                .source_refs
+                .iter()
+                .any(|id| suppressed.contains(id));
+        let can_restore = own_rule(vault, id)?.is_some_and(|r| r.active);
+        Ok(json!({"memory": memory, "hidden": hidden, "can_restore": can_restore}))
     }
 
     /// 管理页中用户点开一条来源时读取完整原文，包括已被自己的规则隐藏的内容。
@@ -156,7 +205,11 @@ impl DesktopSession {
         after.content = edit.content;
         after.protected = edit.protected;
         after.tags = edit.labels;
+        if after.content != memory.data.content || after.tags != memory.data.tags {
+            after.authority = "user".into();
+        }
         // 纠正正文不改变原证据性质、时间、来源或事实状态。
+        // 用户纠正取得内容所有权；后台整理不能把它继续当可自动覆盖的模型内容。
         after.validate()?;
         vault.validate_evidence(&after)?;
         if after == memory.data {

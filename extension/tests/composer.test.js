@@ -135,3 +135,7 @@ test('无格式的纯文本段重建后仍能只撤销完整注入块',()=>{
   doc.createRange=()=>({setStart(){},setEnd(){},cloneContents(){return{querySelector(){return null;}};},deleteContents(){paragraph.textContent='';}});
   assert.equal(adapter.remove(capsule.id).status,'removed');assert.equal(node.textContent,'');
 });
+test('编辑器重建遗留的无归属上下文块不会再次自动追加',()=>{
+  const {node,adapter}=setup();node.value='用户原草稿\n[RecallCard '+capsule.nonce+':old]\n已有资料\n[/RecallCard '+capsule.nonce+':old]';const before=node.value;
+  assert.throws(()=>adapter.insert(capsule),/不会重复追加/);assert.equal(node.value,before);assert.deepEqual(node.events,[]);
+});

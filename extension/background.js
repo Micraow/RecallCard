@@ -1,7 +1,10 @@
+import { installationIdentity, INSTALLATION_KEY } from './installation.js';
 import { Broker } from './broker.js';
+const installation = installationIdentity(chrome.storage.local);
 const key = (tabId) => `recallcard_tab_${tabId}`;
 const broker = new Broker({
   id: chrome.runtime.id,
+  installationId: () => installation.get(),
   popupUrl: chrome.runtime.getURL('popup.html'),
   getTab: (tabId) => chrome.tabs.get(tabId),
   load: async (tabId) => (await chrome.storage.session.get(key(tabId)))[key(tabId)],
@@ -29,4 +32,11 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
   // A reload or full navigation invalidates all outstanding nonces. SPA route
   // changes additionally rotate the content script's per-route token.
   if (change.status === 'loading') void chrome.storage.session.remove(key(tabId));
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && Object.hasOwn(changes, INSTALLATION_KEY)) {
+    installation.reset();
+    void chrome.storage.session.clear(); // Invalidate pending requests from the previous installation.
+  }
 });

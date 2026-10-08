@@ -1,6 +1,6 @@
 [package]
 name = "recallcard-desktop"
-version = "0.5.0"
+version = "0.6.0-dev"
 edition = "2021"
 rust-version = "1.90"
 description = "RecallCard 中文桌面资料库"

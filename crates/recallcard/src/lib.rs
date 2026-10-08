@@ -23,3 +23,12 @@ pub mod semantic;
 pub mod sync;
 
 pub mod conversation;
+
+pub mod application;
+
+mod filesystem;
+mod vault_stream;
+pub use vault_stream::{ChunkReceipt, EventStreamWriter};
+
+mod build_info;
+pub use build_info::{build_info, BuildInfo};

@@ -50,7 +50,7 @@ test('manifest 权限仅列出明确主机，没有泛域、脚本注入权限�
   assert.match(manifest.content_security_policy.extension_pages,/connect-src 'none'/);
 });
 test('生产代码没有点击发送、Enter 提交、动态执行或网络调用',async()=>{
-  const names=['site-adapters.js','content.js','composer-adapter.js','broker.js','background.js','popup.js','protocol.js','conversation-format.js','conversation-adapters.js'];
+  const names=['site-adapters.js','content.js','composer-adapter.js','automatic.js','installation.js','broker.js','background.js','popup.js','protocol.js','conversation-format.js','conversation-adapters.js'];
   for(const name of names){
     const source=await readFile(new URL('../'+name,import.meta.url),'utf8');
     for(const forbidden of [/\.click\s*\(/u,/\.submit\s*\(/u,/requestSubmit/u,/KeyboardEvent/u,/\beval\s*\(/u,/new Function/u,/\bfetch\s*\(/u,/XMLHttpRequest/u,/postMessage\s*\(/u,/innerHTML\s*=/u]) assert.doesNotMatch(source,forbidden,name);

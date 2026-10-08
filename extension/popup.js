@@ -27,6 +27,14 @@ function render() {
   $('preview').value = state?.preview?.text || '';
   $('privacy').textContent = `加入草稿后，${state?.platform_name || '当前网站'}即可读取这些资料。确认可以分享后，再在网页点击发送。`;
   $('connection-state').textContent = state?.connection ? (state.connection.capture_enabled ? `本机已连接 · 保存到 ${state.connection.vault_name || '资料库'} · ${state.connection.capture_scope || '已授权范围'}` : '本机已连接 · 尚未授权保存，请在桌面连接设置中开启') : '本机连接尚未确认 · 导出无需连接';
+  if ($('connection-code')) $('connection-code').textContent = state?.installation_id && state?.extension_id ? `recallcard-connect/1:${state.extension_id}:${state.installation_id}` : '正在确认本机安装编号';
+  if (state?.connection?.setup_required) $('connection-state').textContent += ' · 此安装尚未授权，请完成首次连接';
+  if (state?.connection?.automation) { const grant = state.connection.automation; $('connection-state').textContent += ` · 自动捕获${grant.capture ? '开启' : '暂停'} · 自动草稿${grant.recall ? '开启' : '暂停'} · 账号未核验`; }
+  if (state?.last_capture_at) $('connection-state').textContent += ` · 最近保存 ${state.last_capture_at}`;
+  if (state?.automatic_status === 'waiting_for_conversation_identity') $('connection-state').textContent += ' · 等待网站完成会话切换';
+  if (state?.automatic_status === 'waiting_for_stable_page') $('connection-state').textContent += ' · 等待生成结束与页面稳定';
+  if (state?.automatic_error) $('connection-state').textContent += ` · ${state.automatic_error}`;
+  if (state?.auto_capture_note) $('connection-state').textContent += ` · ${state.auto_capture_note}`;
   $('capture-support').textContent = supportedCapture() ? '仅读取已加载且可见的普通文字，不自动滚动。DeepSeek 中未明确的角色需要你确认。' : '此网站尚未验证会话读取；可展开高级区使用草稿功能，或用网站官方导出。';
   for (const button of document.querySelectorAll('button')) button.disabled = busy || !state;
   $('reset').disabled = busy || !canReset;
@@ -163,3 +171,14 @@ if (typeof setInterval !== 'undefined') setInterval(async () => {
   try { await send('check_state'); }
   catch { discardCapture(); state = null; status('当前会话、输入框或可见消息已变化。旧预览已废弃，请重新连接并读取。', true); render(); }
 }, 1000);
+
+$('copy-connection')?.addEventListener('click', () => void operation(async () => {
+  if (!state?.installation_id || !state?.extension_id) throw new Error('本机安装编号尚未确认');
+  await navigator.clipboard.writeText(`recallcard-connect/1:${state.extension_id}:${state.installation_id}`);
+  status('连接编号已复制。请在桌面连接设置中选择网站和范围，确认后保存授权。');
+}));
+
+$('request-pairing')?.addEventListener('click', () => void operation(async () => {
+  const pending = await send('pair');
+  status(`连接请求已发到本机。请到桌面“连接”页选择范围并批准；请求10分钟内有效。批准前没有资料读取或捕获权限。`);
+}));

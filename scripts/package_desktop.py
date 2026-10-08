@@ -64,7 +64,9 @@ def main():
                 or provenance['acceptance']['commit'] != args.acceptance_commit
                 or provenance['acceptance']['run_id'] != args.acceptance_run_id):
             parser.error('成品来源与命令行身份不一致')
-    guide = (ROOT/'docs/desktop-quickstart-v0.5.md').read_text()
+    version=json.loads((ROOT/'desktop/src-tauri/tauri.conf.json').read_text())['version']
+    guide_name='desktop-quickstart-v0.6.md' if version.startswith('0.6.') else 'desktop-quickstart-v0.5.md'
+    guide = (ROOT/'docs'/guide_name).read_text()
     guide = re.sub(r'\]\(([^)]+)\)', lambda match: match[0] if re.match(r'(?:[a-zA-Z][a-zA-Z0-9+.-]*:|/|#)', match[1]) else f'](docs/{match[1]})', guide)
     files = {
         'recallcard-desktop': (args.binary.read_bytes(), True),
@@ -79,6 +81,20 @@ def main():
     for path in (ROOT/'extension').iterdir():
         if path.is_file() and (path.suffix in {'.js','.html','.css'} or path.name == 'manifest.json'):
             files['extension/'+path.name] = (path.read_bytes(), False)
+    # 可选后台整理的公开 Python 代码随读取组件分发，不包含任何配置或凭据。
+    for module in ['recallcard_dream', 'recallcard_worker']:
+        directory=ROOT/'python'/module
+        for path in directory.rglob('*.py'):
+            if path.is_symlink(): raise ValueError('Python 资源不能为符号链接')
+            files[path.relative_to(ROOT).as_posix()] = (path.read_bytes(), False)
+    # React 实际进入嵌入页面，必须与 Rust 依赖一起保留许可证正文。
+    frontend_manifest=ROOT/'desktop/package.json'
+    if frontend_manifest.exists():
+        for name in ['react', 'react-dom', 'scheduler']:
+            directory=ROOT/'desktop/node_modules'/name
+            manifest=json.loads((directory/'package.json').read_text())
+            license_file=directory/'LICENSE'
+            files[f"third-party-licenses/npm-{name}-{manifest['version']}/LICENSE"]=(license_file.read_bytes(),False)
     notices = []
     packages = resolved_packages(args.metadata)
     for package in packages:
@@ -115,7 +131,7 @@ def main():
         symbols=subprocess.check_output(['readelf','--version-info',str(binary)],text=True)
         versions.update(re.findall(r'GLIBC_([0-9.]+)',symbols))
     minimum=max(versions,key=lambda s:tuple(map(int,s.split('.'))))
-    info = {'application':f'RecallCard Desktop {version}','commit':args.commit,'packaging_commit':args.packaging_commit or args.commit,'target':'linux-x86_64','profile':args.profile,'gui_sha256':digest(files['recallcard-desktop'][0]),'cli_sha256':digest(files['recallcard'][0]),'requires':['Git',f'GLIBC >= {minimum}','GTK 3','WebKitGTK 4.1'],'note':'系统运行库由系统包管理器提供；本包不包含任何用户资料、凭据、浏览器状态或可选API配置。'}
+    info = {'application':f'RecallCard Desktop {version}','commit':args.commit,'packaging_commit':args.packaging_commit or args.commit,'target':'linux-x86_64','profile':args.profile,'gui_sha256':digest(files['recallcard-desktop'][0]),'cli_sha256':digest(files['recallcard'][0]),'requires':['Git',f'GLIBC >= {minimum}','GTK 3','WebKitGTK 4.1'],'optional_requires':{'background_model':'Python 3'},'note':'系统运行库由系统包管理器提供；本包不包含任何用户资料、凭据、浏览器状态或可选API配置。'}
     if args.acceptance_commit:
         info['native_acceptance'] = {'commit':args.acceptance_commit,'run_id':args.acceptance_run_id,'url':f'https://github.com/Micraow/RecallCard/actions/runs/{args.acceptance_run_id}'}
     if provenance is not None:

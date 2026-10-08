@@ -79,3 +79,50 @@ pub fn session_start<R: Read>(
     }
     Ok(output)
 }
+
+/// 新连接流程：客户端身份从可信启动参数固定，stdin 不能选择或扩大授权。
+/// 观察只证明宿主进程取走了启动输出，不证明模型理解或采用。
+pub fn session_start_connected<R: Read>(
+    vault: &Vault,
+    connection_id: &str,
+    access: Access,
+    budget_tokens: usize,
+    reader: R,
+) -> Result<Value> {
+    use crate::application::connections;
+    let entry = connections::get(vault, connection_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("Agent 连接尚未配置")?;
+    let authorization = connections::authorize(vault, connection_id, entry.permission_revision)
+        .map_err(|e| e.to_string())?;
+    let grant = &authorization.entry.grant;
+    if grant.client_kind != "claude_code" || !grant.auto_recall || !grant.provider_disclosure {
+        return Err("此 Agent 未授权在生命周期自动接收背景资料".into());
+    }
+    let result = session_start(
+        vault,
+        Access::new(
+            grant
+                .recall_scopes
+                .iter()
+                .filter(|scope| access.permits(scope))
+                .cloned()
+                .collect(),
+        )?,
+        budget_tokens,
+        reader,
+    );
+    drop(authorization);
+    connections::observe(
+        vault,
+        connection_id,
+        entry.permission_revision,
+        if result.is_ok() {
+            "bootstrap"
+        } else {
+            "failed"
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    result
+}

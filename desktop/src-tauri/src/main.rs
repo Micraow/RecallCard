@@ -43,6 +43,355 @@ async fn execute<T: serde::Serialize + Send + 'static>(
     .await
     .map_err(|_| "本地操作未完成，请重试；资料库仍保存在原目录".to_string())?
 }
+#[tauri::command]
+fn build_info() -> recallcard::BuildInfo {
+    recallcard::build_info()
+}
+
+// v0.6 GUI 与 CLI 共用应用任务，保留结构化错误，不吞掉文件/恢复诊断。
+async fn execute_application<T: serde::Serialize + Send + 'static>(
+    service: Service,
+    f: impl FnOnce(&mut DesktopSession) -> recallcard::application::AppResult<T> + Send + 'static,
+) -> recallcard::application::AppResult<T> {
+    use recallcard::application::{AppError, ErrorCode};
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut session = service.lock().map_err(|_| {
+            AppError::new(
+                ErrorCode::Internal,
+                "本地资料服务暂不可用",
+                "重新打开应用后重试",
+            )
+        })?;
+        f(&mut session)
+    })
+    .await
+    .map_err(|_| {
+        AppError::new(
+            ErrorCode::Internal,
+            "本地操作未完成",
+            "重新读取任务状态，确认已保存的内容后再继续",
+        )
+    })?
+}
+
+#[tauri::command]
+async fn import_sources(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    request_id: String,
+) -> recallcard::application::AppResult<Option<recallcard::application::JobStatus>> {
+    use recallcard::application::{AppError, ErrorCode};
+    let guard = dialog_guard(&state)
+        .map_err(|message| AppError::new(ErrorCode::Conflict, message, "先完成当前文件选择"))?;
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        app.dialog()
+            .file()
+            .set_title("添加来源：选择官方导出文件")
+            .add_filter("会话导出", &["json", "zip"])
+            .blocking_pick_files()
+    })
+    .await
+    .map_err(|_| {
+        AppError::new(
+            ErrorCode::Internal,
+            "文件选择未完成",
+            "重新选择本机导出文件",
+        )
+    })?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let paths = selected
+        .into_iter()
+        .map(|path| {
+            path.into_path().map_err(|_| {
+                AppError::new(
+                    ErrorCode::InvalidRequest,
+                    "所选来源不是本机文件",
+                    "下载导出文件后重新选择",
+                )
+            })
+        })
+        .collect::<recallcard::application::AppResult<Vec<_>>>()?;
+    execute_application(state.service.clone(), move |service| {
+        service
+            .application_import_sources(&session_id, &scope, &request_id, &paths)
+            .map(Some)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn application_jobs(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<Vec<recallcard::application::JobStatus>> {
+    execute_application(state.service.clone(), move |service| {
+        service.application_jobs(&session_id, &scope)
+    })
+    .await
+}
+#[tauri::command]
+async fn application_job(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    job_id: String,
+) -> recallcard::application::AppResult<recallcard::application::JobStatus> {
+    execute_application(state.service.clone(), move |service| {
+        service.application_job(&session_id, &scope, &job_id)
+    })
+    .await
+}
+#[tauri::command]
+async fn application_import_result(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    job_id: String,
+) -> recallcard::application::AppResult<recallcard::application::ImportResult> {
+    execute_application(state.service.clone(), move |service| {
+        service.application_import_result(&session_id, &scope, &job_id)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn application_job_pause(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    job_id: String,
+) -> recallcard::application::AppResult<recallcard::application::JobStatus> {
+    execute_application(state.service.clone(), move |service| {
+        service.application_job_pause(&session_id, &scope, &job_id)
+    })
+    .await
+}
+#[tauri::command]
+async fn application_job_resume(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    job_id: String,
+) -> recallcard::application::AppResult<recallcard::application::JobStatus> {
+    execute_application(state.service.clone(), move |service| {
+        service.application_job_resume(&session_id, &scope, &job_id)
+    })
+    .await
+}
+// 只在取得有身份绑定的句柄时持有资料会话锁；凭据访问和停机等待在锁外执行。
+async fn execute_model<T: serde::Serialize + Send + 'static>(
+    service: Service,
+    session_id: String,
+    scope: String,
+    operation: impl FnOnce(recallcard::desktop::ModelOperation) -> recallcard::application::AppResult<T>
+        + Send
+        + 'static,
+) -> recallcard::application::AppResult<T> {
+    use recallcard::application::{AppError, ErrorCode};
+    tauri::async_runtime::spawn_blocking(move || {
+        let handle = {
+            let selected = service.lock().map_err(|_| {
+                AppError::new(
+                    ErrorCode::Internal,
+                    "本机资料会话暂不可用",
+                    "重新打开空间后重试",
+                )
+            })?;
+            selected.model_operation(&session_id, &scope)?
+        };
+        operation(handle)
+    })
+    .await
+    .map_err(|_| {
+        AppError::new(
+            ErrorCode::Internal,
+            "本机模型操作未完成",
+            "先检查实际服务状态，勿重复提交密钥",
+        )
+    })?
+}
+
+#[tauri::command]
+async fn model_setup_status(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<recallcard::desktop::ModelSetupStatus> {
+    execute_model(state.service.clone(), session_id, scope, |operation| {
+        operation.status()
+    })
+    .await
+}
+#[tauri::command]
+async fn inspect_model_credential(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    target: recallcard::application::background_memory::MemoryProviderConfig,
+) -> recallcard::application::AppResult<recallcard::application::credentials::CredentialStatus> {
+    execute_model(state.service.clone(), session_id, scope, move |operation| {
+        operation.inspect_credential(target)
+    })
+    .await
+}
+#[tauri::command]
+async fn configure_memory_model(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    config: recallcard::application::background_memory::MemoryConfig,
+    api_key: Option<String>,
+    credential_storage: Option<recallcard::application::credentials::CredentialStorage>,
+) -> recallcard::application::AppResult<recallcard::application::runtime::ProviderSetupResult> {
+    execute_model(state.service.clone(), session_id, scope, move |operation| {
+        operation.configure(config, api_key, credential_storage)
+    })
+    .await
+}
+#[tauri::command]
+async fn stop_local_service(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<recallcard::application::runtime::ServiceStatus> {
+    execute_model(state.service.clone(), session_id, scope, |operation| {
+        operation.stop_service()
+    })
+    .await
+}
+#[tauri::command]
+async fn memory_job_control(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    job_id: String,
+    action: recallcard::application::background_memory::MemoryJobControl,
+) -> recallcard::application::AppResult<
+    recallcard::application::JobStatus<recallcard::application::background_memory::MemoryProgress>,
+> {
+    execute_model(state.service.clone(), session_id, scope, move |operation| {
+        operation.control(&job_id, action)
+    })
+    .await
+}
+#[tauri::command]
+async fn memory_job_review(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    job_id: String,
+) -> recallcard::application::AppResult<recallcard::application::background_memory::MemoryJobReview>
+{
+    execute_model(state.service.clone(), session_id, scope, move |operation| {
+        operation.review(&job_id)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn connection_inventory(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<Value> {
+    execute_application(state.service.clone(), move |service| {
+        service.connection_inventory(&session_id, &scope)
+    })
+    .await
+}
+#[tauri::command]
+async fn connection_configure(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    grant: recallcard::application::connections::ConnectionGrant,
+    expected_revision: Option<u64>,
+) -> recallcard::application::AppResult<recallcard::application::connections::ConnectionEntry> {
+    execute_application(state.service.clone(), move |service| {
+        service.connection_configure(&session_id, &scope, grant, expected_revision)
+    })
+    .await
+}
+#[tauri::command]
+async fn connection_approve_pairing(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    request_id: String,
+    grant: recallcard::application::connections::ConnectionGrant,
+    expected_revision: Option<u64>,
+) -> recallcard::application::AppResult<recallcard::application::connections::ConnectionEntry> {
+    execute_application(state.service.clone(), move |service| {
+        service.connection_approve_pairing(
+            &session_id,
+            &scope,
+            &request_id,
+            grant,
+            expected_revision,
+        )
+    })
+    .await
+}
+#[tauri::command]
+async fn connection_revoke(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    id: String,
+    expected_revision: u64,
+) -> recallcard::application::AppResult<recallcard::application::connections::ConnectionEntry> {
+    execute_application(state.service.clone(), move |service| {
+        service.connection_revoke(&session_id, &scope, &id, expected_revision)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn memory_runtime_status(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<
+    recallcard::application::background_memory::MemoryRuntimeStatus,
+> {
+    execute_application(state.service.clone(), move |service| {
+        service.memory_runtime_status(&session_id, &scope)
+    })
+    .await
+}
+#[tauri::command]
+async fn manage_memories_filtered(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    filter: String,
+    offset: usize,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |service| {
+        service.manage_memories_filtered(&session_id, &scope, &filter, offset)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn managed_memory_view(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    id: String,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |service| {
+        service.managed_memory_view(&session_id, &scope, &id)
+    })
+    .await
+}
+
 /// 仅本地主窗口明确点击复制时写纯文本；不开放系统剪贴板读取。
 #[tauri::command]
 fn write_clipboard(
@@ -580,14 +929,8 @@ fn packaged_cli(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .find(|p| p.is_file())
         .ok_or("当前安装包缺少连接组件，请使用包含 recallcard 的完整运行包或新版安装包".into())
 }
-#[tauri::command]
-async fn prepare_client_config(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    session_id: String,
-    scope: String,
-) -> Result<Value, String> {
-    let bundled = packaged_cli(&app)?;
+fn prepare_client_binary(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let bundled = packaged_cli(app)?;
     let bytes = std::fs::read(&bundled).map_err(|_| "无法读取随包连接组件")?;
     let directory = app
         .path()
@@ -639,12 +982,66 @@ async fn prepare_client_config(
                 .map_err(|_| "无法恢复组件执行权限")?;
         }
     }
+    Ok(binary)
+}
+
+#[tauri::command]
+async fn prepare_client_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> Result<Value, String> {
+    let binary = prepare_client_binary(&app)?;
     execute(state.service.clone(),move|s|{
         let info=s.status(&session_id)?;
         recallcard::policy::Access::new(vec![scope.clone()])?;
         Ok(serde_json::json!({"mcpServers":{"recallcard":{"command":binary,"args":["--vault",info.root,"mcp","--scope",scope]}}}))
     }).await
 }
+#[tauri::command]
+async fn chatgpt_connection_plan(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<Value> {
+    use recallcard::application::{AppError, ErrorCode};
+    let binary = prepare_client_binary(&app).map_err(|message| {
+        AppError::new(
+            ErrorCode::ModelUnavailable,
+            message,
+            "先安装包含本机读取组件的完整程序",
+        )
+    })?;
+    execute_application(state.service.clone(), move |service| {
+        service.chatgpt_connection_plan(&session_id, &scope, &binary)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn connection_agent_configs(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    id: String,
+) -> recallcard::application::AppResult<Value> {
+    use recallcard::application::{AppError, ErrorCode};
+    let binary = prepare_client_binary(&app).map_err(|message| {
+        AppError::new(
+            ErrorCode::ModelUnavailable,
+            message,
+            "请使用含本机连接组件的完整安装包",
+        )
+    })?;
+    execute_application(state.service.clone(), move |service| {
+        service.connection_agent_configs(&session_id, &scope, &id, &binary)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn install_browser_connection(
     app: AppHandle,
@@ -939,6 +1336,28 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            build_info,
+            import_sources,
+            application_jobs,
+            application_job,
+            application_import_result,
+            application_job_pause,
+            application_job_resume,
+            memory_runtime_status,
+            model_setup_status,
+            inspect_model_credential,
+            configure_memory_model,
+            stop_local_service,
+            memory_job_control,
+            memory_job_review,
+            connection_inventory,
+            connection_configure,
+            connection_agent_configs,
+            chatgpt_connection_plan,
+            connection_approve_pairing,
+            connection_revoke,
+            managed_memory_view,
+            manage_memories_filtered,
             choose_vault,
             open_default_workspace,
             remember_workspace,

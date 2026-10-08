@@ -371,6 +371,21 @@ impl EventInput {
             )
         })
     }
+    /// 修订身份包括资料范围；结构化编码避免来源字段里的分隔符造成碰撞。
+    /// source_key 保持旧版语义，供已有来源/抑制记录兼容读取。
+    pub fn revision_key(&self) -> String {
+        hash(
+            serde_json::json!([
+                self.scope,
+                self.source.platform,
+                self.source.account_namespace,
+                self.source.conversation_id,
+                self.source.message_id
+            ])
+            .to_string()
+            .as_bytes(),
+        )
+    }
     pub fn source_key(&self) -> String {
         format!(
             "{}\0{}\0{}\0{}",

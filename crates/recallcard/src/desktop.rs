@@ -4,6 +4,8 @@
 //! 和审查令牌。预览只读；确认命令只接受保存在本机内存中的预览编号，不接受替代路径
 //! 或替代内容。错误不转发解析器、操作系统或 Git 输出中的文件正文、秘密和路径。
 //! 多文件导入的后台线程不持桌面会话锁；宿主应轮询状态，不能持锁等待任务完成。
+mod application;
+mod application_connections;
 mod background;
 mod branches;
 mod handoff;
@@ -15,6 +17,8 @@ pub use background::{BackgroundCandidate, BackgroundPage, BackgroundReview};
 pub use imports::{ImportJobFile, ImportJobPreview, ImportJobState, ImportJobStatus};
 pub use memory::{MemoryEdit, MemoryReview};
 pub use recent::RestoredWorkspace;
+
+use crate::filesystem::{file_identity, open_local_file, FileIdentity};
 
 use crate::{
     capture::redact_event,
@@ -31,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
+    fs,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -185,21 +189,6 @@ struct FileSnapshot {
     identity: FileIdentity,
     hash: String,
     bytes: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct FileIdentity {
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(windows)]
-    volume_serial: u32,
-    #[cfg(windows)]
-    file_index: u64,
-    #[cfg(not(any(unix, windows)))]
-    created: std::time::SystemTime,
 }
 
 impl DesktopSession {
@@ -908,12 +897,24 @@ impl DesktopSession {
             let key = event.data.session_key();
             let title = records::conversation_title(&event);
             let group = groups.entry(key.clone()).or_insert_with(|| json!({"session_ref":key,"title":title,
-                "platform":event.data.source.platform,"source_url":event.data.source.url,"message_count":0,"captured_at":event.captured_at,"coverage":"partial"}));
+                "platform":event.data.source.platform,"source_url":event.data.source.url,"message_count":0,"captured_at":event.captured_at,"last_occurred_at":event.data.occurred_at,"coverage":"partial"}));
             group["message_count"] = json!(group["message_count"].as_u64().unwrap_or(0) + 1);
-            group["captured_at"] = json!(event.captured_at);
+            let captured = json!(event.captured_at);
+            if captured.as_str() > group["captured_at"].as_str() {
+                group["captured_at"] = captured;
+            }
+            let occurred = json!(event.data.occurred_at);
+            if occurred.as_str() > group["last_occurred_at"].as_str() {
+                group["last_occurred_at"] = occurred;
+            }
         }
         let mut groups: Vec<_> = groups.into_values().collect();
-        groups.sort_by(|a, b| b["captured_at"].as_str().cmp(&a["captured_at"].as_str()));
+        groups.sort_by(|a, b| {
+            b["last_occurred_at"]
+                .as_str()
+                .cmp(&a["last_occurred_at"].as_str())
+                .then_with(|| a["session_ref"].as_str().cmp(&b["session_ref"].as_str()))
+        });
         let total = groups.len();
         let groups: Vec<_> = groups.into_iter().skip(offset).take(50).collect();
         let next = offset + groups.len();
@@ -963,7 +964,7 @@ impl DesktopSession {
             let text = event.data.text();
             let mut clipped = truncate_utf8(&text, 6000);
             let mut row = json!({"ref":format!("event:{}",event.id),"role":event.data.role,"text":clipped,"occurred_at":event.data.occurred_at,
-                "captured_at":event.captured_at,"text_truncated":clipped.len()!=text.len(),"coverage":event.data.capture,"source":event.data.source,"branch":branches.annotation(*index)});
+                "captured_at":event.captured_at,"text_truncated":clipped.len()!=text.len(),"coverage":event.data.capture,"source":event.data.source,"branch":branches.annotation(*index),"assets":records::source_assets(event)});
             let mut bytes = serde_json::to_vec(&row).map_err(|e| e.to_string())?.len();
             // JSON 转义也占预算；即使首条正文全是控制字符，也不能绕过单页上限。
             while rows.is_empty() && bytes + summary_size > 28_000 {
@@ -1185,72 +1186,8 @@ fn health_error() -> String {
     "资料库校验失败或正在更新，请检查文件完整性、Git 冲突和待恢复的 Dream 事务".into()
 }
 
-fn file_identity(file: &File) -> Result<FileIdentity> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = file.metadata().map_err(|_| STALE_FILE)?;
-        Ok(FileIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
-        };
-        let mut information = BY_HANDLE_FILE_INFORMATION::default();
-        // SAFETY: File 保持句柄有效，information 是可写且大小正确的完整结构；此调用不接管句柄。
-        let success = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
-        if success == 0 || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err("无法安全核对所选文件的身份，请选择本地普通文件或目录".into());
-        }
-        // NTFS tunneling 可以保留同名替代文件的创建时间，因此不得用时间当文件标识。
-        Ok(FileIdentity {
-            volume_serial: information.dwVolumeSerialNumber,
-            file_index: (u64::from(information.nFileIndexHigh) << 32)
-                | u64::from(information.nFileIndexLow),
-        })
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        Ok(FileIdentity {
-            created: file
-                .metadata()
-                .map_err(|_| STALE_FILE)?
-                .created()
-                .map_err(|_| "此文件系统无法提供稳定文件标识，请选择本地资料库")?,
-        })
-    }
-}
-
 fn path_identity(path: &Path) -> Result<FileIdentity> {
     file_identity(&open_local_file(path)?)
-}
-
-fn open_local_file(path: &Path) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // 检查后若变为 FIFO 或链接，也不能阻塞桌面线程或跟随最终链接。
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        };
-        // BACKUP_SEMANTICS 允许读取目录身份；OPEN_REPARSE_POINT 不跟随最终重解析点。
-        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options
-        .open(path)
-        .map_err(|_| "无法读取所选文件，请检查访问权限".into())
 }
 
 fn reject_selected_file_symlinks(path: &Path) -> Result<()> {
@@ -1377,3 +1314,6 @@ fn validate_import_format(format: &str) -> Result<()> {
 fn archive_error() -> String {
     "ZIP 备份无法安全读取：请检查格式；压缩包上限 64 MiB，单个 JSON 上限 16 MiB，展开内容上限 128 MiB，最多 2048 项。不会解压到磁盘或写入资料库。".into()
 }
+
+mod application_model;
+pub use application_model::{ModelOperation, ModelSetupStatus};

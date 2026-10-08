@@ -297,3 +297,29 @@ fn editing_assistant_derived_memory_does_not_promote_it_to_user_fact() {
     );
     assert_eq!(current.state, recallcard::MemoryState::Tentative);
 }
+
+#[test]
+fn labels_only_correction_takes_ownership_without_promoting_evidence() {
+    let (_dir, mut ui, info, vault, event, _) = setup();
+    let memory = vault.add_memory(serde_json::from_value(json!({"content":"合成的助手建议","source_refs":[event.id],"evidence":"assistant_suggestion","scope":"personal","protected":false,"authority":"dream"})).unwrap()).unwrap();
+    let review = ui
+        .review_memory_edit(
+            &info.session_id,
+            "personal",
+            &memory.id,
+            1,
+            MemoryEdit {
+                content: memory.data.content.clone(),
+                protected: false,
+                labels: vec!["用户分类".into()],
+            },
+        )
+        .unwrap();
+    ui.confirm_memory_change(&info.session_id, &review.preview_id, false)
+        .unwrap();
+    let updated = vault.memory(&memory.id).unwrap();
+    assert_eq!(updated.data.authority, "user");
+    assert_eq!(updated.data.evidence, memory.data.evidence);
+    assert_eq!(updated.state, memory.state);
+    assert_eq!(updated.data.source_refs, memory.data.source_refs);
+}

@@ -128,16 +128,21 @@ fn run_launcher(executable: &Path, arguments: Vec<OsString>) -> Result<()> {
     if let Some(endpoint) = config.ipc_endpoint {
         let client =
             crate::ipc::Client::new(&vault, &access, endpoint, std::time::Duration::from_secs(5))?;
-        return serve_native_service_io(
-            |name, args| {
+        return serve_native_bound_service_io(
+            |name, args, session, installation| {
                 browser_operation(
                     &vault,
                     &access,
                     config.capture_scope.as_deref(),
+                    &config.extension_id,
+                    (session, installation),
                     name,
                     &args,
                 )
                 .unwrap_or_else(|| client.invoke(name, args))
+            },
+            |session, installation| {
+                connection_revision(&vault, &config.extension_id, session, installation)
             },
             &config.extension_id,
             origin,
@@ -257,6 +262,7 @@ struct NativeRequest {
     #[serde(default)]
     arguments: Option<Value>,
     session_ref: String,
+    installation_id: Option<String>,
 }
 pub fn extension_origin(id: &str) -> Result<String> {
     if id.len() != 32 || !id.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
@@ -299,11 +305,20 @@ pub fn serve_native_capture_io<R: Read, W: Write>(
         return Err("浏览器保存范围不在本机允许名单中".into());
     }
     let context = Context::new(vault, access.clone());
-    serve_native_service_io(
-        |name, args| {
-            browser_operation(vault, &access, capture_scope, name, &args)
-                .unwrap_or_else(|| invoke(&context, name, args))
+    serve_native_bound_service_io(
+        |name, args, session, installation| {
+            browser_operation(
+                vault,
+                &access,
+                capture_scope,
+                extension,
+                (session, installation),
+                name,
+                &args,
+            )
+            .unwrap_or_else(|| invoke(&context, name, args))
         },
+        |session, installation| connection_revision(vault, extension, session, installation),
         extension,
         origin,
         reader,
@@ -311,29 +326,247 @@ pub fn serve_native_capture_io<R: Read, W: Write>(
     )
 }
 
+fn connection_revision(
+    vault: &Vault,
+    extension: &str,
+    session: &str,
+    installation: Option<&str>,
+) -> Result<String> {
+    use crate::application::connections;
+    let id = connections::connection_key(
+        "browser",
+        extension,
+        session.split(':').next().unwrap_or(""),
+        installation,
+    );
+    Ok(connections::get(vault, &id)
+        .map_err(|e| e.to_string())?
+        .map(|entry| format!("{}:{}", entry.permission_revision, entry.revoked))
+        .unwrap_or_default())
+}
+
 fn browser_operation(
     vault: &Vault,
     access: &Access,
     capture_scope: Option<&str>,
+    extension: &str,
+    binding: (&str, Option<&str>),
     name: &str,
     args: &Value,
 ) -> Option<Result<Value>> {
-    if !matches!(name, "connection" | "capture_preview" | "capture_save") {
+    use crate::application::connections;
+    let (session, installation) = binding;
+    let reading = matches!(name, "bootstrap" | "search" | "read" | "sources");
+    // Preserve explicitly installed legacy IPC routing only when no managed
+    // browser grant exists. Managed installations never fall back to broad scopes.
+    if reading && installation.is_none() {
+        match connections::has_browser_binding(vault, extension) {
+            Ok(false) => return None,
+            Ok(true) => {}
+            Err(error) => return Some(Err(error.to_string())),
+        }
+    }
+
+    if !reading
+        && !matches!(
+            name,
+            "connection"
+                | "request_pairing"
+                | "capture_preview"
+                | "capture_save"
+                | "automatic_capture"
+                | "authorized_read"
+        )
+    {
         return None;
     }
-    Some((|| {
+    let outcome = (|| {
+        let platform = session.split(':').next().unwrap_or("");
+        let id = connections::connection_key("browser", extension, platform, installation);
+        let entry = connections::get(vault, &id).map_err(|e| e.to_string())?;
+        if name == "request_pairing" {
+            if args.as_object().is_none_or(|args| !args.is_empty()) {
+                return Err("连接请求不能自带授权、范围或身份参数".into());
+            }
+            let installation = installation.ok_or("请先更新扩展，连接请求需要本机安装编号")?;
+            let pending = connections::request_pairing(
+                vault,
+                extension,
+                installation,
+                platform,
+                access.scopes(),
+                capture_scope.map(str::to_string).into_iter().collect(),
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(
+                json!({"status":"pending","request_id":pending.request_id,"expires_at":pending.expires_at,"platform":pending.platform,"installation_id":pending.installation_id,"data_access":false}),
+            );
+        }
+        let setup_required = entry.is_none()
+            && (installation.is_some()
+                || connections::has_browser_binding(vault, extension)
+                    .map_err(|e| e.to_string())?);
         if name == "connection" {
             if args.as_object().is_none_or(|a| !a.is_empty()) {
                 return Err("连接检查不接受额外参数".into());
             }
+            if let Some(entry) = &entry {
+                if !entry.revoked {
+                    connections::observe(vault, &id, entry.permission_revision, "handshake")
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            let active = entry.as_ref().filter(|entry| !entry.revoked);
+            let disclose_configuration =
+                !setup_required && entry.as_ref().is_none_or(|entry| !entry.revoked);
             return Ok(
-                json!({"connection_id":crate::conversation::connection_id(vault,capture_scope.unwrap_or("read-only"))?,"capture_enabled":capture_scope.is_some(),"capture_scope":capture_scope,"read_scopes":access.scopes(),
-                "vault_name":vault.root().file_name().and_then(|s|s.to_str()).unwrap_or("RecallCard"),"protocol":"recallcard.conversation/1"}),
+                json!({"connection_id":crate::conversation::connection_id(vault,capture_scope.unwrap_or("read-only"))?,
+                "capture_enabled":!setup_required && capture_scope.is_some() && entry.as_ref().is_none_or(|entry|!entry.revoked && capture_scope.is_some_and(|scope|entry.grant.capture_scopes.iter().any(|s|s==scope))),
+                "capture_scope":capture_scope.filter(|_|disclose_configuration),"read_scopes":if disclose_configuration {access.scopes()} else {Vec::<String>::new()},"vault_name":if disclose_configuration {vault.root().file_name().and_then(|s|s.to_str()).unwrap_or("RecallCard")} else {"RecallCard"},"protocol":"recallcard.conversation/1",
+                "automation":active.map(|entry|json!({"grant_id":entry.id,"permission_revision":entry.permission_revision,"capture":entry.grant.auto_capture && capture_scope.is_some_and(|scope|entry.grant.capture_scopes.iter().any(|s|s==scope)),"recall":entry.grant.auto_recall && entry.grant.provider_disclosure && entry.grant.recall_scopes.iter().any(|scope|access.permits(scope)),"provider_disclosure":entry.grant.provider_disclosure,"platform":entry.grant.platform,"account_identity":"unverified"})),
+                "installation_id":installation,"setup_required":setup_required,"state":entry.as_ref().map(|entry|if entry.revoked {"revoked"} else {"reachable"}).unwrap_or("reachable"),"account_identity":"unverified"}),
             );
         }
+        if setup_required {
+            return Err("此浏览器安装尚未授权，请用扩展显示的连接编号完成本机设置".into());
+        }
+        if reading {
+            if let Some(entry) = entry {
+                let authorization = connections::authorize(vault, &id, entry.permission_revision)
+                    .map_err(|e| e.to_string())?;
+                if !authorization.entry.grant.provider_disclosure {
+                    return Err("未授权向此网站准备资料".into());
+                }
+                let scopes = entry
+                    .grant
+                    .recall_scopes
+                    .into_iter()
+                    .filter(|scope| access.permits(scope))
+                    .collect();
+                let result = invoke(
+                    &Context::new(vault, Access::new(scopes)?),
+                    name,
+                    args.clone(),
+                )?;
+                drop(authorization);
+                connections::observe(
+                    vault,
+                    &id,
+                    entry.permission_revision,
+                    if name == "bootstrap" {
+                        "bootstrap"
+                    } else {
+                        "read"
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                return Ok(result);
+            }
+            return invoke(&Context::new(vault, access.clone()), name, args.clone());
+        }
+        let object = args.as_object().ok_or("会话请求必须为对象")?;
+        if name == "automatic_capture" || name == "authorized_read" {
+            let fields: &[&str] = if name == "automatic_capture" {
+                &["conversation", "permission_revision"]
+            } else {
+                &["action", "arguments", "permission_revision"]
+            };
+            if object.len() != fields.len()
+                || object.keys().any(|key| !fields.contains(&key.as_str()))
+            {
+                return Err("自动请求不能附加授权、scope、路径或身份".into());
+            }
+            let revision = object["permission_revision"]
+                .as_u64()
+                .ok_or("自动请求缺少授权版本")?;
+            let authorization =
+                connections::authorize(vault, &id, revision).map_err(|e| e.to_string())?;
+            let grant = &authorization.entry.grant;
+            let (result, observed) = if name == "authorized_read" {
+                if !grant.auto_recall || !grant.provider_disclosure {
+                    return Err("此网站未授权自动准备资料".into());
+                }
+                let action = object["action"].as_str().ok_or("缺少只读动作")?;
+                if !matches!(action, "bootstrap" | "search" | "read" | "sources") {
+                    return Err("只允许四种只读资料操作".into());
+                }
+                let scopes = grant
+                    .recall_scopes
+                    .iter()
+                    .filter(|scope| access.permits(scope))
+                    .cloned()
+                    .collect();
+                (
+                    invoke(
+                        &Context::new(vault, Access::new(scopes)?),
+                        action,
+                        object["arguments"].clone(),
+                    )?,
+                    if action == "bootstrap" {
+                        "bootstrap"
+                    } else {
+                        "read"
+                    },
+                )
+            } else {
+                let scope = capture_scope.ok_or("本机启动器未授权捕获")?;
+                if !grant.auto_capture || !grant.capture_scopes.iter().any(|s| s == scope) {
+                    return Err("此网站未授权自动捕获到该范围".into());
+                }
+                let conversation =
+                    crate::conversation::Conversation::parse(&object["conversation"].to_string())?;
+                if conversation.source.platform != platform
+                    || conversation.metadata["weaker_conversation_identity"] == true
+                    || conversation
+                        .messages
+                        .iter()
+                        .any(|m| m.metadata["weaker_identity"] == true)
+                {
+                    return Err("自动捕获需要明确的平台、会话与稳定消息身份".into());
+                }
+                if let Some(previous) =
+                    conversation.metadata["chunk_previous_message"]["message_id"].as_str()
+                {
+                    if !vault.events()?.iter().any(|event| {
+                        event.data.scope == scope
+                            && event.data.source.platform == conversation.source.platform
+                            && event.data.source.conversation_id
+                                == conversation.source.conversation_id
+                            && event.data.source.message_id == previous
+                    }) {
+                        return Err("分块前驱尚未在当前范围、平台和会话中保存".into());
+                    }
+                }
+                let preview = crate::conversation::preview(vault, &conversation, scope)?;
+                (
+                    crate::conversation::save(
+                        vault,
+                        &conversation,
+                        scope,
+                        preview["approval_hash"].as_str().ok_or("捕获校验失败")?,
+                    )?,
+                    "capture",
+                )
+            };
+            drop(authorization);
+            connections::observe(vault, &id, revision, observed).map_err(|e| e.to_string())?;
+            return Ok(result);
+        }
+        let authorization = entry
+            .as_ref()
+            .map(|entry| {
+                connections::authorize(vault, &id, entry.permission_revision)
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()?;
         let scope =
             capture_scope.ok_or("本机连接尚未允许保存对话，请在桌面连接设置中明确选择保存范围")?;
-        let object = args.as_object().ok_or("会话请求必须为对象")?;
+        if authorization
+            .as_ref()
+            .is_some_and(|a| !a.entry.grant.capture_scopes.iter().any(|s| s == scope))
+        {
+            return Err("此连接的捕获范围已撤销".into());
+        }
         let fields: &[&str] = if name == "capture_save" {
             &["conversation", "approval_hash"]
         } else {
@@ -345,18 +578,52 @@ fn browser_operation(
         }
         let conversation =
             crate::conversation::Conversation::parse(&object["conversation"].to_string())?;
+        if authorization.is_some() && conversation.source.platform != platform {
+            return Err("会话来源与当前授权网站不一致".into());
+        }
         if name == "capture_preview" {
             return crate::conversation::preview(vault, &conversation, scope);
         }
-        let approval = object["approval_hash"]
-            .as_str()
-            .ok_or("请先预览并明确确认保存")?;
-        crate::conversation::save(vault, &conversation, scope, approval)
-    })())
+        crate::conversation::save(
+            vault,
+            &conversation,
+            scope,
+            object["approval_hash"]
+                .as_str()
+                .ok_or("请先预览并明确确认保存")?,
+        )
+    })();
+    if outcome.is_err() {
+        let platform = session.split(':').next().unwrap_or("");
+        let id = connections::connection_key("browser", extension, platform, installation);
+        if let Ok(Some(entry)) = connections::get(vault, &id) {
+            if !entry.revoked {
+                let _ = connections::observe(vault, &id, entry.permission_revision, "failed");
+            }
+        }
+    }
+    Some(outcome)
 }
 
 pub fn serve_native_service_io<R: Read, W: Write>(
     service: impl Fn(&str, Value) -> Result<Value>,
+    extension: &str,
+    origin: &str,
+    reader: R,
+    writer: W,
+) -> Result<()> {
+    serve_native_bound_service_io(
+        |name, args, _session, _installation| service(name, args),
+        |_, _| Ok(String::new()),
+        extension,
+        origin,
+        reader,
+        writer,
+    )
+}
+fn serve_native_bound_service_io<R: Read, W: Write>(
+    service: impl Fn(&str, Value, &str, Option<&str>) -> Result<Value>,
+    freshness: impl Fn(&str, Option<&str>) -> Result<String>,
     extension: &str,
     origin: &str,
     mut reader: R,
@@ -365,7 +632,7 @@ pub fn serve_native_service_io<R: Read, W: Write>(
     if origin != extension_origin(extension)? {
         return Err("Native Messaging 来源扩展不在允许名单".into());
     }
-    let mut cache: BTreeMap<String, (String, Value)> = BTreeMap::new();
+    let mut cache: BTreeMap<String, (String, String, Value)> = BTreeMap::new();
     loop {
         let mut prefix = [0u8; 4];
         match reader.read(&mut prefix[..1]) {
@@ -392,14 +659,22 @@ pub fn serve_native_service_io<R: Read, W: Write>(
                     && !request.request_id.is_empty()
                     && (16..=256).contains(&request.nonce.len())
                     && !request.session_ref.is_empty()
-                    && request.session_ref.len() <= 2048;
+                    && request.session_ref.len() <= 2048
+                    && request
+                        .installation_id
+                        .as_deref()
+                        .is_none_or(crate::application::connections::valid_installation_id);
                 if !valid {
                     json!({"ok":false,"error":"协议、nonce、request_id 或会话绑定无效"})
                 } else {
                     let key = format!("{}\0{}", request.session_ref, request.request_id);
                     let hash = crate::hash(&bytes);
-                    if let Some((previous, response)) = cache.get(&key) {
-                        if *previous == hash {
+                    let revision =
+                        freshness(&request.session_ref, request.installation_id.as_deref())?;
+                    if let Some((previous, saved_revision, response)) = cache.get(&key) {
+                        if *saved_revision != revision {
+                            json!({"ok":false,"error":"授权已变化，不能重放旧结果"})
+                        } else if *previous == hash {
                             response.clone()
                         } else {
                             json!({"ok":false,"error":"同一 request_id 对应不同请求"})
@@ -410,6 +685,8 @@ pub fn serve_native_service_io<R: Read, W: Write>(
                         let response = match service(
                             &request.action,
                             request.arguments.unwrap_or_else(|| json!({})),
+                            &request.session_ref,
+                            request.installation_id.as_deref(),
                         ) {
                             Ok(result) => {
                                 json!({"ok":true,"result":result,"request_id":request.request_id})
@@ -418,7 +695,7 @@ pub fn serve_native_service_io<R: Read, W: Write>(
                                 json!({"ok":false,"error":error,"request_id":request.request_id})
                             }
                         };
-                        cache.insert(key, (hash, response.clone()));
+                        cache.insert(key, (hash, revision, response.clone()));
                         response
                     }
                 }
@@ -561,4 +838,35 @@ pub fn prepare_install_from_binary(
         "registered":false,
         "note":"只生成待检查文件；请按浏览器与操作系统文档手动注册，不会修改浏览器权限或系统配置"
     }))
+}
+
+/// CLI 的只读 IPC 启动方式同样经过安装授权；不能绕过连接撤销。
+pub fn serve_native_read_service_io<R: Read, W: Write>(
+    vault: &Vault,
+    access: Access,
+    extension: &str,
+    origin: &str,
+    service: impl Fn(&str, Value) -> Result<Value>,
+    reader: R,
+    writer: W,
+) -> Result<()> {
+    serve_native_bound_service_io(
+        |name, args, session, installation| {
+            browser_operation(
+                vault,
+                &access,
+                None,
+                extension,
+                (session, installation),
+                name,
+                &args,
+            )
+            .unwrap_or_else(|| service(name, args))
+        },
+        |session, installation| connection_revision(vault, extension, session, installation),
+        extension,
+        origin,
+        reader,
+        writer,
+    )
 }

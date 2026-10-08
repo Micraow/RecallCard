@@ -236,3 +236,56 @@ impl DesktopSession {
         Ok(location)
     }
 }
+
+/// 只返回受限引用元数据，不打开网址、不推测或下载附件正文。
+pub(super) fn source_assets(event: &crate::Event) -> Value {
+    let assets = &event.data.metadata["source_assets"];
+    if !assets.is_object() {
+        return Value::Null;
+    }
+    let mut used = 0usize;
+    let mut truncated = false;
+    let mut project = |key: &str| -> Vec<Value> {
+        let Some(entries) = assets[key].as_array() else {
+            return Vec::new();
+        };
+        let mut output = Vec::new();
+        for entry in entries {
+            let mut row = serde_json::Map::new();
+            for field in [
+                "source_file_id",
+                "name",
+                "url",
+                "title",
+                "type",
+                "payload_status",
+            ] {
+                if let Some(value) = entry[field].as_str() {
+                    let max = if field == "url" { 600 } else { 200 };
+                    let clipped = truncate_utf8(value, max);
+                    truncated |= clipped.len() != value.len();
+                    row.insert(field.into(), json!(clipped));
+                }
+            }
+            for field in ["byte_count", "reference_count"] {
+                if let Some(value) = entry[field].as_u64() {
+                    row.insert(field.into(), json!(value));
+                }
+            }
+            let row = Value::Object(row);
+            let bytes = row.to_string().len();
+            if output.len() >= 20 || used + bytes > 6000 {
+                truncated = true;
+                continue;
+            }
+            used += bytes;
+            output.push(row);
+        }
+        output
+    };
+    let files = project("files");
+    let citations = project("citations");
+    let tool_trace = project("tool_trace");
+    let total = |key: &str| assets[key].as_array().map_or(0, Vec::len);
+    json!({"files":files,"citations":citations,"tool_trace":tool_trace,"files_total":total("files"),"citations_total":total("citations"),"trace_total":total("tool_trace"),"unsupported_total":total("unsupported_fragments"),"truncated":truncated})
+}

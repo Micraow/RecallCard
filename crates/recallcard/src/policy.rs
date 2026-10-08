@@ -103,6 +103,17 @@ impl Vault {
         Ok(s)
     }
     pub fn suppressed_ids(&self) -> Result<BTreeSet<String>> {
+        self.ensure_no_pending_dream()?;
+        self.suppressed_ids_impl(false)
+    }
+    /// 仅限持有 Vault 写锁的 Dream 事务验证；绝不用于普通检索或模型读取。
+    pub(crate) fn suppressed_ids_for_dream_recovery(&self) -> Result<BTreeSet<String>> {
+        if self.state_dir()?.join("event-transaction.json").exists() {
+            return Err("存在未恢复的事件事务，不能恢复 Dream".into());
+        }
+        self.suppressed_ids_impl(true)
+    }
+    fn suppressed_ids_impl(&self, dream_recovery: bool) -> Result<BTreeSet<String>> {
         let mut ids = BTreeSet::new();
         let mut source_hashes = BTreeSet::new();
         for path in files_recursive(&self.root().join("control/suppressions"), "json")? {
@@ -133,16 +144,27 @@ impl Vault {
         // 兼容尚无 source_hashes 的旧规则，从仍保留的不可变 Event 补出身份。
         // 仅扩散到同 scope、同平台/账户/会话/消息，绝不按内容相似度遗忘。
         if !ids.is_empty() {
-            let events = self.events()?;
-            for event in &events {
+            let collect_hashes = |event: Event| {
                 if ids.contains(&event.id) {
-                    source_hashes.insert(suppression_source_hash(event));
+                    source_hashes.insert(suppression_source_hash(&event));
                 }
+                Ok(())
+            };
+            if dream_recovery {
+                self.visit_events_unchecked(collect_hashes)?;
+            } else {
+                self.visit_events(collect_hashes)?;
             }
-            for event in &events {
-                if source_hashes.contains(&suppression_source_hash(event)) {
-                    ids.insert(event.id.clone());
+            let expand_revisions = |event: Event| {
+                if source_hashes.contains(&suppression_source_hash(&event)) {
+                    ids.insert(event.id);
                 }
+                Ok(())
+            };
+            if dream_recovery {
+                self.visit_events_unchecked(expand_revisions)?;
+            } else {
+                self.visit_events(expand_revisions)?;
             }
         }
         Ok(ids)

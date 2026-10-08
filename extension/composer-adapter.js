@@ -35,6 +35,7 @@
       const node = this.find();
       if (!/^[A-Za-z0-9_-]{1,96}$/u.test(capsule.id) || !/^[a-f0-9]{48}$/u.test(capsule.nonce) || typeof capsule.text !== 'string' || capsule.text.length > 65536) throw new Error('上下文标识或大小无效');
       const before = this.text(node);
+      if (before.includes('[RecallCard ') || before.includes('[/RecallCard ')) throw new Error('草稿中已有失去归属或已编辑的上下文，请先检查；不会重复追加');
       const marker = `${capsule.nonce}:${capsule.id}`;
       const block = `\n\n[RecallCard ${marker}]\n${capsule.text}\n[/RecallCard ${marker}]`;
       let insertedNode = null;
@@ -121,6 +122,14 @@
       return warnings;
     }
     status() { this.prune(); return [...this.receipts.keys()]; }
+    draftIds() {
+      this.prune();
+      for (const [id, receipt] of this.receipts) {
+        const text = this.text(receipt.node);
+        if (!text.includes(`[RecallCard ${receipt.marker}]`) && !text.includes(`[/RecallCard ${receipt.marker}]`)) this.receipts.delete(id);
+      }
+      return [...this.receipts.keys()];
+    }
   }
   globalThis.RecallCardComposerAdapter = ComposerAdapter;
 })();

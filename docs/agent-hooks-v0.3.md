@@ -1,5 +1,7 @@
 # Claude Code 生命周期 Bootstrap 适配器 v0.3
 
+v0.6 已增加可撤销连接：可信启动参数 `--connection-id` 绑定本机授权，Hook 与 MCP 每次调用遵循最新范围。新示例是 `integrations/claude-code/connected.settings.example.json` 与 `connected.mcp.example.json`；原示例保留为旧版兼容。新授权合同与真实验收边界见 [接入与自动草稿](connections-v0.6.md)。以下基础生命周期协议仍适用。
+
 ## 已实现的范围
 
 本适配器让可信本机启动配置把 RecallCard 的已授权 Bootstrap 包装成 Claude Code `SessionStart` 的 JSON 输出。Rust 模块位于 `crates/recallcard/src/agent_hook.rs`，配置示例位于 `integrations/claude-code/settings.example.json`。

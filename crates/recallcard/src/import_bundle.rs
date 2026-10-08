@@ -243,7 +243,7 @@ fn import_files(
 }
 
 /// 结构判别来源，两个平台的 mapping 不能互相冒充。
-fn provider(value: &Value) -> Result<Option<&'static str>> {
+pub(crate) fn provider(value: &Value) -> Result<Option<&'static str>> {
     let deepseek = looks_like_deepseek(value);
     let chatgpt = value.get("current_node").is_some()
         || value["mapping"]
@@ -716,7 +716,7 @@ impl<'de> Deserialize<'de> for UniqueValue {
         deserializer.deserialize_any(Visitor)
     }
 }
-fn strict_json(bytes: &[u8]) -> Result<Value> {
+pub(crate) fn strict_json(bytes: &[u8]) -> Result<Value> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let value =
         UniqueValue::deserialize(&mut deserializer).map_err(|e| format!("导出 JSON 无效：{e}"))?;
@@ -856,7 +856,11 @@ fn audit_directory(bytes: &[u8]) -> Result<Vec<DirectoryEntry>> {
     Ok(entries)
 }
 
-fn validate_name(name: &str, directory: bool, names: &mut BTreeMap<String, bool>) -> Result<()> {
+pub(crate) fn validate_name(
+    name: &str,
+    directory: bool,
+    names: &mut BTreeMap<String, bool>,
+) -> Result<()> {
     if name.is_empty()
         || name.starts_with('/')
         || name.ends_with("//")

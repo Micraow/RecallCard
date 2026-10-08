@@ -170,7 +170,7 @@ impl Vault {
         I: FnOnce(&[Event]) -> Result<()>,
         F: FnMut(usize, &Event, bool) -> Result<()>,
     {
-        use std::collections::{BTreeMap, BTreeSet};
+        use std::collections::BTreeMap;
         for input in &mut inputs {
             crate::capture::redact_event(input)?;
         }
@@ -183,7 +183,7 @@ impl Vault {
         let existing_count = events.len();
         let mut versions = BTreeMap::new();
         let mut latest = BTreeMap::new();
-        let mut known_ids = BTreeSet::new();
+        let mut identities = BTreeMap::new();
         // 与旧版 capture 一致：忽略自动 revision_of 比较输入，重复任何旧版本也不回滚。
         fn version_key(input: &EventInput) -> Result<String> {
             let mut normalized = input.clone();
@@ -192,8 +192,8 @@ impl Vault {
         }
         for (index, event) in events.iter().enumerate() {
             versions.entry(version_key(&event.data)?).or_insert(index);
-            latest.insert(event.data.source_key(), index);
-            known_ids.insert(event.id.clone());
+            latest.insert(event.data.revision_key(), index);
+            identities.insert(event.id.clone(), event.data.revision_key());
         }
         let mut plan = Vec::with_capacity(inputs.len());
         for mut input in inputs {
@@ -202,16 +202,16 @@ impl Vault {
                 plan.push((index, false));
                 continue;
             }
-            let source = input.source_key();
+            let source = input.revision_key();
             if input.revision_of.is_none() {
                 input.revision_of = latest.get(&source).map(|index| events[*index].id.clone());
             }
             if input
                 .revision_of
                 .as_ref()
-                .is_some_and(|id| !known_ids.contains(id))
+                .is_some_and(|id| identities.get(id) != Some(&source))
             {
-                return Err("找不到所引用的原始事件；整批尚未写入".into());
+                return Err("修订必须引用同一资料范围内同一来源的已有事件；整批尚未写入".into());
             }
             let event = Event {
                 schema_version: SCHEMA_VERSION,
@@ -220,7 +220,7 @@ impl Vault {
                 data: input,
             };
             let index = events.len();
-            known_ids.insert(event.id.clone());
+            identities.insert(event.id.clone(), source.clone());
             versions.insert(version, index);
             if latest.get(&source).is_none_or(|old| {
                 (events[*old].captured_at, &events[*old].id) <= (event.captured_at, &event.id)
@@ -253,7 +253,7 @@ impl Vault {
         }
         Ok(result)
     }
-    fn event_path(&self, event: &Event) -> PathBuf {
+    pub(crate) fn event_path(&self, event: &Event) -> PathBuf {
         let time = event.data.occurred_at.unwrap_or(event.captured_at);
         let session = hash(event.data.session_key().as_bytes());
         self.root.join(format!(
@@ -286,25 +286,10 @@ impl Vault {
     pub fn events(&self) -> Result<Vec<Event>> {
         self.ensure_no_pending_dream()?;
         let mut events = Vec::new();
-        let mut ids = std::collections::BTreeSet::new();
-        for path in files_recursive(&self.root.join("events"), "jsonl")? {
-            let text = read_text(&path)?;
-            if !text.ends_with('\n') {
-                return Err(format!("事件段不完整：{}", path.display()));
-            }
-            for line in text.lines() {
-                if line.trim().is_empty() {
-                    return Err("事件段含有空行".into());
-                }
-                let event: Event = serde_json::from_str(line)
-                    .map_err(|e| format!("事件段损坏或存在 Git 冲突：{e}"))?;
-                event.validate()?;
-                if !ids.insert(event.id.clone()) {
-                    return Err(format!("事件编号重复：{}", event.id));
-                }
-                events.push(event);
-            }
-        }
+        self.visit_events(|event| {
+            events.push(event);
+            Ok(())
+        })?;
         events.sort_by(|a, b| a.captured_at.cmp(&b.captured_at).then(a.id.cmp(&b.id)));
         Ok(events)
     }
@@ -507,6 +492,11 @@ impl Vault {
         )
     }
     pub(crate) fn ensure_no_pending_dream(&self) -> Result<()> {
+        let event_journal = self.state_dir()?.join("event-transaction.json");
+        reject_symlink(&event_journal)?;
+        if event_journal.exists() {
+            return Err("存在未完成的事件提交，请恢复对应导入任务".into());
+        }
         let path = self.state_dir()?.join("dream-transaction.json");
         reject_symlink(&path)?;
         if path.exists() {
@@ -582,7 +572,7 @@ impl Vault {
         persist_replace(self.staged(path, bytes)?, path)?;
         sync_parent(path)
     }
-    fn staged(&self, path: &Path, bytes: &[u8]) -> Result<NamedTempFile> {
+    pub(crate) fn staged(&self, path: &Path, bytes: &[u8]) -> Result<NamedTempFile> {
         reject_symlink(path)?;
         let parent = path.parent().ok_or("目标没有父目录")?;
         if !parent.starts_with(&self.root) && !parent.starts_with(self.state_dir()?) {
@@ -711,7 +701,7 @@ pub(crate) fn reject_symlink(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn sync_parent(path: &Path) -> Result<()> {
+pub(crate) fn sync_parent(path: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     #[cfg(unix)]

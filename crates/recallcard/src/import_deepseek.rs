@@ -86,7 +86,8 @@ pub(crate) fn parse_deepseek_conversation(
     let title = match value.get("title") {
         None | Some(Value::Null) => None,
         Some(Value::String(title)) if title.len() <= 4096 => Some(title.clone()),
-        _ => return Err("DeepSeek 会话标题无效或超过 4096 字节".into()),
+        Some(Value::String(_)) => return Err("DeepSeek 会话标题超过 4096 字节".into()),
+        _ => return Err("DeepSeek 会话标题必须是文本或 null".into()),
     };
     timestamp(value.get("inserted_at"), "会话 inserted_at")?;
     timestamp(value.get("updated_at"), "会话 updated_at")?;
@@ -154,6 +155,7 @@ pub(crate) fn parse_deepseek_conversation(
         return Err("DeepSeek 会话包含循环引用；没有导入任何消息".into());
     }
     let mut events = Vec::new();
+    let mut budget = crate::import::NormalizedBudget::default();
     for id in order.iter().copied() {
         let message = &mapping[id]["message"];
         if message.is_null() {
@@ -251,6 +253,7 @@ pub(crate) fn parse_deepseek_conversation(
         })).map_err(|e| e.to_string())?;
         event.validate()?;
         coverage.visible_messages_imported += 1;
+        budget.add(&event)?;
         events.push(event);
     }
     let imported_ids: BTreeSet<String> =

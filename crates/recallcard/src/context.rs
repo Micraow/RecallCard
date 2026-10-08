@@ -149,9 +149,20 @@ impl<'a> Context<'a> {
     pub(crate) fn documents_locked(&self) -> Result<Vec<Document>> {
         let suppressed = self.vault.suppressed_ids()?;
         let events = self.vault.events()?;
+        let identities: BTreeMap<&str, String> = events
+            .iter()
+            .map(|e| (e.id.as_str(), e.data.revision_key()))
+            .collect();
+        // 兼容旧正本：历史上的跨范围/跨来源修订边不允许隐藏另一份资料。
         let revisions: BTreeSet<String> = events
             .iter()
-            .filter_map(|e| e.data.revision_of.clone())
+            .filter_map(|e| {
+                e.data
+                    .revision_of
+                    .as_ref()
+                    .filter(|id| identities.get(id.as_str()) == Some(&e.data.revision_key()))
+                    .cloned()
+            })
             .collect();
         let mut docs = Vec::new();
         for event in &events {

@@ -35,6 +35,11 @@ jobs:
       - name: 安装真实 Chromium 与系统依赖
         timeout-minutes: 5
         run: npx playwright install --with-deps chromium
+      - name: 安装并核验中文无衬线字体
+        timeout-minutes: 4
+        run: |
+          sudo timeout --kill-after=10s 3m apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends fonts-noto-cjk
+          fc-match 'Noto Sans CJK SC' | grep -F 'Noto Sans CJK SC'
       - run: npm run test:frontend
       - uses: actions/upload-artifact@v4
         if: always()

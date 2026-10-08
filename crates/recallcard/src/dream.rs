@@ -1,7 +1,7 @@
 //! 人工 Dream：导出有界证据、只读审查、按结果摘要批准、可恢复发布。
 use crate::{
     model::*,
-    vault::{files_recursive, parse_memory, read_json, read_text, reject_symlink},
+    vault::{parse_memory, read_json, read_text, reject_symlink},
     Vault,
 };
 use chrono::{DateTime, Utc};
@@ -420,6 +420,22 @@ impl Vault {
             }
             allowed_sources.insert(current.id);
         }
+        // 在提交所持同一写锁内拒绝同范围、同来源的旧版本；跨范围历史坏边无效。
+        let source_keys: BTreeMap<_, _> = job
+            .source_refs
+            .iter()
+            .map(|source| (source.event.id.clone(), source.event.data.revision_key()))
+            .collect();
+        self.visit_events(|event| {
+            if event.data.revision_of.as_ref().is_some_and(|id| {
+                source_keys
+                    .get(id)
+                    .is_some_and(|key| *key == event.data.revision_key())
+            }) {
+                return Err("Dream 来源已有新修订，不能发布旧事实".into());
+            }
+            Ok(())
+        })?;
         let mut baseline = BTreeMap::new();
         for old in &job.memory_read_set {
             let current = self.memory(&old.memory.id)?;
@@ -673,27 +689,38 @@ impl Vault {
             return Err("事务来源覆盖收据不一致".into());
         }
         // 恢复时不经过公共读取屏障，但仍逐条确认来源及 suppression 没有被外部替换。
-        let suppressed = self.suppressed_ids()?;
+        let suppressed = self.suppressed_ids_for_dream_recovery()?;
         let allowed: BTreeSet<_> = tx
             .job
             .source_refs
             .iter()
             .map(|s| s.event.id.as_str())
             .collect();
-        let mut current_events = BTreeMap::new();
-        for path in files_recursive(&self.root().join("events"), "jsonl")? {
-            let text = read_text(&path)?;
-            if !text.ends_with('\n') {
-                return Err("恢复时发现不完整事件段".into());
-            }
-            for line in text.lines() {
-                let event: Event = serde_json::from_str(line).map_err(error)?;
-                event.validate()?;
-                if current_events.insert(event.id.clone(), event).is_some() {
-                    return Err("恢复时发现重复事件编号".into());
-                }
-            }
+        let mut recovery_sources: BTreeSet<String> =
+            allowed.iter().map(|id| (*id).to_string()).collect();
+        for after in tx.writes.iter().filter_map(|change| change.after.as_ref()) {
+            recovery_sources.extend(after.data.source_refs.iter().cloned());
         }
+        let source_keys: BTreeMap<_, _> = tx
+            .job
+            .source_refs
+            .iter()
+            .map(|source| (source.event.id.clone(), source.event.data.revision_key()))
+            .collect();
+        let mut current_events = BTreeMap::new();
+        self.visit_events_unchecked(|event| {
+            if event.data.revision_of.as_ref().is_some_and(|id| {
+                source_keys
+                    .get(id)
+                    .is_some_and(|key| *key == event.data.revision_key())
+            }) {
+                return Err("恢复时整理来源已有新修订，停止发布旧事实".into());
+            }
+            if recovery_sources.contains(&event.id) {
+                current_events.insert(event.id.clone(), event);
+            }
+            Ok(())
+        })?;
         for source in &tx.job.source_refs {
             let current = current_events
                 .get(&source.event.id)

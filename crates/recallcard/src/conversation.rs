@@ -106,6 +106,26 @@ impl Conversation {
         if self.messages.is_empty() || self.messages.len() > 5000 {
             return Err("一次保存需要 1–5000 条消息".into());
         }
+        if let Some(previous) = self.metadata.get("chunk_previous_message") {
+            let object = previous.as_object().ok_or("分块前驱必须是结构化来源身份")?;
+            let message = previous["message_id"]
+                .as_str()
+                .ok_or("分块前驱缺少消息编号")?;
+            if object.len() != 3
+                || previous["platform"] != self.source.platform
+                || previous["conversation_id"] != self.source.conversation_id
+                || message.is_empty()
+                || message.len() > 192
+                || !message
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+                || self.messages.iter().any(|m| m.id == message)
+            {
+                return Err(
+                    "分块前驱必须属于当前平台与会话，不能使用路径、跨会话身份或块内循环".into(),
+                );
+            }
+        }
         let mut ids = BTreeSet::new();
         for message in &self.messages {
             if message.id.trim().is_empty()
@@ -140,7 +160,7 @@ impl Conversation {
                 "source": {"platform": self.source.platform, "conversation_id": self.source.conversation_id, "message_id": message.id, "url": self.source.url},
                 "capture": {"completeness": "partial", "reason": self.coverage.reason},
                 // 捕获时间不冒充原消息时间；它只用于覆盖说明。
-                "metadata": {"conversation_title": self.title, "coverage": self.coverage, "message_identity": message.metadata, "previous_message_id": index.checked_sub(1).map(|i|self.messages[i].id.as_str())}
+                "metadata": {"conversation_title": self.title, "coverage": self.coverage, "message_identity": message.metadata, "previous_message_id": index.checked_sub(1).map(|i|self.messages[i].id.as_str()).or_else(||self.metadata["chunk_previous_message"]["message_id"].as_str())}
             })).map_err(|e| e.to_string())?;
             redact_event(&mut input)?;
             Ok(input)
@@ -174,12 +194,19 @@ pub fn save(
         return Err("会话或资料范围已改变，请重新预览并确认".into());
     }
     let events = conversation.events(scope)?;
-    let before = vault.events()?.len();
-    let mut refs = Vec::new();
-    for event in events {
-        refs.push(format!("event:{}", vault.capture(event)?.id));
-    }
-    let added = vault.events()?.len().saturating_sub(before);
+    let mut added = 0;
+    let saved = vault.capture_batch_with_progress(
+        events,
+        || true,
+        |_, _, is_new| {
+            added += usize::from(is_new);
+            Ok(())
+        },
+    )?;
+    let refs = saved
+        .into_iter()
+        .map(|event| format!("event:{}", event.id))
+        .collect::<Vec<_>>();
     Ok(
         json!({"events_added":added,"events_seen":refs.len(),"refs":refs,"coverage":conversation.coverage,"note":"只保存了预览中的可见消息；中断后可以重试，相同来源版本会去重"}),
     )

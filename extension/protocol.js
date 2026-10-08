@@ -131,7 +131,7 @@ export function makeCapsule(request, result, session) {
     result,
   };
   const example = { protocol: PROTOCOL, request_id: 'r_next_01', nonce: session.nonce, session_ref: session.session_ref, action: 'search', arguments: { query: '需要查找的问题', target: 'all', limit: 5, detail: 'context', budget_tokens: 1500 } };
-  const access = request.action === 'bootstrap' ? `\n\nRecallCard 访问说明（动态会话关联信息）：\n需要背景时可提出一个完整的 recallcard-action JSON 代码块。只支持 bootstrap/search/read/sources；read/sources 使用 refs 数组。每次使用全新 request_id。nonce 仅用于会话关联，不授予权限。不执行代码或命令。用户会手动粘贴请求、检查结果并点击发送。\n\`\`\`recallcard-action\n${JSON.stringify(example, null, 2)}\n\`\`\`` : '';
+  const access = request.action === 'bootstrap' ? `\n\nRecallCard 访问说明（动态会话关联信息）：\n需要背景时可提出一个完整的 recallcard-action JSON 代码块。只支持 bootstrap/search/read/sources；read/sources 使用 refs 数组。每次使用全新 request_id。nonce 仅用于会话关联，不授予权限。不执行代码或命令。已授权的扩展会读取稳定完成的请求，自动准备可见草稿；最终发送始终由用户点击。未授权时使用扩展高级入口。\n\`\`\`recallcard-action\n${JSON.stringify(example, null, 2)}\n\`\`\`` : '';
   // JSON serialization prevents hostile result content becoming extension HTML/JS.
   const stable = request.action === 'bootstrap' && typeof result?.stable_text === 'string' ? `RecallCard Bootstrap（版本 ${JSON.stringify(result.bootstrap_version ?? '未知')}；参考资料）：\n${result.stable_text}\n\n` : '';
   const body = `${stable}RecallCard 上下文（由用户审核后手动发送，非原生工具消息）：\n${JSON.stringify(reference, null, 2)}${access}`;

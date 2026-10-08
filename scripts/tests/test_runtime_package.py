@@ -77,6 +77,27 @@ class RuntimePackageTests(unittest.TestCase):
         with zipfile.ZipFile(first) as archive:
             self.assertTrue(all(entry.date_time==(2026,1,1,0,0,0) for entry in archive.infolist()))
 
+    def test_reboot_includes_current_guide_public_worker_and_frontend_licenses(self):
+        (self.root/'desktop/src-tauri/tauri.conf.json').write_text(json.dumps({'version':'0.6.0-dev'}))
+        (self.root/'docs/desktop-quickstart-v0.6.md').write_text('合成新版导入说明')
+        (self.root/'desktop/package.json').write_text(json.dumps({'version':'0.6.0-dev'}))
+        for name in ['react','react-dom','scheduler']:
+            dependency=self.root/'desktop/node_modules'/name
+            dependency.mkdir(parents=True)
+            (dependency/'package.json').write_text(json.dumps({'version':'1.0.0'}))
+            (dependency/'LICENSE').write_text('合成 MIT 许可证')
+        worker=self.root/'python/recallcard_dream'
+        worker.mkdir(parents=True)
+        (worker/'runtime.py').write_text('# 合成公开代码')
+        (worker/'.env').write_text('SYNTHETIC_DO_NOT_PACKAGE=true')
+        archive=self.build()
+        files=verify.archive_files(archive)
+        self.assertEqual(files['开始使用-中文.md'][0].decode(),'合成新版导入说明')
+        self.assertIn('python/recallcard_dream/runtime.py',files)
+        self.assertNotIn('python/recallcard_dream/.env',files)
+        for name in ['react','react-dom','scheduler']:
+            self.assertIn(f'third-party-licenses/npm-{name}-1.0.0/LICENSE',files)
+
     def test_safe_extract_and_post_runtime_verification(self):
         archive=self.build();destination=self.root/'extracted'
         self.assertTrue(verify.unpack(archive,destination,self.source)['verified'])

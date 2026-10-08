@@ -1,62 +1,610 @@
 /** 仅由 demo.html 引入。生产 index.html 不引用此模块，演示内容不进入发行包。 */
-import { createRoot } from 'react-dom/client';
-import { App } from '../App';
-import { RecallService, type Transport } from '../service/client';
-import type { Memory, MemoryReview, Conversation, EventRecord } from '../service/types';
-import type { JobStatus } from '../service/contracts';
-import '../styles.css';
+import { createRoot } from "react-dom/client";
+import { App } from "../App";
+import { RecallService, type Transport } from "../service/client";
+import type {
+  Memory,
+  MemoryReview,
+  Conversation,
+  EventRecord,
+} from "../service/types";
+import type { JobStatus } from "../service/contracts";
+import "../styles.css";
 
-const now = '2026-10-08T08:32:00Z';
+const now = "2026-10-08T08:32:00Z";
 const entries = [
-  ['项目交接：保留决定，也保留原因', '交接材料先写清当前目标、已作决定和仍未验证的假设。\n\n阅读者应能沿着来源找到当时为什么这样决定，而不只看到一个结论。设计文档、代码变更与讨论记录需要能互相追溯。\n\n示例项目「Atlas」当前聚焦离线阅读与跨设备连续性。验证一个完整任务的体验，优先于增加更多独立按钮。', ['工作方式', '项目协作']],
-  ['研究笔记采用先证据、后结论的结构', '读论文时先记录研究问题、数据范围和实验限制，再形成自己的判断。没有原文支持的推断应单独标注。', ['学习', '研究']],
-  ['图表说明要包含单位和比较基线', '展示结果时，坐标轴单位、样本范围、对照组和时间窗口应出现在图表旁边，而不是藏进注释。', ['表达偏好']],
-  ['Atlas 的离线体验是当前重点', '出行场景优先验证：断网前准备内容、离线打开、恢复网络后同步位置。进度冲突需要可解释。', ['项目', 'Atlas']],
-  ['周末步行路线先考虑公共交通', '路线草案先比较公共交通的接驳和返程时间。徒步长度只是其中一个参考，不代替天气与交通检查。', ['生活', '规划']],
-  ['技术方案要写出失败时怎么办', '除了正常路径，方案需要列出中断、重复操作、版本变化和撤回权限后的行为。恢复路径同样是设计的一部分。', ['工作方式']],
-  ['临时日程不能直接当长期偏好', '一次晚间开会只是一次安排。除非明确要求，否则不要由单次选择推断持续的可用时间。', ['待核对']],
-  ['书籍批注保留页码与原始位置', '阅读批注应能回到原书所在位置。版本不同导致页码改变时，段落引用可以帮助再次定位。', ['阅读']],
-  ['旧方案已不再用于当前项目', '早期设计使用手动导出流程。项目方向改变后，该结论应退出当前召回，同时保留历史出处。', ['历史']],
+  [
+    "秋季研究报告已交付",
+    "10 月 7 日，秋季研究报告第三版已交给评审组。原计划中的「完成报告正文」已经结束，不再作为待办提醒。\n\n目前只保留一项勘误：图 4 的纵轴单位应由「元」改为「万元」。该修改不改变分析结论，也不需要新增附录。\n\n9 月 28 日的讨论仍写着「报告在撰写中」。这是一条较早的计划，已被 10 月 7 日的交付记录更新。",
+    ["已完成", "研究报告"],
+  ],
+  [
+    "周五的德语课改到 19:30",
+    "原定周五 18:30 的德语课从本周起改到 19:30，地点仍是线上。\n\n这是当前课程的安排，不表示其他晚间时段也可以安排会议。",
+    ["课程", "时间变更"],
+  ],
+  [
+    "图表中的销售额统一使用万元",
+    "十月经营报告的销售额统一使用「万元」，增长率使用百分比。图表脚注注明 2026 年 9 月数据，避免把月度值与累计值混在一起。",
+    ["报告", "展示口径"],
+  ],
+  [
+    "Atlas v0.8 只交付 EPUB 标注",
+    "Atlas v0.8 的范围确定为 EPUB 标注与离线阅读。PDF 手写批注推迟到后续版本；10 月 18 日评审前不再扩大格式支持。",
+    ["Atlas", "范围决定"],
+  ],
+  [
+    "西山步道改走东入口",
+    "周六路线改从东入口开始。西入口附近的公交接驳不方便，预计 09:20 在东入口集合。若下雨，路线仍需重新确认。",
+    ["周末", "已改路线"],
+  ],
+  [
+    "晨间咖啡改为低因",
+    "本月在家冲煮改用低因豆，通常一次用 15 克。这个选择只适用于家中的晨间咖啡，不自动推广到外出点单。",
+    ["生活偏好"],
+  ],
+  [
+    "和陈宁的复盘时间仍待确认",
+    "一段讨论写周二 15:00，另一段后来提到周三下午，但还没有明确最终时间。\n\n两条证据存在冲突；在确认前不要把任何一个时间当作已约定。",
+    ["时间冲突", "待确认"],
+  ],
+  [
+    "十月读书会选定《人类简史》",
+    "十月读书会读《人类简史》前两部分。分享时各准备一个不同意作者的论点，并带上对应章节。",
+    ["阅读", "读书会"],
+  ],
+  [
+    "旧计划：秋季报告仍在撰写",
+    "9 月 28 日计划在两周内完成报告正文。10 月 7 日已有明确交付记录，这条旧计划不应继续触发待办或被当作当前状态。",
+    ["历史计划", "已被更新"],
+  ],
 ] as const;
-const memories: Memory[] = entries.map(([title, body, labels], i) => ({ id: `mem_demo_${i + 1}`, content: `${title}\n\n${body}`, revision: i === 0 ? 3 : 1, status: i === 6 ? 'tentative' : 'active', evidence: i === 6 ? 'observed' : 'user_explicit', protected: i === 0, hidden: i === 8, can_restore: i === 8, source_refs: [`evt_demo_${i + 1}`, `evt_demo_${i + 11}`], updated_at: `2026-10-0${8 - i % 5}T08:32:00Z`, recorded_at: '2026-09-18T09:00:00Z', authority: 'user', scope: 'personal', labels: [...labels] }));
+const memories: Memory[] = entries.map(([title, body, labels], i) => ({
+  id: `mem_demo_${i + 1}`,
+  content: `${title}\n\n${body}`,
+  revision: i === 0 ? 3 : 1,
+  status: i === 6 ? "tentative" : i === 8 ? "superseded" : "active",
+  evidence: i === 6 ? "observed" : "user_explicit",
+  protected: i === 0,
+  hidden: false,
+  can_restore: false,
+  source_refs: [`evt_demo_${i + 1}`, `evt_demo_${i + 11}`],
+  updated_at: `2026-10-0${8 - (i % 5)}T08:32:00Z`,
+  recorded_at: "2026-09-18T09:00:00Z",
+  authority: "user",
+  scope: "personal",
+  labels: [...labels],
+}));
 const sources: Conversation[] = [
-  ['Atlas：离线阅读的端到端验证', 'chatgpt', 42], ['研究笔记与实验结论的写法', 'deepseek', 28], ['跨设备进度同步方案', 'chatgpt', 67], ['图表与论文阅读记录', 'claude', 16], ['周末路线草案', 'deepseek', 24], ['失败恢复与任务队列', 'chatgpt', 52], ['批注定位与格式选择', 'deepseek', 19], ['项目计划回顾', 'chatgpt', 36],
-].map(([title, platform, count], i) => ({ session_ref: `source_demo_${i + 1}`, title: String(title), platform: String(platform), source_url: null, message_count: Number(count), captured_at: `2026-10-0${8 - i % 5}T08:32:00Z`, coverage: 'partial' }));
+  ["秋季报告：交付与勘误", "chatgpt", 42],
+  ["周五德语课的改期", "deepseek", 28],
+  ["Atlas v0.8 的交付范围", "chatgpt", 67],
+  ["经营报告的图表口径", "claude", 16],
+  ["西山步道与集合地点", "deepseek", 24],
+  ["本月的咖啡豆选择", "chatgpt", 52],
+  ["陈宁复盘的两种时间", "deepseek", 19],
+  ["十月读书会安排", "chatgpt", 36],
+].map(([title, platform, count], i) => ({
+  session_ref: `source_demo_${i + 1}`,
+  title: String(title),
+  platform: String(platform),
+  source_url: null,
+  message_count: Number(count),
+  captured_at: now,
+  last_occurred_at: `2026-10-0${7 - (i % 5)}T14:25:00Z`,
+  coverage: "partial",
+}));
 const events = new Map<string, EventRecord>();
-memories.forEach((memory, i) => memory.source_refs.forEach((id, k) => events.set(id, { id, content: k === 0 ? `这段是用于界面验证的合成原话。\n\n${memory.content.split('\n\n').slice(1).join('\n\n')}` : '这是另一段合成的讨论记录，用于验证来源展开、角色与原始时间。请把结论与支持它的原文一起留下。', role: k === 0 ? 'user' : 'assistant', occurred_at: k === 0 ? '2026-10-07T14:25:00Z' : '2026-09-28T09:18:00Z', captured_at: now, source: { platform: k === 0 ? 'chatgpt' : 'deepseek', conversation_id: `demo_${i}`, message_id: id }, metadata: { conversation_title: k === 0 ? 'Atlas 的交接与体验检查' : '项目文档结构与原始依据' } })));
-const completeJob: JobStatus = { schema: 'recallcard.application-job/1', job_id: 'job_demo_complete', request_id: 'request_demo_complete', kind: 'import', scope: 'personal', state: 'completed', phase: 'finished', progress: { source_bytes_read: 28744901, expanded_bytes_read: 38890423, files_processed: 1, files_total: 1, conversations: 8, events_staged: 344, events_total: 344, events_processed: 344, events_added: 284, events_duplicates: 60 }, error: null, can_resume: false, created_at: '2026-10-08T08:10:00Z', updated_at: '2026-10-08T08:11:00Z' };
-const mode = new URLSearchParams(location.search).get('state') || 'normal';
-let jobs: JobStatus[] = mode === 'empty' ? [] : [completeJob];
-if (mode === 'failed') jobs = [{ ...completeJob, job_id: 'job_demo_failed', state: 'failed', phase: 'parsing', can_resume: true, progress: { ...completeJob.progress, events_total: null, events_processed: 0, events_added: 0, events_duplicates: 0, files_processed: 0 }, error: { code: 'invalid_json', message: '导出包中的会话文件未能完整解析', action: '重新下载完整的官方导出包，再添加来源。当前错误出现在会话边界附近。', file_name: 'chat-history-demo.zip', member: 'conversations.json', retryable: true, committed_events: 0 } }, completeJob];
-if (mode === 'running') jobs = [{ ...completeJob, job_id: 'job_demo_running', state: 'running', phase: 'parsing', can_resume: false, progress: { ...completeJob.progress, events_total: null, events_processed: 0, events_added: 0, events_duplicates: 0, files_processed: 0 } }];
+memories.forEach((memory, i) =>
+  memory.source_refs.forEach((id, k) =>
+    events.set(id, {
+      id,
+      content:
+        k === 0
+          ? `这段是用于界面验证的合成原话。\n\n${memory.content.split("\n\n").slice(1).join("\n\n")}`
+          : i === 0
+            ? "报告还在写，我计划在两周内完成正文。这是 9 月 28 日的计划，尚未包含后来已经交付的信息。"
+            : i === 6
+              ? "周三下午是否更方便？我还要再和陈宁确认，先不要记成已确定的安排。"
+              : `这是较早的合成讨论：我们正在核对「${memory.content.split("\n")[0]}」的细节，尚待后续消息确定。`,
+      role: "user",
+      occurred_at: k === 0 ? "2026-10-07T14:25:00Z" : "2026-09-28T09:18:00Z",
+      captured_at: now,
+      source: {
+        platform: k === 0 ? "chatgpt" : "deepseek",
+        conversation_id: `demo_${i}`,
+        message_id: id,
+      },
+      metadata: {
+        conversation_title:
+          k === 0 ? sources[i % sources.length].title : "较早的安排与计划",
+      },
+    }),
+  ),
+);
+const completeJob: JobStatus = {
+  schema: "recallcard.application-job/1",
+  job_id: "job_demo_complete",
+  request_id: "request_demo_complete",
+  kind: "import",
+  scope: "personal",
+  state: "completed",
+  phase: "finished",
+  progress: {
+    source_bytes_read: 28744901,
+    expanded_bytes_read: 38890423,
+    files_processed: 1,
+    files_total: 1,
+    conversations: 8,
+    events_staged: 344,
+    events_total: 344,
+    events_processed: 344,
+    events_added: 284,
+    events_duplicates: 60,
+  },
+  error: null,
+  can_resume: false,
+  created_at: "2026-10-08T08:10:00Z",
+  updated_at: "2026-10-08T08:11:00Z",
+};
+const mode = new URLSearchParams(location.search).get("state") || "normal";
+let imported = !["first-use", "empty"].includes(mode);
+let jobs: JobStatus[] = imported ? [completeJob] : [];
+let notePreview: {
+  preview_id: string;
+  content: string;
+  redacted: boolean;
+} | null = null;
+const notes: {
+  ref: string;
+  text: string;
+  conversation_ref: string;
+  conversation_title: string;
+  kind: string;
+  occurred_at: string;
+}[] = [];
+if (mode === "failed")
+  jobs = [
+    {
+      ...completeJob,
+      job_id: "job_demo_failed",
+      state: "failed",
+      phase: "parsing",
+      can_resume: true,
+      progress: {
+        ...completeJob.progress,
+        events_total: null,
+        events_processed: 0,
+        events_added: 0,
+        events_duplicates: 0,
+        files_processed: 0,
+      },
+      error: {
+        code: "invalid_json",
+        message: "导出包中的会话文件未能完整解析",
+        action:
+          "重新下载完整的官方导出包，再添加来源。当前错误出现在会话边界附近。",
+        file_name: "chat-history-demo.zip",
+        member: "conversations.json",
+        retryable: true,
+        committed_events: 0,
+      },
+    },
+    completeJob,
+  ];
+if (mode === "running")
+  jobs = [
+    {
+      ...completeJob,
+      job_id: "job_demo_running",
+      state: "running",
+      phase: "parsing",
+      can_resume: false,
+      progress: {
+        ...completeJob.progress,
+        events_total: null,
+        events_processed: 0,
+        events_added: 0,
+        events_duplicates: 0,
+        files_processed: 0,
+      },
+    },
+  ];
 let pending: MemoryReview | null = null;
 const calls: { command: string; args: Record<string, unknown> }[] = [];
-Object.assign(window, { __DEMO_CALLS__: calls });
-const transport: Transport = { async invoke<T>(command: string, args = {}): Promise<T> {
-  calls.push({ command, args });
-  await new Promise(resolve => setTimeout(resolve, command === 'import_sources' ? 350 : 55));
-  const value = await invoke(command, args); return structuredClone(value) as T;
-} };
-async function invoke(command: string, args: Record<string, unknown>): Promise<unknown> {
-  const rows = mode === 'empty' ? [] : memories;
-  const scope = String(args.scope || 'personal');
-  if (command === 'restore_workspace') return { vault: { session_id: 'demo_session', root: '/合成示例/RecallCard', display_name: '合成示例', scopes: ['personal', 'project:atlas'], event_count: 284, memory_count: memories.length, health: {} }, scope: 'personal' };
-  if (command === 'remember_workspace' || command === 'cancel_previews' || command === 'write_clipboard') return null;
-  if (command === 'choose_vault') return null;
-  if (command === 'manage_memories') { const filtered = rows.filter(row => args.includeHidden || !row.hidden).filter((_, index) => scope === 'personal' || index === 3); return { memories: filtered, total: filtered.length, next_offset: null }; }
-  if (command === 'managed_memory_view') { const memory = memories.find(row => row.id === args.id)!; return { memory, hidden: memory.hidden, can_restore: memory.can_restore }; }
-  if (command === 'managed_memory_source') return events.get(String(args.eventId));
-  if (command === 'list_conversations') return { conversations: mode === 'empty' ? [] : sources, total: mode === 'empty' ? 0 : sources.length, next_offset: null, note: '合成示例，不代表真实资料' };
-  if (command === 'conversation_messages') { const source = sources.find(row => row.session_ref === args.conversationRef)!; const offset = Number(args.offset || 0); const messages = Array.from({ length: Math.min(4, source.message_count - offset) }, (_, i) => ({ ref: `event:evt_message_${offset + i}`, role: i % 2 === 0 ? 'user' : 'assistant', text: i % 2 === 0 ? '我们需要把当前的设计决定整理清楚。请先确认目标、已验证的行为和仍然开放的问题，不要把一个可点击的界面当作完整产品。\n\n导入后的资料应该马上可以查找。整理可以稍后完成，但不能让用户维护一串复制粘贴步骤。' : '可以按「目标、已验证事实、未验证假设、下一步」组织交接。\n\n本地存档保留原始内容；每条记忆回到证据。应用将后台任务的实际进度与需要用户决定的事分开呈现。', occurred_at: i === 3 ? null : '2026-10-07T14:25:00Z', captured_at: now, text_truncated: false, source: { platform: source.platform }, branch: { parent_ref: i ? `event:evt_message_${offset + i - 1}` : null, is_branch_end: false, relationship_known: true, child_count: 1, gap_before: false } })); return { ...source, messages, total: source.message_count, next_offset: offset + messages.length < source.message_count ? offset + messages.length : null, offset, order_known: true, order_kind: 'single_branch', coverage: '合成示例' }; }
-  if (command === 'application_jobs') { if (mode === 'unavailable') throw { code: 'storage', message: '本地任务状态暂不可读取', action: '重新打开空间后重试', retryable: true, committed_events: 0 }; return jobs; }
-  if (command === 'import_sources') { if (mode === 'cancel') return null; if (mode === 'pick-error') throw { code: 'permission_denied', message: '没有读取所选文件的权限', action: '请重新选择可读取的本机文件', file_name: '导出示例.zip', retryable: false, committed_events: 0 }; const job = { ...completeJob, job_id: 'job_demo_new', request_id: args.requestId, state: 'running', phase: 'parsing', progress: { ...completeJob.progress, events_total: null, events_processed: 0, events_added: 0, events_duplicates: 0, files_processed: 0 } } as JobStatus; jobs = [job, ...jobs.filter(item => item.job_id !== job.job_id)]; return job; }
-  if (command === 'application_job_pause' || command === 'application_job_resume') { const job = jobs.find(item => item.job_id === args.jobId)!; job.state = command.endsWith('pause') ? 'paused' : 'running'; job.can_resume = job.state === 'paused'; job.error = null; return job; }
-  if (command === 'search_records') return { results: rows.filter(row => !row.hidden && row.content.includes(String(args.query))).map(row => ({ ref: `memory:${row.id}`, kind: 'memory', text: row.content, state: row.status, evidence: row.evidence, occurred_at: row.updated_at })), truncated: false };
-  if (command === 'review_memory_edit' || command === 'review_memory_visibility') { const memory = memories.find(row => row.id === args.id)!; pending = { preview_id: 'review_demo', operation: command === 'review_memory_edit' ? 'edit' : args.restore ? 'restore' : 'forget', before: memory, after: command === 'review_memory_edit' ? args.edit as MemoryReview['after'] : null, affected_events: command === 'review_memory_edit' ? 0 : 2, affected_memories: 1, requires_protected_approval: memory.protected, warning: command === 'review_memory_edit' ? '保存新的记忆版本，原始对话保持不变。' : '相关记忆与原始来源将退出检索和后续整理；文件不删除，可检查后恢复。' }; return pending; }
-  if (command === 'confirm_memory_change') { if (!pending) throw new Error('确认已过期'); if (pending.requires_protected_approval && !args.approveProtected) throw new Error('请确认受保护内容的修改'); const index = memories.findIndex(row => row.id === pending!.before.id); if (pending.after) memories[index] = { ...memories[index], ...pending.after, revision: memories[index].revision + 1 }; else { memories[index].hidden = pending.operation === 'forget'; memories[index].can_restore = pending.operation === 'forget'; } pending = null; return {}; }
-  if (command === 'prepare_client_config') return { mcpServers: { recallcard: { command: '/合成示例/recallcard', args: ['--vault', '/合成示例/RecallCard', 'mcp', '--scope', scope] } } };
-  if (command === 'install_browser_connection') return { registered: true, registration: '/合成示例/native-host.json', capture_enabled: args.allowCapture, note: '示例注册完成，尚无浏览器调用回执。' };
-  if (command === 'memory_runtime_status') return { schema: 'recallcard.memory-runtime/1', state: 'unconfigured', message: '后台整理尚未配置；已保存来源仍可搜索', config: { schema: 'recallcard.memory-runtime/1', enabled: false, paused: false, scope, provider: null, consent: null, budget: { max_calls_per_month: 100, max_reserved_tokens_per_month: 1000000, max_output_tokens_per_call: 4096, max_request_bytes_per_call: 1048576 }, quiet_seconds: 30, batch_size: 16, max_projection_bytes: 262144 }, usage: { month: '2026-10', reserved_calls: 0, reserved_tokens: 0, reported_input_tokens: 0, reported_output_tokens: 0, calls_with_unknown_usage: 0 }, jobs: [], raw_search_available: true, budget_note: 'token 预留是资源上限，不是准确费用' };
+Object.assign(window, {
+  __DEMO_CALLS__: calls,
+  __DEMO_COMPLETE_JOBS__: () => {
+    jobs = jobs.map((job) => ({
+      ...job,
+      state: "completed",
+      phase: "finished",
+      can_resume: false,
+    }));
+  },
+});
+const transport: Transport = {
+  async invoke<T>(command: string, args = {}): Promise<T> {
+    calls.push({ command, args });
+    await new Promise((resolve) =>
+      setTimeout(resolve, command === "import_sources" ? 350 : 55),
+    );
+    const value = await invoke(command, args);
+    return structuredClone(value) as T;
+  },
+};
+async function invoke(
+  command: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const rows =
+    !imported || ["first-use", "imported"].includes(mode) ? [] : memories;
+  const scope = String(args.scope || "personal");
+  if (command === "build_info") return __BUILD_INFO__;
+  if (command === "restore_workspace" && mode === "first-use") return null;
+  if (command === "open_default_workspace")
+    return {
+      session_id: "demo_session",
+      root: "/合成示例/RecallCard",
+      display_name: "合成示例",
+      scopes: ["personal"],
+      event_count: 0,
+      memory_count: 0,
+      health: {},
+    };
+  if (command === "restore_workspace")
+    return {
+      vault: {
+        session_id: "demo_session",
+        root: "/合成示例/RecallCard",
+        display_name: "合成示例",
+        scopes: ["personal", "project:atlas"],
+        event_count: 284,
+        memory_count: memories.length,
+        health: {},
+      },
+      scope: "personal",
+    };
+  if (
+    command === "remember_workspace" ||
+    command === "cancel_previews" ||
+    command === "write_clipboard"
+  )
+    return null;
+  if (command === "choose_vault") return null;
+  if (command === "manage_memories_filtered") {
+    const filtered = rows
+      .filter((row) =>
+        args.filter === "hidden"
+          ? row.hidden || !["active", "tentative"].includes(row.status)
+          : args.filter === "tentative"
+            ? !row.hidden && row.status === "tentative"
+            : !row.hidden && ["active", "tentative"].includes(row.status),
+      )
+      .filter((_, index) => scope === "personal" || index === 3);
+    return { memories: filtered, total: filtered.length, next_offset: null };
+  }
+  if (command === "managed_memory_view") {
+    const memory = memories.find((row) => row.id === args.id)!;
+    return { memory, hidden: memory.hidden, can_restore: memory.can_restore };
+  }
+  if (command === "managed_memory_source")
+    return events.get(String(args.eventId));
+  if (command === "list_conversations")
+    return {
+      conversations: imported ? sources : [],
+      total: imported ? sources.length : 0,
+      next_offset: null,
+      note: "合成示例，不代表真实资料",
+    };
+  if (command === "preview_note") {
+    notePreview = {
+      preview_id: "demo_note_preview",
+      content: String(args.content),
+      redacted: false,
+    };
+    return notePreview;
+  }
+  if (command === "confirm_note") {
+    if (!notePreview || args.previewId !== notePreview.preview_id)
+      throw new Error("笔记预览已失效");
+    notes.push({
+      ref: `event:demo_note_${notes.length}`,
+      text: notePreview.content,
+      conversation_ref: "demo_notes",
+      conversation_title: "你补充的近况",
+      kind: "event",
+      occurred_at: now,
+    });
+    notePreview = null;
+    return { ref: notes.at(-1)!.ref };
+  }
+  if (command === "chatgpt_connection_plan")
+    return {
+      local_readiness: "permission_required",
+      upstream_verification: "not_checked",
+      official_connect_url: "https://chatgpt.com/plugins",
+      official_tunnel_url:
+        "https://platform.openai.com/settings/organization/tunnels",
+      last_local_read_at: null,
+      last_local_bootstrap_at: null,
+    };
+  if (command === "event_location") {
+    if (mode === "location-error")
+      throw new Error("原话暂时无法定位，请重新查找");
+    const match = /^event:source_demo_(\d+)_message_(\d+)$/.exec(
+      String(args.reference),
+    );
+    if (!match) throw new Error("合成原话不存在");
+    return {
+      conversation_ref: `source_demo_${match[1]}`,
+      offset: Number(match[2]),
+    };
+  }
+  if (command === "conversation_messages") {
+    const source = sources.find(
+      (row) => row.session_ref === args.conversationRef,
+    )!;
+    const offset = Number(args.offset || 0);
+    const messages = Array.from(
+      { length: Math.min(4, source.message_count - offset) },
+      (_, i) => ({
+        ref: `event:${source.session_ref}_message_${offset + i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        text:
+          i % 2 === 0
+            ? "报告第三版已经发给评审组，正文撰写可以标为完成。\n\n只留下一个勘误：图 4 的纵轴单位改为万元。暂时不增加新附录。"
+            : "收到。后续范围是修正图 4 的单位，正文交付已经完成；9 月 28 日仍在撰写的计划属于历史状态。",
+        assets:
+          mode === "assets" && i === 0
+            ? {
+                files: [
+                  {
+                    source_file_id: "demo_file",
+                    name: "autumn-report-v3.pdf",
+                    byte_count: 182400,
+                    payload_status: "not_in_export",
+                  },
+                ],
+                citations: [
+                  { url: "https://reference.example/report-method", title: "" },
+                ],
+                tool_trace: [
+                  { type: "web_search", payload_status: "not_in_export" },
+                ],
+                files_total: 1,
+                citations_total: 1,
+                trace_total: 1,
+                unsupported_total: 1,
+                truncated: false,
+              }
+            : null,
+        occurred_at: i === 3 ? null : "2026-10-07T14:25:00Z",
+        captured_at: now,
+        text_truncated: false,
+        source: { platform: source.platform },
+        branch: {
+          parent_ref: i
+            ? `event:${source.session_ref}_message_${offset + i - 1}`
+            : null,
+          on_current_path: true,
+          is_branch_end: false,
+          relationship_known: true,
+          child_count: 1,
+          gap_before: false,
+        },
+      }),
+    );
+    const sourceIndex = sources.indexOf(source);
+    if (sourceIndex > 0)
+      messages.forEach((message) => {
+        message.text = entries[(sourceIndex + 1) % entries.length][1];
+      });
+    if (mode === "assets" && messages[0]) messages[0].text = "";
+    return {
+      ...source,
+      messages,
+      total: source.message_count,
+      next_offset:
+        offset + messages.length < source.message_count
+          ? offset + messages.length
+          : null,
+      offset,
+      order_known: true,
+      order_kind: "single_branch",
+      coverage: "合成示例",
+    };
+  }
+  if (command === "application_import_result")
+    return {
+      job: completeJob,
+      coverage: {
+        expanded_bytes: 38890423,
+        archive_entries: 12,
+        conversations: 8,
+        events: 344,
+        ignored_values: 0,
+        ignored_files: 11,
+        hidden_fragments: 3,
+        unsupported_fragments: 1,
+        omitted_messages: 0,
+        file_references: 3,
+        citations: 5,
+        trace_placeholders: 2,
+      },
+    };
+  if (command === "application_jobs") {
+    if (mode === "unavailable")
+      throw {
+        code: "storage",
+        message: "本地任务状态暂不可读取",
+        action: "重新打开空间后重试",
+        retryable: true,
+        committed_events: 0,
+      };
+    return jobs;
+  }
+  if (command === "import_sources") {
+    if (mode === "cancel") return null;
+    if (mode === "pick-error")
+      throw {
+        code: "permission_denied",
+        message: "没有读取所选文件的权限",
+        action: "请重新选择可读取的本机文件",
+        file_name: "导出示例.zip",
+        retryable: false,
+        committed_events: 0,
+      };
+    if (mode === "first-use") {
+      imported = true;
+      jobs = [completeJob];
+      return completeJob;
+    }
+    const job = {
+      ...completeJob,
+      job_id: "job_demo_new",
+      request_id: args.requestId,
+      state: "running",
+      phase: "parsing",
+      progress: {
+        ...completeJob.progress,
+        events_total: null,
+        events_processed: 0,
+        events_added: 0,
+        events_duplicates: 0,
+        files_processed: 0,
+      },
+    } as JobStatus;
+    jobs = [job, ...jobs.filter((item) => item.job_id !== job.job_id)];
+    return job;
+  }
+  if (
+    command === "application_job_pause" ||
+    command === "application_job_resume"
+  ) {
+    const job = jobs.find((item) => item.job_id === args.jobId)!;
+    job.state = command.endsWith("pause") ? "paused" : "running";
+    job.can_resume = job.state === "paused";
+    job.error = null;
+    return job;
+  }
+  if (command === "search_records")
+    return {
+      results: [
+        ...notes.filter((note) => note.text.includes(String(args.query))),
+        ...rows
+          .filter(
+            (row) => !row.hidden && row.content.includes(String(args.query)),
+          )
+          .map((row) => ({
+            ref: `memory:${row.id}`,
+            kind: "memory",
+            text: row.content,
+            state: row.status,
+            evidence: row.evidence,
+            occurred_at: row.updated_at,
+          })),
+      ],
+      truncated: false,
+    };
+  if (
+    command === "review_memory_edit" ||
+    command === "review_memory_visibility"
+  ) {
+    const memory = memories.find((row) => row.id === args.id)!;
+    pending = {
+      preview_id: "review_demo",
+      operation:
+        command === "review_memory_edit"
+          ? "edit"
+          : args.restore
+            ? "restore"
+            : "forget",
+      before: memory,
+      after:
+        command === "review_memory_edit"
+          ? (args.edit as MemoryReview["after"])
+          : null,
+      affected_events: command === "review_memory_edit" ? 0 : 2,
+      affected_memories: 1,
+      requires_protected_approval: memory.protected,
+      warning:
+        command === "review_memory_edit"
+          ? "保存新的记忆版本，原始对话保持不变。"
+          : "相关记忆与原始来源将退出检索和后续整理；文件不删除，可检查后恢复。",
+    };
+    return pending;
+  }
+  if (command === "confirm_memory_change") {
+    if (!pending) throw new Error("确认已过期");
+    if (pending.requires_protected_approval && !args.approveProtected)
+      throw new Error("请确认受保护内容的修改");
+    const index = memories.findIndex((row) => row.id === pending!.before.id);
+    if (pending.after)
+      memories[index] = {
+        ...memories[index],
+        ...pending.after,
+        revision: memories[index].revision + 1,
+      };
+    else {
+      memories[index].hidden = pending.operation === "forget";
+      memories[index].can_restore = pending.operation === "forget";
+    }
+    pending = null;
+    return {};
+  }
+  if (command === "prepare_client_config")
+    return {
+      mcpServers: {
+        recallcard: {
+          command: "/合成示例/recallcard",
+          args: ["--vault", "/合成示例/RecallCard", "mcp", "--scope", scope],
+        },
+      },
+    };
+  if (command === "install_browser_connection")
+    return {
+      registered: true,
+      registration: "/合成示例/native-host.json",
+      capture_enabled: args.allowCapture,
+      note: "示例注册完成，尚无浏览器调用回执。",
+    };
+  if (command === "memory_runtime_status")
+    return {
+      schema: "recallcard.memory-runtime/1",
+      state: "unconfigured",
+      message: "后台整理尚未配置；已保存来源仍可搜索",
+      config: {
+        schema: "recallcard.memory-runtime/1",
+        enabled: false,
+        paused: false,
+        scope,
+        provider: null,
+        consent: null,
+        budget: {
+          max_calls_per_month: 100,
+          max_reserved_tokens_per_month: 1000000,
+          max_output_tokens_per_call: 4096,
+          max_request_bytes_per_call: 1048576,
+        },
+        quiet_seconds: 30,
+        batch_size: 16,
+        max_projection_bytes: 262144,
+      },
+      usage: {
+        month: "2026-10",
+        reserved_calls: 0,
+        reserved_tokens: 0,
+        reported_input_tokens: 0,
+        reported_output_tokens: 0,
+        calls_with_unknown_usage: 0,
+      },
+      jobs: [],
+      raw_search_available: true,
+      budget_note: "token 预留是资源上限，不是准确费用",
+    };
   throw new Error(`合成入口未实现命令：${command}`);
 }
-createRoot(document.getElementById('root')!).render(<App service={new RecallService(transport, true)} />);
+createRoot(document.getElementById("root")!).render(
+  <App service={new RecallService(transport, true)} />,
+);
