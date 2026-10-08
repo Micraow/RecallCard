@@ -46,6 +46,10 @@ sudo apt-get install git libgtk-3-0 libwebkit2gtk-4.1-0
 ./运行桌面版.sh
 ```
 
+新版运行包入口会先检查动态库；在 Debian / Ubuntu x86_64 上还会检查 WebKit 的固定辅助程序及其依赖。缺少时会停止并给出具体文件与官方包安装提示；有可用的系统对话框工具时也会弹窗。不会自动安装软件或关闭沙箱。可运行 `./运行桌面版.sh --check-runtime` 只检查环境，不打开窗口；它不是完整功能验收。
+
+仅解压 `.so` 再设置库搜索路径，仍可能缺少 `/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess` 等固定位置的辅助程序。应安装完整的发行版包，已安装但文件缺失时可使用 `sudo apt-get install --reinstall libwebkit2gtk-4.1-0`。官方文件清单：[Debian](https://packages.debian.org/trixie/amd64/libwebkit2gtk-4.1-0/filelist)、[Ubuntu](https://packages.ubuntu.com/jammy-updates/amd64/libwebkit2gtk-4.1-0/filelist)。没有管理员安装能力的环境可先使用 CLI；不要把库检查通过当作真实图形界面已验收。
+
 仅 Linux x86_64 的合成归档、临时项目和真实原生窗口路径已验证。没有将本次验收扩写为 macOS、Windows、Arch/Wayland、用户机器或已登录 AI 网站全部通过。
 
 ## 旧资料与回退

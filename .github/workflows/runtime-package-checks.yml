@@ -1,0 +1,18 @@
+name: Linux 启动诊断与运行包合同
+on:
+  push:
+    branches: ["work/connected-context-v0.7"]
+    paths: ["scripts/desktop_launcher.sh", "scripts/package_desktop.py", "scripts/tests/test_desktop_launcher.py", "scripts/tests/test_runtime_package.py", ".github/workflows/runtime-package-checks.yml"]
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: 检查脚本与无系统改动的运行包回归
+        run: |
+          sh -n scripts/desktop_launcher.sh
+          /usr/bin/python3 -m unittest discover -s scripts/tests -p 'test_desktop_launcher.py' -v
+          /usr/bin/python3 -m unittest discover -s scripts/tests -p 'test_runtime_package.py' -v

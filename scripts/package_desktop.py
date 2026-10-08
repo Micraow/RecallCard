@@ -83,7 +83,7 @@ def main():
         'recallcard-desktop': (args.binary.read_bytes(), True),
         'recallcard': (args.cli.read_bytes(), True),
         '开始使用-中文.md': (guide.encode(), False),
-        '运行桌面版.sh': (b'#!/bin/sh\nset -eu\nAPP_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\nexec "$APP_DIR/recallcard-desktop"\n', True),
+        '运行桌面版.sh': ((ROOT/'scripts/desktop_launcher.sh').read_bytes(), True),
     }
     for directory in ['docs', 'fixtures']:
         for path in (ROOT/directory).rglob('*'):

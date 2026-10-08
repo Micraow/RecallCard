@@ -31,8 +31,9 @@ class RuntimePackageTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        for name in ['docs', 'fixtures', 'extension', 'desktop/src-tauri', 'desktop/third-party-licenses']:
+        for name in ['docs', 'fixtures', 'extension', 'scripts', 'desktop/src-tauri', 'desktop/third-party-licenses']:
             (self.root / name).mkdir(parents=True)
+        (self.root/'scripts/desktop_launcher.sh').write_bytes((ROOT/'scripts/desktop_launcher.sh').read_bytes())
         (self.root/'docs/desktop-quickstart-v0.5.md').write_text('[说明](detail.md) [官方](https://example.org/doc) [本节](#标题)')
         (self.root/'docs/detail.md').write_text('合成说明')
         (self.root/'desktop/src-tauri/tauri.conf.json').write_text('{"version":"0.5.0"}')
@@ -75,6 +76,7 @@ class RuntimePackageTests(unittest.TestCase):
         self.assertIn(b'docs/detail.md',files['开始使用-中文.md'][0])
         self.assertIn(b'https://example.org/doc',files['开始使用-中文.md'][0])
         self.assertIn(b'](#',files['开始使用-中文.md'][0])
+        self.assertEqual(files['运行桌面版.sh'][0], (ROOT/'scripts/desktop_launcher.sh').read_bytes())
         with zipfile.ZipFile(first) as archive:
             self.assertTrue(all(entry.date_time==(2026,1,1,0,0,0) for entry in archive.infolist()))
 
