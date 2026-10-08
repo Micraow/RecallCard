@@ -87,7 +87,13 @@ fn startup_resume_compact_clear_use_official_envelope_and_stable_context() {
         true,
     );
     let mut outputs = Vec::new();
-    for input in [STARTUP, RESUME, COMPACT, CLEAR] {
+    for input in [
+        STARTUP,
+        RESUME,
+        COMPACT,
+        CLEAR,
+        r#"{"hook_event_name":"SessionStart","source":"fork"}"#,
+    ] {
         let output = invoke(&vault, input).unwrap();
         assert_eq!(output.as_object().unwrap().len(), 1);
         assert_eq!(output["hookSpecificOutput"].as_object().unwrap().len(), 2);
@@ -125,7 +131,7 @@ fn unknown_event_source_and_missing_fields_fail_closed() {
     for input in [
         UNKNOWN,
         r#"{"hook_event_name":"SessionEnd","source":"clear"}"#,
-        r#"{"hook_event_name":"SessionStart","source":"fork"}"#,
+        r#"{"hook_event_name":"SessionStart","source":"Fork"}"#,
         r#"{"hook_event_name":"SessionStart","source":"unknown"}"#,
         r#"{"hook_event_name":"SessionStart","source":"Startup"}"#,
         r#"{"hook_event_name":"SessionStart"}"#,

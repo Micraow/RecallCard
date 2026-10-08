@@ -49,7 +49,9 @@ fn build_info() -> recallcard::BuildInfo {
 }
 
 // v0.6 GUI 与 CLI 共用应用任务，保留结构化错误，不吞掉文件/恢复诊断。
-async fn execute_application<T: serde::Serialize + Send + 'static>(
+// 这里只在线程间传值，并不序列化。内部权限句柄不能为了通过此封装而导出为JSON；
+// 真正的 #[tauri::command] 返回类型仍由 Tauri 检查可序列化的公开 DTO。
+async fn execute_application<T: Send + 'static>(
     service: Service,
     f: impl FnOnce(&mut DesktopSession) -> recallcard::application::AppResult<T> + Send + 'static,
 ) -> recallcard::application::AppResult<T> {

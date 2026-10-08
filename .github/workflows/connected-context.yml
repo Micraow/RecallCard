@@ -69,13 +69,16 @@ jobs:
           cargo fmt --all -- --check
           cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
           cargo test --locked --workspace --target-dir desktop/src-tauri/target
+      - name: 核心真实结果：${{ steps.core_checks.outcome }}
+        if: always()
+        run: echo 'CORE_CHECKS_OUTCOME=${{ steps.core_checks.outcome }}' >> "$GITHUB_STEP_SUMMARY"
       - name: 原生静态检查
         id: native_checks
-        continue-on-error: true
         run: |
           cargo clippy --locked --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: 编译同一源码的 GUI 与读取组件
         id: native_build
+        if: steps.native_checks.outcome == 'success'
         run: |
           cargo build --locked --release --bin recallcard --target-dir desktop/src-tauri/target
           cargo build --locked --release --features custom-protocol --manifest-path desktop/src-tauri/Cargo.toml
