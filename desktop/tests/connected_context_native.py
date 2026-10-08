@@ -24,15 +24,25 @@ class ConnectedJourney(FirstUseJourney):
         window = wait_for(lambda: self.dialog_windows(title), "真实项目目录选择器")[0]
         run("xdotool", "windowactivate", "--sync", window)
         wait_for(lambda: self.accessible_dialog(title), "项目目录辅助功能树可读")
-        self.navigate_file_folder(title, window, project)
-        def selection_ready():
-            if self.dialog_completed(title):
-                return True
-            return self.native_button(title, "Select") or self.native_button(title, "Open")
-        button = wait_for(selection_ready, "目录已选中或真实确认按钮可用")
-        if button is not True:
-            assert button.queryAction().doAction(0), "目录确认未被接受"
-        wait_for(lambda: self.dialog_completed(title), "项目选择器关闭")
+        try:
+            # Recent 是虚拟结果列表，正确粘贴路径也不代表已进入文件系统目录。
+            # 与已验证的原生文件选择流程相同，先正常导航到 Home。
+            run("xdotool", "key", "--clearmodifiers", "alt+Home")
+            wait_for(lambda: self.native_button(title, "Open") if self.native_window_active(title, window) else None,
+                     "退出Recent后真实目录的Open按钮可用", stable_reads=2)
+            self.capture(f"dialog-{self.dialog_count:02d}-home-folder", webview=False)
+            self.navigate_file_folder(title, window, project)
+            def selection_ready():
+                if self.dialog_completed(title):
+                    return True
+                return self.native_button(title, "Select") or self.native_button(title, "Open")
+            button = wait_for(selection_ready, "目录已选中或真实确认按钮可用")
+            if button is not True:
+                assert button.queryAction().doAction(0), "目录确认未被接受"
+            wait_for(lambda: self.dialog_completed(title), "项目选择器关闭")
+        finally:
+            if self.dialog_windows(title):
+                self.describe_dialog(title, "after-navigation")
 
     def exercise(self):
         archive = self.create_archive()
@@ -66,6 +76,9 @@ class ConnectedJourney(FirstUseJourney):
         cli = self.cli_result("status")["build"]
         assert gui == {key: cli[key] for key in ["version", "commit", "dirty"]}
         assert gui["version"].startswith("0.7.") and gui["commit"] not in {"", "unknown"}
+        assert not gui["dirty"], "验收必须使用冻结的干净构建"
+        if self.expected_build_commit:
+            assert gui["commit"] == self.expected_build_commit, "实际程序不属于预期的编译提交"
         self.build_identity = {"gui": gui, "cli": cli}
         (self.artifacts / "build-identity.json").write_text(json.dumps(self.build_identity, ensure_ascii=False, indent=2))
 
@@ -154,6 +167,7 @@ def main():
     parser.add_argument("--application", type=Path, required=True)
     parser.add_argument("--cli", type=Path, required=True)
     parser.add_argument("--artifacts", type=Path, required=True)
+    parser.add_argument("--expected-build-commit", default=os.environ.get("GITHUB_SHA"))
     args = parser.parse_args()
     for name in ["WebKitWebDriver", "xdotool", "xclip", "scrot", "openbox"]:
         if not shutil.which(name): parser.error(f"缺少官方验收依赖：{name}")
@@ -170,6 +184,7 @@ def main():
         for name, suffix in [("XDG_DATA_HOME", "data"), ("XDG_CONFIG_HOME", "config"), ("RECALLCARD_STATE_DIR", "state")]:
             os.environ[name] = str(temporary / suffix)
         smoke = ConnectedJourney(args, temporary)
+        smoke.expected_build_commit = args.expected_build_commit
         success = False
         try:
             smoke.exercise()

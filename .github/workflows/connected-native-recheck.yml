@@ -1,0 +1,86 @@
+name: 固定0.7程序的原生连接复验
+on:
+  workflow_dispatch:
+  push:
+    branches: ["validate/connected-native-20261008"]
+concurrency:
+  group: connected-native-recheck-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native:
+    name: 同一0.7程序 / 项目配置与文件背景完整闭环
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 核对应用源码与原构建完全一致
+        run: git diff --exit-code 9603053741e9d1f6dd86b76566f36420f20a2481 -- crates Cargo.toml Cargo.lock desktop/ui desktop/src-tauri desktop/frontend desktop/package.json desktop/package-lock.json python extension VERSION
+      - name: 验收驱动与传输合同
+        run: python3 -m unittest discover -s desktop/tests -p "test_native_*.py" -v
+      - name: 核对原编译和全部前置真实结果
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runId = 37776430843;
+            const expected = '9603053741e9d1f6dd86b76566f36420f20a2481';
+            const {data: run} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: runId});
+            if (run.status !== 'completed' || run.head_sha !== expected || run.path !== '.github/workflows/connected-context.yml') throw new Error('编译来源不符');
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({...context.repo, run_id: runId, per_page: 100});
+            const job = jobs.jobs.find(item => item.id === 113308349186);
+            // continue-on-error 的表面conclusion不能代替真实核心outcome。
+            for (const name of ['构建实际内嵌的新界面', '核验系统 Python 3.10 的协议兼容性', '核心真实结果：success', '原生静态检查', '编译同一源码的 GUI 与读取组件']) {
+              if (!job?.steps.some(step => step.name === name && step.conclusion === 'success')) throw new Error('前置门禁未通过：' + name);
+            }
+            for (const id of [113308348669, 113308349053]) {
+              if (!jobs.jobs.some(item => item.id === id && item.conclusion === 'success')) throw new Error('同源GUI或扩展浏览器验收未通过');
+            }
+            const {data: artifacts} = await github.rest.actions.listWorkflowRunArtifacts({...context.repo, run_id: runId, per_page: 100});
+            const artifact = artifacts.artifacts.find(item => item.id === 11551191073);
+            if (!artifact || artifact.expired || artifact.name !== 'RecallCard-v07-compiled-' + expected || artifact.digest !== 'sha256:8f071005b6c55b3cea112d8394cfe350f59a2458943cd4c82779a6ce451de2f6') throw new Error('固定程序产物不可验证');
+      - uses: actions/download-artifact@v4
+        with:
+          name: RecallCard-v07-compiled-9603053741e9d1f6dd86b76566f36420f20a2481
+          run-id: '37776430843'
+          github-token: ${{ github.token }}
+          path: compiled
+      - name: 核对实际程序摘要后启用执行权限
+        run: |
+          printf '%s  %s\n' 'd889381f0275de9b9c63f3509f2f5f487ce14bf4eb5703344e5bc9806ac38f1b' compiled/recallcard-desktop '46569d01a1acebb681700f1c5074d6c8faedb41e5da8059ac56b0af812b2692b' compiled/recallcard | sha256sum --check --strict
+          chmod 755 compiled/recallcard-desktop compiled/recallcard
+      - name: 安装官方原生运行依赖
+        timeout-minutes: 16
+        run: |
+          source_list="$RUNNER_TEMP/recallcard-ubuntu-official.list"
+          cat > "$source_list" <<'EOF'
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy-updates main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu jammy-security main universe
+          EOF
+          apt_options=(-o "Dir::Etc::sourcelist=$source_list" -o Dir::Etc::sourceparts=- -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          for attempt in 1 2; do
+            if sudo timeout --kill-after=30s 3m apt-get "${apt_options[@]}" --error-on=any update; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then exit 1; fi
+            sleep 5
+          done
+          sudo timeout --kill-after=30s 8m apt-get "${apt_options[@]}" install -y --no-install-recommends libwebkit2gtk-4.1-0 libgtk-3-0 webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
+      - name: 复验真实窗口与原生交接恢复闭环
+        timeout-minutes: 8
+        env:
+          LANG: C.UTF-8
+          GDK_BACKEND: x11
+        run: dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" /usr/bin/python3 desktop/tests/connected_context_native.py --expected-build-commit 9603053741e9d1f6dd86b76566f36420f20a2481 --application "$PWD/compiled/recallcard-desktop" --cli "$PWD/compiled/recallcard" --artifacts "$RUNNER_TEMP/recallcard-v07-native-recheck"
+      - name: 保存本轮原生截图与诊断
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-v07-native-recheck-${{ github.sha }}
+          path: ${{ runner.temp }}/recallcard-v07-native-recheck/
+          if-no-files-found: ignore
+          retention-days: 14
