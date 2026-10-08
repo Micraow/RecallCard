@@ -1,0 +1,37 @@
+{
+  "schema": "recallcard.validated-runtime/1",
+  "application_version": "0.7.0-dev",
+  "application_commit": "9603053741e9d1f6dd86b76566f36420f20a2481",
+  "profile": "release",
+  "binaries": {
+    "recallcard-desktop": "d889381f0275de9b9c63f3509f2f5f487ce14bf4eb5703344e5bc9806ac38f1b",
+    "recallcard": "46569d01a1acebb681700f1c5074d6c8faedb41e5da8059ac56b0af812b2692b"
+  },
+  "build": {
+    "run_id": 37776430843,
+    "job_id": 113308349186,
+    "artifact_id": 11551191073,
+    "artifact_name": "RecallCard-v07-compiled-9603053741e9d1f6dd86b76566f36420f20a2481",
+    "artifact_sha256": "8f071005b6c55b3cea112d8394cfe350f59a2458943cd4c82779a6ce451de2f6"
+  },
+  "acceptance": {
+    "commit": "0af9d0e228cc8fd60cb82a29e39f7b9402205713",
+    "run_id": 37779993247,
+    "suite": "v0.7-connected-context-native",
+    "native_job_id": 113320381938,
+    "native_artifact_id": 11552065032,
+    "native_artifact_sha256": "191c1a651083b7478493c78b913e8c6a4384b55e7dc4fc88c9dab4a8a01b5127",
+    "browser_run_id": 37776430843,
+    "browser_job_id": 113308348669,
+    "relay_job_id": 113308349053,
+    "browser_artifact_id": 11550088932,
+    "browser_artifact_sha256": "88a20c8ff2aae68ebb5d04f2965b56b9090e9e28b50f368fe033c8ede935dd51"
+  },
+  "limitations": [
+    "Linux X11/Xvfb合成官方归档与临时项目的真实原生验证",
+    "Codex/Claude进程及真实网页账号未执行",
+    "浏览器为开发安装，未提供商店一键安装或自动剪贴板监听",
+    "项目与受保护恢复目录须处于同一文件系统",
+    "旧Memory自动过时与真实模型整理质量未纳入本轮验收"
+  ]
+}

@@ -15,6 +15,15 @@ from native_smoke import ROOT, wait_for, run
 
 
 class ConnectedJourney(FirstUseJourney):
+    def capture(self, name, webview=True):
+        if self.driver and webview:
+            # 业务谓词成立早于WebKit绘制；只等绘制，不修改页面或代替用户动作。
+            ready = self.driver.observe("return Promise.race([document.fonts.ready.then(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))),new Promise(resolve=>setTimeout(()=>resolve(false),3000))])")
+            assert ready is True, "截图等待绘制超时"
+            observed = self.driver.observe("return {text:document.body.innerText,viewport:{width:innerWidth,height:innerHeight},modal:[...document.querySelectorAll('dialog[open]')].map(n=>({text:n.innerText,width:n.getBoundingClientRect().width,height:n.getBoundingClientRect().height}))}")
+            (self.artifacts / f"{name}-visible.json").write_text(json.dumps(observed, ensure_ascii=False, indent=2))
+        super().capture(name, webview)
+
     def cli_result(self, *args):
         return json.loads(run(str(self.cli), "--vault", str(self.vault), "--json", *args))["result"]
 

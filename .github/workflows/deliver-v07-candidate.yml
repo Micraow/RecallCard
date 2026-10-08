@@ -1,0 +1,149 @@
+name: 0.7 项目接入候选包隔离验证
+on:
+  workflow_dispatch:
+  push:
+    branches: ["validate/v07-package-20261008"]
+concurrency:
+  group: v07-package-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  package:
+    name: 复用精确程序 / 解压包项目连接完整闭环
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 核对应用源码未变且包装合同通过
+        run: |
+          git diff --exit-code 9603053741e9d1f6dd86b76566f36420f20a2481 -- crates Cargo.toml Cargo.lock desktop/ui desktop/src-tauri desktop/frontend desktop/package.json desktop/package-lock.json python extension VERSION
+          python3 -m unittest discover -s scripts/tests -p 'test_runtime_package.py' -v
+          python3 -m py_compile desktop/tests/connected_context_native.py
+      - name: 核对原构建、同轮新版验收和固定产物来源
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const source = JSON.parse(fs.readFileSync('scripts/validated-runtime-v07-source.json', 'utf8'));
+            const {data: build} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: source.build.run_id});
+            if (source.application_version !== '0.7.0-dev' || source.acceptance.suite !== 'v0.7-connected-context-native' || build.status !== 'completed' || build.head_sha !== source.application_commit || build.path !== '.github/workflows/connected-context.yml') throw new Error('原构建提交不符');
+            const {data: buildJobs} = await github.rest.actions.listJobsForWorkflowRun({...context.repo, run_id: source.build.run_id, per_page: 100});
+            const buildJob = buildJobs.jobs.find(item => item.id === source.build.job_id);
+            for (const name of ['构建实际内嵌的新界面', '核验系统 Python 3.10 的协议兼容性', '核心真实结果：success', '原生静态检查', '编译同一源码的 GUI 与读取组件']) {
+              if (!buildJob?.steps.some(step => step.name === name && step.conclusion === 'success')) throw new Error('原构建步骤未通过：' + name);
+            }
+            // 原编译运行仅在旧驱动目录选择处失败；不得将 continue-on-error 视作核心通过。
+            for (const id of [source.acceptance.browser_job_id, source.acceptance.relay_job_id]) {
+              if (!buildJobs.jobs.some(job => job.id === id && job.conclusion === 'success')) throw new Error('同源GUI或扩展验收未成功');
+            }
+            const {data: artifacts} = await github.rest.actions.listWorkflowRunArtifacts({...context.repo, run_id: source.build.run_id, per_page: 100});
+            const artifact = artifacts.artifacts.find(item => item.id === source.build.artifact_id);
+            if (!artifact || artifact.expired || artifact.name !== source.build.artifact_name || artifact.digest !== 'sha256:' + source.build.artifact_sha256) throw new Error('原程序产物不可验证');
+            const {data: accepted} = await github.rest.actions.getWorkflowRun({...context.repo, run_id: source.acceptance.run_id});
+            if (accepted.head_sha !== source.acceptance.commit || accepted.status !== 'completed' || accepted.conclusion !== 'success') throw new Error('固定程序原生复验未成功');
+            const {data: acceptedJobs} = await github.rest.actions.listJobsForWorkflowRun({...context.repo, run_id: source.acceptance.run_id, per_page: 100});
+            for (const id of [source.acceptance.native_job_id]) {
+              if (!acceptedJobs.jobs.some(job => job.id === id && job.conclusion === 'success')) throw new Error('验收作业未成功');
+            }
+            const {data: acceptedArtifacts} = await github.rest.actions.listWorkflowRunArtifacts({...context.repo, run_id: source.acceptance.run_id, per_page: 100});
+            const native = acceptedArtifacts.artifacts.find(item => item.id === source.acceptance.native_artifact_id);
+            if (!native || native.expired || native.digest !== 'sha256:' + source.acceptance.native_artifact_sha256) throw new Error('原生验收证据不符');
+            const browser = artifacts.artifacts.find(item => item.id === source.acceptance.browser_artifact_id);
+            if (!browser || browser.expired || browser.digest !== 'sha256:' + source.acceptance.browser_artifact_sha256) throw new Error('浏览器验收证据不符');
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: '11551191073'
+          run-id: '37776430843'
+          github-token: ${{ github.token }}
+          path: compiled
+          merge-multiple: true
+      - name: 核对两份程序摘要
+        run: |
+          printf '%s  %s\n' 'd889381f0275de9b9c63f3509f2f5f487ce14bf4eb5703344e5bc9806ac38f1b' compiled/recallcard-desktop '46569d01a1acebb681700f1c5074d6c8faedb41e5da8059ac56b0af812b2692b' compiled/recallcard | sha256sum --check --strict
+      - name: 仅解析GUI与CLI的锁定Linux依赖，不重新编译
+        timeout-minutes: 8
+        env:
+          CARGO_NET_RETRY: '2'
+          CARGO_HTTP_TIMEOUT: '30'
+        run: |
+          timeout --kill-after=15s 3m cargo metadata --locked --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$RUNNER_TEMP/gui-metadata.json"
+          timeout --kill-after=15s 3m cargo metadata --locked --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$RUNNER_TEMP/cli-metadata.json"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: 获取内嵌前端的精确许可证
+        working-directory: desktop
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: 同一输入打包两次并核对ZIP完全一致
+        timeout-minutes: 4
+        run: |
+          args=(--binary compiled/recallcard-desktop --cli compiled/recallcard --metadata "$RUNNER_TEMP/gui-metadata.json" --metadata "$RUNNER_TEMP/cli-metadata.json" --commit 9603053741e9d1f6dd86b76566f36420f20a2481 --packaging-commit "$GITHUB_SHA" --packaging-run-id "$GITHUB_RUN_ID" --acceptance-commit 0af9d0e228cc8fd60cb82a29e39f7b9402205713 --acceptance-run-id 37779993247 --gui-sha256 d889381f0275de9b9c63f3509f2f5f487ce14bf4eb5703344e5bc9806ac38f1b --cli-sha256 46569d01a1acebb681700f1c5074d6c8faedb41e5da8059ac56b0af812b2692b --provenance scripts/validated-runtime-v07-source.json --profile release)
+          python3 scripts/package_desktop.py "${args[@]}" --out "$RUNNER_TEMP/runtime-first" > "$RUNNER_TEMP/package-first.json"
+          python3 scripts/package_desktop.py "${args[@]}" --out "$RUNNER_TEMP/runtime-second" > "$RUNNER_TEMP/package-second.json"
+          cmp "$RUNNER_TEMP/runtime-first/RecallCard-Desktop-0.7.0-dev-linux-x86_64-9603053.zip" "$RUNNER_TEMP/runtime-second/RecallCard-Desktop-0.7.0-dev-linux-x86_64-9603053.zip"
+          mkdir "$RUNNER_TEMP/runtime-evidence"
+          cp "$RUNNER_TEMP/package-first.json" "$RUNNER_TEMP/package-second.json" "$RUNNER_TEMP/runtime-evidence/"
+      - name: 安全解压并核对文件摘要与执行权限
+        run: |
+          python3 scripts/verify_runtime_package.py --archive "$RUNNER_TEMP/runtime-first/RecallCard-Desktop-0.7.0-dev-linux-x86_64-9603053.zip" --destination "$RUNNER_TEMP/isolated-runtime" --provenance scripts/validated-runtime-v07-source.json --report "$RUNNER_TEMP/runtime-evidence/extraction.json"
+      - name: 安装官方原生运行依赖
+        timeout-minutes: 16
+        run: |
+          source_list="$RUNNER_TEMP/recallcard-ubuntu-official.list"
+          cat > "$source_list" <<'EOF'
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu jammy-updates main universe
+          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu jammy-security main universe
+          EOF
+          apt_options=(-o "Dir::Etc::sourcelist=$source_list" -o Dir::Etc::sourceparts=- -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          for attempt in 1 2; do
+            if sudo timeout --kill-after=30s 3m apt-get "${apt_options[@]}" --error-on=any update; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then exit 1; fi
+            sleep 5
+          done
+          sudo timeout --kill-after=30s 8m apt-get "${apt_options[@]}" install -y --no-install-recommends libwebkit2gtk-4.1-0 libgtk-3-0 webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
+      - name: 移走开发界面后从解压目录经启动脚本完整首用验收
+        timeout-minutes: 8
+        env:
+          LANG: C.UTF-8
+          GDK_BACKEND: x11
+        run: |
+          repository="$PWD"
+          mkdir "$RUNNER_TEMP/hidden-desktop-ui"
+          for name in ui frontend dist; do
+            if [ -e "$repository/desktop/$name" ]; then mv "$repository/desktop/$name" "$RUNNER_TEMP/hidden-desktop-ui/$name"; fi
+          done
+          trap 'for name in ui frontend dist; do if [ -e "$RUNNER_TEMP/hidden-desktop-ui/$name" ]; then mv "$RUNNER_TEMP/hidden-desktop-ui/$name" "$repository/desktop/$name"; fi; done' EXIT
+          test ! -e "$repository/desktop/ui"
+          test ! -e "$repository/desktop/frontend"
+          test ! -e "$repository/desktop/dist"
+          cd "$RUNNER_TEMP/isolated-runtime"
+          printf '%s\n' '开发界面目录已移走，工作目录为新解压目录，启动脚本exec同目录GUI；CLI也来自同目录。' > "$RUNNER_TEMP/runtime-evidence/isolation.txt"
+          pwd >> "$RUNNER_TEMP/runtime-evidence/isolation.txt"
+          PYTHONPATH="$PWD/python" /usr/bin/python3 -B -c 'import recallcard_dream.runtime, recallcard_worker; print("随包Python组件可由系统解释器导入，未调用模型")'
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" /usr/bin/python3 "$repository/desktop/tests/connected_context_native.py" --expected-build-commit 9603053741e9d1f6dd86b76566f36420f20a2481 --application "$PWD/运行桌面版.sh" --cli "$PWD/recallcard" --artifacts "$RUNNER_TEMP/runtime-evidence/native"
+          test ! -e "$repository/desktop/ui"
+          python3 "$repository/scripts/verify_runtime_package.py" --verify-only --archive "$RUNNER_TEMP/runtime-first/RecallCard-Desktop-0.7.0-dev-linux-x86_64-9603053.zip" --destination "$PWD" --provenance "$repository/scripts/validated-runtime-v07-source.json" --native-summary "$RUNNER_TEMP/runtime-evidence/native/summary.json" --report "$RUNNER_TEMP/runtime-evidence/post-native.json"
+      - name: 仅成功后保存版本化运行包与校验清单
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-v07-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/runtime-first/
+          if-no-files-found: error
+          retention-days: 30
+      - name: 保存隔离验收与打包证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-v07-package-isolation-${{ github.sha }}
+          path: ${{ runner.temp }}/runtime-evidence/
+          if-no-files-found: ignore
+          retention-days: 30

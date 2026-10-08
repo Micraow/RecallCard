@@ -71,7 +71,12 @@ def main():
         if version.startswith('0.6.') and (provenance.get('application_version') != version
                 or provenance.get('acceptance', {}).get('suite') != 'v0.6-first-use-native'):
             parser.error('v0.6运行包必须绑定明确版本与新版原生验收合同')
-    guide_name='desktop-quickstart-v0.6.md' if version.startswith('0.6.') else 'desktop-quickstart-v0.5.md'
+        if version.startswith('0.7.') and (provenance.get('application_version') != version
+                or provenance.get('acceptance', {}).get('suite') != 'v0.7-connected-context-native'):
+            parser.error('v0.7运行包必须绑定项目接入原生验收合同')
+    minor='.'.join(version.split('.')[:2])
+    if minor not in {'0.5','0.6','0.7'}:parser.error('此版本尚未定义运行包指南')
+    guide_name='desktop-quickstart-v'+minor+'.md'
     guide = (ROOT/'docs'/guide_name).read_text()
     guide = re.sub(r'\]\(([^)]+)\)', lambda match: match[0] if re.match(r'(?:[a-zA-Z][a-zA-Z0-9+.-]*:|/|#)', match[1]) else f'](docs/{match[1]})', guide)
     files = {
@@ -85,7 +90,7 @@ def main():
             if path.is_file() and path.suffix in {'.md', '.json', '.jsonl'}:
                 files[path.relative_to(ROOT).as_posix()] = (path.read_bytes(), False)
     for path in (ROOT/'extension').iterdir():
-        if path.is_file() and (path.suffix in {'.js','.html','.css'} or path.name == 'manifest.json'):
+        if path.is_file() and (path.suffix in {'.js','.html','.css','.md'} or path.name == 'manifest.json'):
             files['extension/'+path.name] = (path.read_bytes(), False)
     # 可选后台整理的公开 Python 代码随读取组件分发，不包含任何配置或凭据。
     for module in ['recallcard_dream', 'recallcard_worker']:

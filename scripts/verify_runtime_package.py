@@ -27,6 +27,18 @@ FIRST_USE_STEPS = [
     '820详情返回来源列表',
     '重启恢复已有背景不要求重新导入',
 ]
+CONNECTED_STEPS = [
+    '全新导入后显示真实连接状态且未自动授予权限',
+    '导入的原始来源可读可追溯',
+    '原生选择项目后只预览不写文件也不提前授权',
+    '一次批准写入真实项目配置并本机试读不伪造宿主回执',
+    '补充后入口自动刷新且受管理MCP从同一正本读到更新',
+    '重启保留配置并区分本机试读和实际客户端请求',
+    '820窗口连接状态与操作完整可读',
+    '撤权清除文件入口并拒绝旧连接继续读取且正本保留',
+]
+MODERN_SUITES = {'0.6.': ('v0.6-first-use-native', FIRST_USE_STEPS),
+                 '0.7.': ('v0.7-connected-context-native', CONNECTED_STEPS)}
 
 
 def check_native_summary(summary, result, source):
@@ -36,19 +48,22 @@ def check_native_summary(summary, result, source):
     steps = summary.get('passed_steps')
     version = result.get('application_version', '')
     suite = source.get('acceptance', {}).get('suite', 'legacy-native-37')
-    if version.startswith('0.6.'):
+    modern = next((value for prefix, value in MODERN_SUITES.items() if version.startswith(prefix)), None)
+    if modern:
         expected_cli = str((Path(result['destination'])/'recallcard').resolve())
-        if (suite != 'v0.6-first-use-native' or summary.get('suite') != suite or steps != FIRST_USE_STEPS
+        if (suite != modern[0] or summary.get('suite') != suite or steps != modern[1]
                 or summary.get('cli') != expected_cli or summary.get('invoke_mocked') is not False):
-            raise ValueError('v0.6 原生验收的流程、CLI位置或真实调用证据不符')
+            raise ValueError('新版原生验收的流程、CLI位置或真实调用证据不符')
+        if version.startswith('0.7.') and summary.get('external_agents_executed') is not False:
+            raise ValueError('v0.7 验收不能冒充外部Agent或账号已验证')
         build = summary.get('build') or {}
         if source.get('application_version') != version:
-            raise ValueError('v0.6 包版本与已验收程序来源不符')
+            raise ValueError('新版包版本与已验收程序来源不符')
         for name in ['gui', 'cli']:
             identity = build.get(name) or {}
             if (identity.get('commit') != source['application_commit']
                     or identity.get('version') != version or identity.get('dirty') is not False):
-                raise ValueError('v0.6 GUI与CLI不是同一已验收构建身份')
+                raise ValueError('新版GUI与CLI不是同一已验收构建身份')
     elif version.startswith('0.5.') and suite == 'legacy-native-37':
         if (source.get('application_version', version) != version
                 or summary.get('suite') is not None or not isinstance(steps, list)
@@ -116,6 +131,9 @@ def check_files(files, source):
     if version.startswith('0.6.') and (source.get('application_version') != version
             or source.get('acceptance', {}).get('suite') != 'v0.6-first-use-native'):
         raise ValueError('v0.6包不能使用缺少版本或新版验收合同的历史来源')
+    if version.startswith('0.7.') and (source.get('application_version') != version
+            or source.get('acceptance', {}).get('suite') != 'v0.7-connected-context-native'):
+        raise ValueError('v0.7包必须绑定本版真实项目接入验收，不能借用旧版流程')
     info['application_version'] = version
     return info
 

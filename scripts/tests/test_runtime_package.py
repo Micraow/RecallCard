@@ -314,5 +314,71 @@ class RuntimePackageTests(unittest.TestCase):
                      key=lambda node:node.lineno)
         self.assertEqual([ast.literal_eval(call.args[0]) for call in calls],verify.FIRST_USE_STEPS)
 
+    def test_v07_native_gate_requires_exact_scope_and_program_identity(self):
+        destination=self.root/'isolated'
+        result={'application':str(destination/'运行桌面版.sh'),'destination':str(destination),
+                'application_version':'0.7.0-dev'}
+        source={**self.source,'application_version':'0.7.0-dev',
+                'acceptance':{**self.source['acceptance'],'suite':'v0.7-connected-context-native'}}
+        identity={'version':'0.7.0-dev','commit':'a'*40,'dirty':False}
+        summary={'success':True,'suite':'v0.7-connected-context-native',
+                 'passed_steps':verify.CONNECTED_STEPS.copy(),'application':result['application'],
+                 'cli':str(destination/'recallcard'),'build':{'gui':identity.copy(),'cli':identity.copy()},
+                 'synthetic_data_only':True,'invoke_mocked':False,'external_agents_executed':False}
+        self.assertEqual(verify.check_native_summary(summary,result,source)['native_steps'],8)
+        for key,value in [('suite','v0.6-first-use-native'),('external_agents_executed',True),
+                          ('external_agents_executed',None),('invoke_mocked',True),
+                          ('cli','/tmp/old-cli'),('passed_steps',verify.CONNECTED_STEPS[:-1])]:
+            invalid=deepcopy(summary);invalid[key]=value
+            with self.subTest(key=key,value=value),self.assertRaises(ValueError):
+                verify.check_native_summary(invalid,result,source)
+        for part in ['gui','cli']:
+            invalid=deepcopy(summary);invalid['build'][part]['commit']='d'*40
+            with self.assertRaises(ValueError):verify.check_native_summary(invalid,result,source)
+
+    def test_v07_package_guide_and_relay_are_bound_to_current_acceptance(self):
+        (self.root/'desktop/src-tauri/tauri.conf.json').write_text(json.dumps({'version':'0.7.0-dev'}))
+        (self.root/'docs/desktop-quickstart-v0.7.md').write_text('合成项目接入指南')
+        (self.root/'extension/RELAY.md').write_text('合成接力边界')
+        with self.assertRaises(SystemExit):self.build()
+        self.source['application_version']='0.7.0-dev'
+        self.source['acceptance']['suite']='v0.7-connected-context-native'
+        self.provenance.write_text(json.dumps(self.source))
+        archive=self.build();files=verify.archive_files(archive)
+        self.assertEqual(files['开始使用-中文.md'][0].decode(),'合成项目接入指南')
+        self.assertEqual(files['extension/RELAY.md'][0].decode(),'合成接力边界')
+        self.assertEqual(verify.check_files(files,self.source)['application_version'],'0.7.0-dev')
+        changed=deepcopy(self.source);changed['acceptance']['suite']='v0.6-first-use-native'
+        info=json.loads(files['build-info.json'][0]);info['validated_source']=changed
+        files['build-info.json']=(json.dumps(info).encode(),0o644)
+        files['SHA256SUMS']=(''.join(f'{verify.sha(data)}  {name}\n' for name,(data,_) in sorted(files.items()) if name!='SHA256SUMS').encode(),0o644)
+        with self.assertRaisesRegex(ValueError,'v0.7包'):verify.check_files(files,changed)
+
+    def test_v07_driver_checkpoints_and_no_build_isolation_contract(self):
+        import ast
+        driver=(ROOT/'desktop/tests/connected_context_native.py').read_text()
+        tree=ast.parse(driver)
+        exercise=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='exercise')
+        calls=sorted((node for node in ast.walk(exercise) if isinstance(node,ast.Call)
+                      and isinstance(node.func,ast.Attribute) and node.func.attr=='checkpoint'),key=lambda node:node.lineno)
+        self.assertEqual([ast.literal_eval(call.args[0]) for call in calls],verify.CONNECTED_STEPS)
+        text=(ROOT/'.github/workflows/deliver-v07-candidate.yml').read_text()
+        source=json.loads((ROOT/'scripts/validated-runtime-v07-source.json').read_text())
+        self.assertNotIn('cargo build',text)
+        self.assertIn('git diff --exit-code '+source['application_commit'],text)
+        self.assertIn('核心真实结果：success',text)
+        self.assertIn('source.acceptance.relay_job_id',text)
+        self.assertIn('source.acceptance.native_job_id',text)
+        self.assertIn("accepted.conclusion !== 'success'",text)
+        self.assertIn('--acceptance-commit '+source['acceptance']['commit'],text)
+        self.assertIn('--expected-build-commit '+source['application_commit'],text)
+        self.assertIn('PYTHONPATH="$PWD/python" /usr/bin/python3 -B -c',text)
+        for part in ['ui','frontend','dist']:self.assertIn('test ! -e "$repository/desktop/'+part+'"',text)
+        for digest in source['binaries'].values():self.assertIn(digest,text)
+        self.assertIn('--application "$PWD/运行桌面版.sh"',text)
+        self.assertIn('--native-summary',text)
+        upload=text.split('name: 仅成功后保存版本化运行包与校验清单',1)[1].split('name: 保存隔离验收',1)[0]
+        self.assertNotIn('always()',upload)
+
 
 if __name__=='__main__':unittest.main()
