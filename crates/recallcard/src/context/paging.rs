@@ -147,7 +147,7 @@ impl Context<'_> {
                 return Ok(response);
             }
             if end == offset {
-                return budget_empty(reference, args.budget_tokens);
+                return budget_empty(reference, args.budget_tokens, size + 16);
             }
             end = end
                 .saturating_sub(size.saturating_sub(args.budget_tokens).max(1))
@@ -195,17 +195,21 @@ impl Context<'_> {
         }
         let mut items = Vec::new();
         let mut response = Value::Null;
+        let mut minimum_budget = 512;
         for id in refs.iter().skip(offset) {
             items.push(format!("event:{id}"));
             let next = offset + items.len();
             let candidate = json!({"results":[{"ref":reference,"source_refs":items,"source_range":{"start":offset,"end":next,"total":refs.len()},"snapshot":snapshot}],"truncated":next<refs.len(),"pending_refs":[],"next_cursor":if next<refs.len(){Some(format!("p1:{binding}:{next}"))}else{None},"status":"source_refs","budget_unit":"utf8_bytes","hint":"逐个 read source_refs 获取原始正文；按 next_cursor 继续来源列表"});
+            if response.is_null() {
+                minimum_budget = json_size(&candidate)?;
+            }
             if json_size(&candidate)? > args.budget_tokens {
                 break;
             }
             response = candidate;
         }
         if response.is_null() {
-            budget_empty(reference, args.budget_tokens)
+            budget_empty(reference, args.budget_tokens, minimum_budget)
         } else {
             Ok(response)
         }
@@ -234,8 +238,8 @@ fn page_position(args: &ReadPageArgs, binding: &str) -> Result<usize> {
         }
     }
 }
-fn budget_empty(reference: &str, budget: usize) -> Result<Value> {
-    let response = json!({"results":[],"pending_refs":[reference],"truncated":true,"next_cursor":null,"status":"budget_exhausted","budget_exhausted":true,"budget_unit":"utf8_bytes","hint":"资料存在，但当前预算放不下出处和正文；增大 budget_bytes，最大 32768"});
+fn budget_empty(reference: &str, budget: usize, minimum: usize) -> Result<Value> {
+    let response = json!({"results":[],"pending_refs":[reference],"truncated":true,"next_cursor":null,"status":"budget_exhausted","budget_exhausted":true,"budget_unit":"utf8_bytes","recommended_min_budget":minimum.max(512),"max_budget_bytes":32768,"hint":"资料存在；按 recommended_min_budget 重试相同 ref 和 cursor/offset，最大 32768"});
     if json_size(&response)? > budget {
         return Err("预算不足以输出读取状态".into());
     }
