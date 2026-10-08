@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "application_commit": "12f4672fe0f3fe3fac0702c33998501950b01538",
+  "target": "x86_64-unknown-linux-gnu",
+  "profile": "dev",
+  "binaries": {
+    "recallcard-desktop": "43b173b96502e04b41ebf9057e892393b92075f6b6ead83b486aaca5a61c5569",
+    "recallcard": "8e58de814c9e47309aa61e800686d799389971005671fd6fb643026397c17a78"
+  },
+  "build": {
+    "run_id": 37702406803,
+    "job_id": 113068726523,
+    "artifact_id": 11517704706,
+    "artifact_name": "RecallCard-gui-diagnostic-binaries-12f4672fe0f3fe3fac0702c33998501950b01538",
+    "artifact_sha256": "d1b0e8227384dde60b3c135c15ae49607a057735e581f57ae2d0d283dc2fe18b"
+  },
+  "acceptance": {
+    "commit": "76756867201aa91ed5494a9fab953beba97ac541",
+    "run_id": 37707650839,
+    "native_job_id": 113085754942,
+    "browser_job_id": 113085755392,
+    "native_steps": 37,
+    "browser_tests": 73,
+    "native_artifact_id": 11520327738,
+    "native_artifact_sha256": "d6b7c52c5540727a2d1303f804d5f3ca170f041914401a4468cd2bf475869ecb",
+    "browser_artifact_id": 11519833590,
+    "browser_artifact_sha256": "40017eb2e7493a860487a5e5d5fe9ae6361a068de06584a5b39265cf89e472e9"
+  }
+}
