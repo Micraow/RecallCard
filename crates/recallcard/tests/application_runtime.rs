@@ -289,6 +289,212 @@ fn one_service_lease_prevents_duplicate_runtime_hosts() {
     request_service_stop(&vault).unwrap();
     thread.join().unwrap();
 }
+#[test]
+fn shared_status_probe_does_not_impersonate_or_abort_a_starting_service() {
+    use std::{fs::OpenOptions, process::Stdio};
+    let root = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&root.path().join("vault")).unwrap();
+    assert!(!service_status(&vault).unwrap().running);
+    let probe = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(vault.state_dir().unwrap().join("runtime/service.lock"))
+        .unwrap();
+    probe.lock_shared().unwrap();
+    // 多个状态探测共享锁；只有真实服务独占持有才表示 running。
+    for _ in 0..10 {
+        assert!(!service_status(&vault).unwrap().running);
+    }
+    let launched_at = Utc::now();
+    let mut child = TestChild(
+        Command::new(env!("CARGO_BIN_EXE_recallcard"))
+            .arg("--vault")
+            .arg(vault.root())
+            .args(["start", "--foreground", "--json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "启动不能把共享探测误当已有服务而退出"
+    );
+    assert!(!service_status(&vault).unwrap().running);
+    probe.unlock().unwrap();
+    let pid = child.id();
+    let started = wait_started(&vault, pid, launched_at, Some(&mut child));
+    assert_eq!(started.pid, Some(pid));
+    request_service_stop(&vault).unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(exit) = child.try_wait().unwrap() {
+            assert!(exit.success());
+            break;
+        }
+        assert!(Instant::now() < until, "服务没有到达停稳边界");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!service_status(&vault).unwrap().running);
+}
+#[cfg(unix)]
+#[test]
+fn initializing_owner_waits_for_identity_and_child_exit_has_its_own_error() {
+    use recallcard::application::ErrorCode;
+    use sha2::{Digest, Sha256};
+    use std::{fs::OpenOptions, io::Write, os::unix::fs::PermissionsExt};
+    let root = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&root.path().join("vault")).unwrap();
+    let resources = root.path().join("resources");
+    let binary = resources.join("说明与许可证/recallcard");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    let synthetic_program = b"#!/bin/sh\nexit 7\n";
+    std::fs::write(&binary, synthetic_program).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let binary = register_packaged_cli(&binary, &resources).unwrap();
+    let expected_hash = format!("{:x}", Sha256::digest(synthetic_program));
+    service_status(&vault).unwrap();
+    let directory = vault.state_dir().unwrap().join("runtime");
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(directory.join("service.lock"))
+        .unwrap();
+    lease.lock().unwrap();
+    let mut status = ServiceStatus {
+        running: true,
+        pid: Some(std::process::id()),
+        started_at: Some(Utc::now()),
+        heartbeat_at: Some(Utc::now()),
+        ..Default::default()
+    };
+    let publish = |status: &ServiceStatus| {
+        let mut file = tempfile::NamedTempFile::new_in(&directory).unwrap();
+        file.write_all(&serde_json::to_vec(status).unwrap())
+            .unwrap();
+        file.persist(directory.join("status.json")).unwrap();
+    };
+    publish(&status);
+    let path = vault.root().to_path_buf();
+    let candidate = binary.clone();
+    let (entered, waiting) = mpsc::channel();
+    let (sent, received) = mpsc::channel();
+    let starter = std::thread::spawn(move || {
+        let vault = Vault::open_existing(&path).unwrap();
+        entered.send(()).unwrap();
+        sent.send(ensure_service(&vault, &candidate)).unwrap();
+    });
+    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(matches!(
+        received.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    status.binary_hash = expected_hash.clone();
+    publish(&status);
+    let reused = received
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    starter.join().unwrap();
+    assert_eq!(reused.binary_hash, expected_hash);
+    assert_eq!(reused.pid, status.pid);
+    // 真正的独占持有者公布不同程序时仍必须拒绝；不能抢占或偷偷替换。
+    status.binary_hash = "0".repeat(64);
+    publish(&status);
+    let mismatch = ensure_service(&vault, &binary).unwrap_err();
+    assert_eq!(mismatch.code, ErrorCode::Conflict);
+    assert!(mismatch.message.contains("当前发行物不同"));
+    let credential = recallcard::application::credentials::PreparedCredential::session(
+        configuration().provider.unwrap(),
+        "SYNTHETIC_DIFFERENT_BINARY_KEY".into(),
+    )
+    .unwrap();
+    let mismatch = ensure_service_with_credential(&vault, &binary, credential).unwrap_err();
+    assert_eq!(mismatch.code, ErrorCode::Conflict);
+    assert!(!service_status(&vault).unwrap().stop_requested);
+    assert!(service_status(&vault).unwrap().running);
+    lease.unlock().unwrap();
+    // 路径已经核验，进程确实启动后退出时应给生命周期错误，不能说找不到程序。
+    let exited = ensure_service(&vault, &binary).unwrap_err();
+    assert_eq!(exited.code, ErrorCode::ModelUnavailable);
+    assert!(exited.message.contains("启动握手前退出"));
+    assert!(exited.message.contains('7'));
+    assert!(!exited.message.contains("未找到"));
+}
+#[cfg(unix)]
+#[test]
+fn another_owner_cannot_confirm_this_childs_session_credential_handoff() {
+    use recallcard::application::{credentials::PreparedCredential, ErrorCode};
+    use sha2::{Digest, Sha256};
+    use std::{fs::OpenOptions, io::Write, os::unix::fs::PermissionsExt};
+    let root = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&root.path().join("vault")).unwrap();
+    let resources = root.path().join("resources");
+    let binary = resources.join("说明与许可证/recallcard");
+    let spawned = root.path().join("spawned");
+    let finish = root.path().join("finish");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    // 合成程序仅通知进程已启动并等待结束；不读取、输出或保存 stdin 凭据。
+    let program = format!(
+        "#!/bin/sh\n: > '{}'\nremaining=500\nwhile [ ! -f '{}' ] && [ \"$remaining\" -gt 0 ]; do remaining=$((remaining - 1)); sleep 0.01; done\nexit 7\n",
+        spawned.display(),
+        finish.display()
+    );
+    std::fs::write(&binary, &program).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let binary = register_packaged_cli(&binary, &resources).unwrap();
+    let expected_hash = format!("{:x}", Sha256::digest(program.as_bytes()));
+    service_status(&vault).unwrap();
+    let path = vault.root().to_path_buf();
+    let (sent, received) = mpsc::channel();
+    let starter = std::thread::spawn(move || {
+        let vault = Vault::open_existing(&path).unwrap();
+        let credential = PreparedCredential::session(
+            configuration().provider.unwrap(),
+            "SYNTHETIC_CONCURRENT_KEY_NOT_SENT".into(),
+        )
+        .unwrap();
+        sent.send(ensure_service_with_credential(&vault, &binary, credential))
+            .unwrap();
+    });
+    let until = Instant::now() + Duration::from_secs(2);
+    while !spawned.exists() {
+        assert!(Instant::now() < until, "合成子进程没有启动");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // 另一个同版本所有者抢先发布新鲜状态，不能替本次 child 确认密钥交接。
+    let directory = vault.state_dir().unwrap().join("runtime");
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(directory.join("service.lock"))
+        .unwrap();
+    lease.lock().unwrap();
+    let status = ServiceStatus {
+        running: true,
+        pid: Some(std::process::id()),
+        started_at: Some(Utc::now()),
+        heartbeat_at: Some(Utc::now()),
+        binary_hash: expected_hash,
+        ..Default::default()
+    };
+    let mut file = tempfile::NamedTempFile::new_in(&directory).unwrap();
+    file.write_all(&serde_json::to_vec(&status).unwrap())
+        .unwrap();
+    file.persist(directory.join("status.json")).unwrap();
+    std::fs::write(&finish, b"done").unwrap();
+    let result = received.recv_timeout(Duration::from_secs(2)).unwrap();
+    starter.join().unwrap();
+    lease.unlock().unwrap();
+    let error = result.unwrap_err();
+    assert_eq!(error.code, ErrorCode::ModelUnavailable);
+    assert!(error.message.contains("启动握手前退出"));
+    assert!(!serde_json::to_string(&error)
+        .unwrap()
+        .contains("SYNTHETIC_CONCURRENT_KEY"));
+}
 fn cli(vault: &Vault, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_recallcard"))
         .arg("--vault")

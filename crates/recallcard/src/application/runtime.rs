@@ -109,7 +109,7 @@ fn directory(vault: &Vault) -> AppResult<PathBuf> {
     fs::create_dir_all(&directory).map_err(|_| storage())?;
     Ok(directory)
 }
-fn try_lease(path: &Path) -> AppResult<Option<ServiceLease>> {
+fn try_lease(path: &Path, shared: bool) -> AppResult<Option<ServiceLease>> {
     reject_symlink(path).map_err(|_| storage())?;
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
@@ -124,7 +124,12 @@ fn try_lease(path: &Path) -> AppResult<Option<ServiceLease>> {
     if !file.metadata().map_err(|_| storage())?.is_file() {
         return Err(storage());
     }
-    match file.try_lock() {
+    let acquired = if shared {
+        file.try_lock_shared()
+    } else {
+        file.try_lock()
+    };
+    match acquired {
         Ok(()) => Ok(Some(ServiceLease(file))),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(_) => Err(storage()),
@@ -153,7 +158,8 @@ fn save_status(vault: &Vault, status: &ServiceStatus) -> AppResult<()> {
 /// running 由实际文件租约确认，旧 pid/旧心跳不被当作当前进程。
 pub fn service_status(vault: &Vault) -> AppResult<ServiceStatus> {
     let mut status = read_status(vault)?;
-    status.running = try_lease(&directory(vault)?.join("service.lock"))?.is_none();
+    // 读者之间共享探测；只有服务持有的独占租约会使此探测失败。
+    status.running = try_lease(&directory(vault)?.join("service.lock"), true)?.is_none();
     let stop = directory(vault)?.join("stop.json");
     reject_symlink(&stop).map_err(|_| storage())?;
     status.stop_requested = stop.exists();
@@ -232,9 +238,38 @@ pub fn run_service<P: MemoryProvider + ?Sized>(
         ));
     }
     let dir = directory(vault)?;
-    let Some(_lease) = try_lease(&dir.join("service.lock"))? else {
-        return service_status(vault);
+    let until = Instant::now() + SERVICE_STARTUP_TIMEOUT;
+    let _lease = loop {
+        if let Some(lease) = try_lease(&dir.join("service.lock"), false)? {
+            break lease;
+        }
+        let existing = service_status(vault)?;
+        if existing.running {
+            return Ok(existing);
+        }
+        // 独占失败而共享探测成功，只代表有状态读者；不能因此退出启动进程。
+        if Instant::now() >= until {
+            let mut error = AppError::new(
+                ErrorCode::Conflict,
+                "状态读取尚未释放租约，后台服务未启动",
+                "等待状态读取结束后重试；没有启动重复服务",
+            );
+            error.retryable = true;
+            return Err(error);
+        }
+        std::thread::sleep(Duration::from_millis(10));
     };
+    let started = Utc::now();
+    let mut status = ServiceStatus {
+        running: true,
+        pid: Some(std::process::id()),
+        started_at: Some(started),
+        heartbeat_at: Some(started),
+        ..Default::default()
+    };
+    // 取得租约后立即清除旧进程身份，再恢复事务、预检 worker 与核验完整 hash。
+    // 空 hash 表示尚在初始化，不能被当成与现有发行物版本不同。
+    save_status(vault, &status)?;
     let stop = dir.join("stop.json");
     reject_symlink(&stop).map_err(|_| storage())?;
     if stop.exists() {
@@ -267,26 +302,17 @@ pub fn run_service<P: MemoryProvider + ?Sized>(
         imports.clone(),
         Duration::from_millis(options.poll_interval_ms),
     )?;
-    let started = Utc::now();
     let configuration = MemoryRuntime::new(vault).configuration()?;
     let readiness = if configuration.enabled && configuration.consent.is_some() {
         provider.available(&configuration)
     } else {
         Ok(())
     };
-    let mut status = ServiceStatus {
-        binary_hash: executable_hash(&std::env::current_exe().map_err(|_| storage())?)?,
-        credential: provider.credential_status(&configuration),
-        provider_ready: configuration.enabled
-            && configuration.consent.is_some()
-            && readiness.is_ok(),
-        error: readiness.err(),
-        running: true,
-        pid: Some(std::process::id()),
-        started_at: Some(started),
-        heartbeat_at: Some(started),
-        ..Default::default()
-    };
+    status.binary_hash = executable_hash(&std::env::current_exe().map_err(|_| storage())?)?;
+    status.credential = provider.credential_status(&configuration);
+    status.provider_ready =
+        configuration.enabled && configuration.consent.is_some() && readiness.is_ok();
+    status.error = readiness.err();
     save_status(vault, &status)?;
     let mut memory_ran = false;
     loop {
@@ -510,16 +536,30 @@ fn ensure_service_inner(
             "重新打开完整发行物并核验，不会运行被替换的文件",
         ));
     }
-    let existing = service_status(vault)?;
+    let mut existing = service_status(vault)?;
+    let deadline = Instant::now() + SERVICE_STARTUP_TIMEOUT;
+    while existing.running && !existing.startup_published() {
+        if Instant::now() >= deadline {
+            let mut error = AppError::new(
+                ErrorCode::Conflict,
+                "已有服务正在初始化，尚未发布可核验的程序身份",
+                "稍后查看服务状态；未替换服务或交接新的凭据",
+            );
+            error.retryable = true;
+            return Err(error);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        existing = service_status(vault)?;
+    }
     if existing.running {
+        if existing.binary_hash != expected_hash {
+            return Err(AppError::new(
+                ErrorCode::Conflict,
+                "运行中的后台程序与当前发行物不同",
+                "先停止旧服务，再用当前发行物启动；不会静默混用版本",
+            ));
+        }
         if credential.is_none() {
-            if existing.binary_hash != expected_hash {
-                return Err(AppError::new(
-                    ErrorCode::Conflict,
-                    "运行中的后台程序与当前发行物不同",
-                    "先停止旧服务，再用当前发行物启动；不会静默混用版本",
-                ));
-            }
             return Ok(existing);
         }
         let config = MemoryRuntime::new(vault).configuration()?;
@@ -587,7 +627,13 @@ fn ensure_service_inner(
         command.creation_flags(0x08000000);
     }
     let launched_at = Utc::now();
-    let mut child = command.spawn().map_err(|_| error())?;
+    let mut child = command.spawn().map_err(|_| {
+        AppError::new(
+            ErrorCode::ModelUnavailable,
+            "已核验后台程序，但无法启动服务进程",
+            "检查程序执行权限或运行 start --foreground；配置已保留",
+        )
+    })?;
     if let Some(credential) = credential {
         let result = child
             .stdin
@@ -609,6 +655,7 @@ fn ensure_service_inner(
     loop {
         let status = service_status(vault)?;
         if status.startup_published()
+            && status.pid == Some(child.id())
             && status.binary_hash == expected_hash
             && status.heartbeat_at.is_some_and(|at| at >= launched_at)
         {
@@ -617,8 +664,22 @@ fn ensure_service_inner(
             });
             return Ok(status);
         }
-        if child.try_wait().map_err(|_| error())?.is_some() {
-            return Err(error());
+        if let Some(exit) = child.try_wait().map_err(|_| {
+            AppError::new(
+                ErrorCode::Storage,
+                "无法读取已启动服务进程的退出状态",
+                "查看实际服务状态；未重复启动",
+            )
+        })? {
+            return Err(AppError::new(
+                ErrorCode::ModelUnavailable,
+                format!(
+                    "后台进程在完成启动握手前退出（退出码：{}）",
+                    exit.code()
+                        .map_or_else(|| "无".into(), |code| code.to_string())
+                ),
+                "运行 start --foreground 查看启动原因；已核验的程序路径没有改变，未重复启动",
+            ));
         }
         if Instant::now() >= deadline {
             std::thread::spawn(move || {
