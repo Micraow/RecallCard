@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at_utc": "2026-10-07T23:56:08.393128+00:00",
+  "checked_at_utc": "2026-10-08T00:03:55.011671+00:00",
   "application_commit": "12f4672fe0f3fe3fac0702c33998501950b01538",
   "application_source_changed": false,
   "local_gate_passed": true,
@@ -14,12 +14,12 @@
     "independent_review": "passed"
   },
   "prior_actual_run": {
-    "id": 37704264555,
-    "verification_commit": "fa03ed783763a1a76c70273dcc1fa7ed56ca26d0",
+    "id": 37705172689,
+    "verification_commit": "a64cb53c5496d270293d8b5058ddb779ece09bd1",
     "browser_passed": 73,
     "browser_failed": 0,
-    "native_passed_checkpoints": 30,
-    "native_failure": "第二次选择器的临时行Component不可用；已识别Files聚焦与Recent到目录的异步过渡"
+    "native_passed_checkpoints": 32,
+    "native_failure": "方向键组合选择分支甲而非指定乙；严格value断言停止"
   },
   "reuse": {
     "run_id": 37702406803,
@@ -34,10 +34,11 @@
   "source_sha256": {
     ".github/workflows/desktop.yml": "f96ee0b77a3b2544271a5ab23329c846e1df8517f07d1266e640858cd1d669b1",
     ".github/workflows/recheck-integrated.yml": "eca26eaf1c9c71e97f1a66153ca04379f9aca1a4efed427c187110dd6af030a8",
-    "desktop/tests/native_smoke.py": "d745c982d09b102361590fd95f6bb7a1434983c1abc66e55ef9093e2182c41c2",
-    "desktop/tests/test_native_workflow_controls.py": "14cb9bee4b0fabf8eab12a5fcbefbb2464e02bbfa2e1edcaac7f7443daf01721",
+    "desktop/tests/native_smoke.py": "044caebfb35ad1c897c7ac8b17db6cd585dd9a4284acf8f3cdf7ccb5ac6cbfdb",
+    "desktop/tests/test_native_workflow_controls.py": "9259c6faa1136c9f3c28e124fb0a5ce71a9a692e3f5a61b2aa60e56e5142fa52",
     "desktop/tests/ui.test.mjs": "f84b00c4f303e764fbd87883b9a92b34c309d4353c9fa806d797366119d3c288",
-    "docs/ci.md": "222f09b6b36aa37bafea7e3accef9c72c07529046d6a945e2ea8293eb73e4ee5",
-    "scripts/tests/test_preflight.py": "e9d9b7687f6378dbee4a09623bd170e61c5e233b5d5404653017f5740f353973"
+    "docs/ci.md": "e7afdf177026fcf785ede3c4d2a352c2b58950f450c6e0e4636a0107ff9fbbc5",
+    "scripts/tests/test_preflight.py": "e9d9b7687f6378dbee4a09623bd170e61c5e233b5d5404653017f5740f353973",
+    "desktop/tests/NATIVE_ACCEPTANCE.md": "d0dc69e011538ba78315ad913a732af4bc05b616aee633234a5156c630920414"
   }
 }
