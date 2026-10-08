@@ -18,6 +18,10 @@ RecallCard 把聊天原文和记忆保存在你自己的本地资料库。导入
 
 没有整理出记忆时，软件诚实显示来源目录。无需为了导入或本地检索先配置模型。
 
+![实际 Linux 桌面：项目配置写入后的本机试读](docs/screenshots/v07-project-connection.png)
+
+截图来自运行包的真实原生验收，使用合成项目；本机试读与宿主实际读取分别记录。
+
 ## 当前能用到哪里
 
 | 入口 | 已实现 | 仍需区分的边界 |
@@ -31,7 +35,7 @@ RecallCard 把聊天原文和记忆保存在你自己的本地资料库。导入
 
 ## 下载与开始
 
-0.7 运行包从同一份已验收程序制作，只有解压后的完整原生流程再次通过才上传候选产物。[查看打包与隔离验收](https://github.com/Micraow/RecallCard/actions/workflows/deliver-v07-candidate.yml)。这不是正式发布频道。
+[下载 0.7 Linux 候选包](https://github.com/Micraow/RecallCard/actions/runs/37782757501/artifacts/11553530059)（GitHub 登录后下载外层 ZIP，里面是运行包及校验文件）。同一程序已经通过 [解压包隔离验收](https://github.com/Micraow/RecallCard/actions/runs/37782757501)。这是开发候选版，不是正式发布频道。
 
 解压整个包后运行 `./运行桌面版.sh`；命令行使用 `./recallcard --help`。需要 Git、GLIBC 2.35+、GTK 3、WebKitGTK 4.1，可选模型工作器需要 Python 3.10+。
 
