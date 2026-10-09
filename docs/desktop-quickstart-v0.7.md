@@ -10,6 +10,8 @@
 
 命令行同样可独立使用：`./recallcard --help`、`./recallcard --vault /你的资料库 import --help`。用 `--json` 获取机器可读输出；`search`、`read`、`sources`、`status`、`mcp` 都是正常入口。
 
+从空目录开始的完整命令见 [CLI 首次使用](cli-first-use-v0.7.md)。原文与整理记忆是不同的覆盖量，启动提示会分别说明，避免把空记忆分类理解为没有导入资料。
+
 ## 一次授权，连接一个 Agent 项目
 
 打开「连接」，选择 Codex 或 Claude Code，然后选择实际项目目录。先检查将合并的文件、读取范围和接收方，再勾选授权并安装。只选择目录和浏览预览不会写配置或授予读取权限。

@@ -18,6 +18,79 @@ fn cli(vault: &Path, args: &[&str]) -> Value {
     assert_eq!(text.lines().count(), 1, "--json 不混入进度或人类说明");
     serde_json::from_str(&text).unwrap()
 }
+
+#[test]
+fn first_use_explains_setup_without_creating_or_replacing_a_vault() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = dir.path().join("new vault");
+    for args in [
+        vec!["status"],
+        vec!["search", "合成内容"],
+        vec!["mcp", "--scope", "personal"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_recallcard"))
+            .arg("--vault")
+            .arg(&vault)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let error = String::from_utf8(out.stderr).unwrap();
+        assert!(
+            error.contains("recallcard setup") && error.contains("--vault"),
+            "{error}"
+        );
+        assert!(!vault.exists());
+    }
+    std::fs::create_dir(&vault).unwrap();
+    let existing = vault.join("notes.txt");
+    std::fs::write(&existing, "合成已有内容").unwrap();
+    let setup = Command::new(env!("CARGO_BIN_EXE_recallcard"))
+        .arg("--vault")
+        .arg(&vault)
+        .arg("setup")
+        .output()
+        .unwrap();
+    assert!(!setup.status.success());
+    assert_eq!(std::fs::read_to_string(existing).unwrap(), "合成已有内容");
+    assert!(!vault.join("control/schema-version.json").exists());
+}
+
+#[test]
+fn official_format_alias_and_auto_use_the_same_importer() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = dir.path().join("vault");
+    cli(&vault, &["setup"]);
+    let source = dir.path().join("official.json");
+    std::fs::write(&source, json!({"id":"format-example","title":"合成格式样本","inserted_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","mapping":{"u":{"id":"u","parent":null,"children":[],"message":{"inserted_at":"2026-01-01T00:00:00Z","fragments":[{"type":"REQUEST","content":"合成的原始记录"}]}}}}).to_string()).unwrap();
+    for (index, format) in ["deepseek", "deepseek-export", "auto"].iter().enumerate() {
+        let imported = cli(
+            &vault,
+            &["import", source.to_str().unwrap(), "--format", format],
+        );
+        assert_eq!(imported["result"]["job"]["state"], "completed");
+        assert_eq!(
+            imported["result"]["job"]["progress"]["events_added"],
+            if index == 0 { 1 } else { 0 }
+        );
+    }
+    assert_eq!(cli(&vault, &["doctor"])["events"], 1);
+    for format in ["other-format", "chatgpt"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_recallcard"))
+            .arg("--vault")
+            .arg(&vault)
+            .args(["import", source.to_str().unwrap(), "--format", format])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "指定错误平台不能默默改用 auto");
+    }
+    let help = Command::new(env!("CARGO_BIN_EXE_recallcard"))
+        .args(["import", "--help"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("auto") && text.contains("deepseek") && text.contains("chatgpt"));
+}
 #[test]
 fn cli_alone_imports_reads_sources_and_exposes_native_ai_entry() {
     let dir = tempfile::tempdir().unwrap();

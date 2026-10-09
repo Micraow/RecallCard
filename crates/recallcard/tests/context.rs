@@ -29,6 +29,54 @@ fn undreamed_event_is_immediately_searchable() {
     assert_eq!(r["coverage"]["undreamed_events_included"], true);
 }
 #[test]
+fn bootstrap_reports_raw_sources_without_claiming_they_are_memories() {
+    let (_dir, vault) = setup();
+    let first = capture(&vault, "personal", "raw-a", "合成原始观察");
+    capture(
+        &vault,
+        "project:excluded",
+        "raw-outside",
+        "不在当前授权范围",
+    );
+    let before = context(&vault)
+        .bootstrap(BootstrapArgs {
+            budget_tokens: 4096,
+        })
+        .unwrap();
+    assert_eq!(before["coverage"]["captured_events"], 1);
+    assert_eq!(
+        before["activity_text"],
+        "原文 1 条 / 1 个会话；当前记忆 0 条。先 search，再 read/sources。"
+    );
+    assert!(before["stable_text"]
+        .as_str()
+        .unwrap()
+        .contains("暂无记忆分类"));
+    assert!(!before.to_string().contains("合成原始观察"));
+    capture(&vault, "personal", "raw-b", "另一条合成原始观察");
+    let after = context(&vault)
+        .bootstrap(BootstrapArgs {
+            budget_tokens: 4096,
+        })
+        .unwrap();
+    assert_eq!(before["bootstrap_version"], after["bootstrap_version"]);
+    assert_eq!(before["stable_text"], after["stable_text"]);
+    assert!(after["activity_text"]
+        .as_str()
+        .unwrap()
+        .starts_with("原文 2 条 / 1 个会话"));
+    vault.suppress(&first, "合成抑制".into()).unwrap();
+    let suppressed = context(&vault)
+        .bootstrap(BootstrapArgs { budget_tokens: 512 })
+        .unwrap();
+    assert_eq!(suppressed["coverage"]["captured_events"], 1);
+    assert!(serde_json::to_vec(&suppressed).unwrap().len() <= 512);
+    assert!(suppressed["activity_text"]
+        .as_str()
+        .unwrap()
+        .starts_with("原文 1 条 / 1 个会话"));
+}
+#[test]
 fn chinese_tokenizer_keeps_bigrams_and_ascii_paths() {
     let terms = tokenize("中文检索 src/main.rs Qwen-3");
     assert!(terms.contains(&"中文".into()));

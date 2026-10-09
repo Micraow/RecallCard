@@ -72,7 +72,8 @@ pub fn session_start<R: Read>(
     let output = json!({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": stable_text,
+            // 动态覆盖量放在稳定前缀之后；普通捕获不改变 bootstrap_version。
+            "additionalContext": format!("{stable_text}\n{}",bootstrap["activity_text"].as_str().unwrap_or_default()),
         }
     });
     let encoded = serde_json::to_vec(&output).map_err(|_| "无法序列化 Hook 输出".to_string())?;

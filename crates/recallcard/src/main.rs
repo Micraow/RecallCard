@@ -45,7 +45,8 @@ enum Command {
     Import {
         #[arg(value_name = "PATH", conflicts_with = "file")]
         paths: Vec<PathBuf>,
-        #[arg(long, default_value = "auto")]
+        /// auto 自动识别官方 ZIP/JSON；deepseek、chatgpt 是官方格式的简写
+        #[arg(long, default_value = "auto", value_parser = parse_import_format)]
         format: String,
         #[arg(long)]
         file: Option<String>,
@@ -460,12 +461,29 @@ fn input<T: DeserializeOwned>(file: &str) -> Result<T> {
 fn value<T: serde::Serialize>(v: T) -> Result<Value> {
     serde_json::to_value(v).map_err(|e| e.to_string())
 }
+fn parse_import_format(input: &str) -> Result<String> {
+    match input {
+        "deepseek" => Ok("deepseek-export".into()),
+        "chatgpt" => Ok("chatgpt-export".into()),
+        "auto" | "deepseek-export" | "chatgpt-export" | "manual-jsonl" => Ok(input.into()),
+        _ => Err("支持 auto（推荐）、deepseek / deepseek-export、chatgpt / chatgpt-export；manual-jsonl 仅供旧 --file 入口".into()),
+    }
+}
+fn missing_vault(path: &std::path::Path) -> bool {
+    matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+fn open_cli_vault(path: &std::path::Path) -> Result<Vault> {
+    if missing_vault(path) {
+        return Err("此路径尚未准备资料库；请用同一 --vault 参数运行 recallcard setup 后重试。若已有资料库，请先核对路径；此操作没有创建或替换任何资料".into());
+    }
+    Vault::open(path)
+}
 fn run(cli: Cli) -> Result<Value> {
     if matches!(cli.command, Command::Init) {
         let vault = Vault::init(&cli.vault)?;
         return Ok(json!({"ok":true, "vault":vault.root(), "schema_version":1}));
     }
-    let vault = Vault::open(&cli.vault)?;
+    let vault = open_cli_vault(&cli.vault)?;
     match cli.command {
         Command::Init => unreachable!(),
         Command::Setup
@@ -763,7 +781,7 @@ fn main() {
         ..
     } = &cli.command
     {
-        let result = Vault::open(&cli.vault).and_then(|vault| {
+        let result = open_cli_vault(&cli.vault).and_then(|vault| {
             let access = Access::new(scope.clone())?;
             if let Some(endpoint) = ipc_endpoint {
                 let client = recallcard::ipc::Client::new(
@@ -797,7 +815,7 @@ fn main() {
         connection_id,
     } = &cli.command
     {
-        let result = Vault::open(&cli.vault).and_then(|vault| {
+        let result = open_cli_vault(&cli.vault).and_then(|vault| {
             let access = Access::new(scope.clone())?;
             if let Some(id)=connection_id {
                 if ipc_endpoint.is_some()||semantic_config.is_some(){return Err("当前受连接授权管理的 MCP 尚不支持同时配置 IPC/语义代理；请移除该组合，不会忽略撤权".into());}
@@ -911,6 +929,13 @@ fn run_application(cli: &Cli) -> Option<recallcard::application::AppResult<Value
         return None;
     }
     Some((|| -> AppResult<Value> {
+        if !matches!(cli.command, Command::Setup) && missing_vault(&cli.vault) {
+            return Err(AppError::new(
+                ErrorCode::InvalidRequest,
+                "此路径尚未准备资料库",
+                "请用同一 --vault 参数运行 recallcard setup 后重试；若已有资料库，请先核对路径，不会自动创建或替换",
+            ));
+        }
         let opened = if matches!(cli.command, Command::Setup)
             && !cli.vault.join("control/schema-version.json").exists()
         {
@@ -933,7 +958,7 @@ fn run_application(cli: &Cli) -> Option<recallcard::application::AppResult<Value
             AppError::new(
                 ErrorCode::Storage,
                 "无法打开已有资料库",
-                "先运行 recallcard init 或选择完整资料库",
+                "检查目录权限与资料库完整性；首次使用请选择新的空目录并运行 recallcard setup，不要覆盖已有资料",
             )
         })?;
         let service = ImportService::new(&vault)?;

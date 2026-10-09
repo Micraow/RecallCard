@@ -111,7 +111,7 @@ fn startup_resume_compact_clear_use_official_envelope_and_stable_context() {
 }
 
 #[test]
-fn output_is_exactly_existing_authorized_bootstrap_text() {
+fn output_contains_authorized_stable_prefix_then_current_source_availability() {
     let (_directory, vault) = setup();
     let expected = context::Context::new(&vault, access(&["project:demo"]))
         .bootstrap(context::BootstrapArgs {
@@ -121,8 +121,23 @@ fn output_is_exactly_existing_authorized_bootstrap_text() {
     let actual = invoke(&vault, STARTUP).unwrap();
     assert_eq!(
         actual["hookSpecificOutput"]["additionalContext"],
-        expected["stable_text"]
+        format!(
+            "{}\n{}",
+            expected["stable_text"].as_str().unwrap(),
+            expected["activity_text"].as_str().unwrap()
+        )
     );
+}
+
+#[test]
+fn raw_only_hook_explicitly_exposes_searchable_sources_in_selected_scope() {
+    let (_directory, vault) = setup();
+    event(&vault, "project:demo", "只在按需检索显示的合成原文", "raw");
+    event(&vault, "project:other", "其他范围的合成原文", "outside");
+    let output = invoke(&vault, STARTUP).unwrap();
+    assert!(text(&output).contains("原文 1 条 / 1 个会话；当前记忆 0 条"));
+    assert!(text(&output).contains("先 search，再 read/sources"));
+    assert!(!text(&output).contains("合成原文"));
 }
 
 #[test]

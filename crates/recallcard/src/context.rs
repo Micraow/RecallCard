@@ -506,11 +506,19 @@ pub(crate) fn bootstrap_projection(
             reference_ends.push((start, text.len(), doc.reference.clone()));
         }
     }
+    let directory = if labels.is_empty() {
+        "暂无记忆分类；原文仍可用 search 检索".to_string()
+    } else {
+        labels.into_iter().collect::<Vec<_>>().join("、")
+    };
     text.push_str(&format!(
         "\n可用目录：{}\n授权范围：{}\n",
-        labels.into_iter().collect::<Vec<_>>().join("、"),
+        directory,
         scopes.join("、")
     ));
+    let activity_text = |events, sessions, memories| {
+        format!("原文 {events} 条 / {sessions} 个会话；当前记忆 {memories} 条。先 search，再 read/sources。")
+    };
     // 不将一条记忆从中间切断，保证其正文、证据性质和引用始终一并出现。
     let clip = |limit| {
         let boundary = reference_ends
@@ -528,7 +536,7 @@ pub(crate) fn bootstrap_projection(
             .filter(|(_, end, _)| *end <= stable_text.len())
             .map(|(_, _, reference)| reference)
             .collect();
-        response = json!({"bootstrap_version":hash(stable_text.as_bytes()),"stable_text":stable_text,"reference_data":true,"refs":refs,"coverage":{"captured_events":u64::MAX,"semantic_search":"unavailable","scope_filtered":true},"truncated":stable_text.len()!=text.len(),"budget_unit":"conservative_utf8_bytes"});
+        response = json!({"bootstrap_version":hash(stable_text.as_bytes()),"stable_text":stable_text,"activity_text":activity_text(u64::MAX,u64::MAX,u64::MAX),"reference_data":true,"refs":refs,"coverage":{"captured_events":u64::MAX,"semantic_search":"unavailable","scope_filtered":true},"truncated":stable_text.len()!=text.len(),"budget_unit":"conservative_utf8_bytes"});
         if json_size(&response)? <= args.budget_tokens {
             break;
         }
@@ -539,6 +547,15 @@ pub(crate) fn bootstrap_projection(
     }
     response["coverage"]["captured_events"] =
         json!(docs.iter().filter(|d| d.kind == "event").count());
+    response["activity_text"] = json!(activity_text(
+        docs.iter().filter(|d| d.kind == "event").count() as u64,
+        docs.iter()
+            .filter(|d| d.kind == "event")
+            .filter_map(|d| d.session_ref.as_ref())
+            .collect::<BTreeSet<_>>()
+            .len() as u64,
+        docs.iter().filter(|d| d.current_memory_at(now)).count() as u64,
+    ));
     Ok(response)
 }
 
