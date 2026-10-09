@@ -386,7 +386,7 @@ function importPage() {
   fileDetails.addEventListener('toggle', () => { if (fileDetails.isConnected) state.fileImportOpen = fileDetails.open; });
   content.append(fileDetails);
   if (!state.importSelection && !state.importPreview) content.append(noteSection);
-  const format = $('select', { id: 'import-format', 'aria-label': '导入格式' }, $('option', { value: 'auto' }, '自动识别支持的会话文件'), $('option', { value: 'recallcard-conversation' }, 'RecallCard 扩展导出的会话 JSON'), $('option', { value: 'chatgpt-export' }, 'ChatGPT 备份 ZIP / 会话 JSON'), $('option', { value: 'deepseek-export' }, 'DeepSeek 官方历史导出'), $('option', { value: 'claude-code' }, 'Claude Code 对话 JSONL'), $('option', { value: 'manual-jsonl' }, 'RecallCard 标准 JSONL'));
+  const format = $('select', { id: 'import-format', 'aria-label': '导入格式' }, $('option', { value: 'auto' }, '自动识别支持的会话文件'), $('option', { value: 'recallcard-conversation' }, 'RecallCard 扩展导出的会话 JSON'), $('option', { value: 'chatgpt-export' }, 'ChatGPT 备份 ZIP / 会话 JSON'), $('option', { value: 'deepseek-export' }, 'DeepSeek 官方历史导出'), $('option', { value: 'qwen-export' }, 'Qwen 官方历史导出'), $('option', { value: 'claude-code' }, 'Claude Code 对话 JSONL'), $('option', { value: 'manual-jsonl' }, 'RecallCard 标准 JSONL'));
   format.value = state.importFormat || 'auto';
   format.addEventListener('change', () => { const next = format.value; cancelPreviews(() => { state.importFormat = next; }); });
   const scope = $('input', { id: 'import-scope', value: state.scope, placeholder: 'personal', 'aria-label': '导入范围' });

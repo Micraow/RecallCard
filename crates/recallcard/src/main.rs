@@ -464,9 +464,10 @@ fn value<T: serde::Serialize>(v: T) -> Result<Value> {
 fn parse_import_format(input: &str) -> Result<String> {
     match input {
         "deepseek" => Ok("deepseek-export".into()),
+        "qwen" => Ok("qwen-export".into()),
         "chatgpt" => Ok("chatgpt-export".into()),
-        "auto" | "deepseek-export" | "chatgpt-export" | "manual-jsonl" => Ok(input.into()),
-        _ => Err("支持 auto（推荐）、deepseek / deepseek-export、chatgpt / chatgpt-export；manual-jsonl 仅供旧 --file 入口".into()),
+        "auto" | "deepseek-export" | "chatgpt-export" | "qwen-export" | "manual-jsonl" => Ok(input.into()),
+        _ => Err("支持 auto（推荐）、deepseek / deepseek-export、chatgpt / chatgpt-export、qwen / qwen-export；manual-jsonl 仅供旧 --file 入口".into()),
     }
 }
 fn missing_vault(path: &std::path::Path) -> bool {

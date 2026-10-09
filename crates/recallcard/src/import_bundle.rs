@@ -3,6 +3,7 @@
 use crate::{
     import::{parse_chatgpt_conversation, parse_text, ChatgptCoverage},
     import_deepseek::{looks_like_deepseek, parse_deepseek_conversation, DeepseekCoverage},
+    import_qwen::{looks_like_qwen, parse_qwen_conversation, QwenCoverage},
     model::{validate_scope, EventInput, Result, Role},
 };
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,7 @@ pub struct ImportCoverage {
     pub duplicate_events_skipped: usize,
     pub messages: ChatgptCoverage,
     pub deepseek: DeepseekCoverage,
+    pub qwen: QwenCoverage,
     pub notes: Vec<String>,
 }
 
@@ -63,6 +65,7 @@ pub struct ConversationSummary {
     pub tool_messages: usize,
     pub coverage: ChatgptCoverage,
     pub deepseek_coverage: DeepseekCoverage,
+    pub qwen_coverage: QwenCoverage,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -155,6 +158,7 @@ fn import_files(
         "auto",
         "chatgpt-export",
         "deepseek-export",
+        "qwen-export",
         "manual-jsonl",
         "claude-code",
         "recallcard-conversation",
@@ -175,8 +179,8 @@ fn import_files(
     let mut builder = ImportBuilder::new(scope, selected, collect, format);
     for bytes in files {
         if is_zip(bytes) {
-            if !["auto", "chatgpt-export", "deepseek-export"].contains(&format) {
-                return Err("ZIP 备份请选择 DeepSeek、ChatGPT 或自动识别格式".into());
+            if !["auto", "chatgpt-export", "deepseek-export", "qwen-export"].contains(&format) {
+                return Err("ZIP 备份请选择 DeepSeek、ChatGPT、Qwen 或自动识别格式".into());
             }
             append_archive(bytes, &mut builder)?;
             continue;
@@ -205,7 +209,8 @@ fn import_files(
         } else {
             format.into()
         };
-        if ["auto", "chatgpt-export", "deepseek-export"].contains(&detected.as_str()) {
+        if ["auto", "chatgpt-export", "deepseek-export", "qwen-export"].contains(&detected.as_str())
+        {
             let value = strict_json(bytes)?;
             builder.coverage.json_files += 1;
             if builder.json(&value)? {
@@ -249,12 +254,19 @@ pub(crate) fn provider(value: &Value) -> Result<Option<&'static str>> {
         || value["mapping"]
             .as_object()
             .is_some_and(|nodes| nodes.values().any(|n| n["message"].get("author").is_some()));
-    match (deepseek, chatgpt) {
-        (true, true) => Err("会话同时包含 DeepSeek 与 ChatGPT 特征，来源有歧义".into()),
-        (true, false) => Ok(Some("deepseek-export")),
-        (false, true) => Ok(Some("chatgpt-export")),
-        (false, false) => Ok(None),
+    let qwen = looks_like_qwen(value);
+    if usize::from(deepseek) + usize::from(chatgpt) + usize::from(qwen) > 1 {
+        return Err("会话同时包含多个平台特征，来源有歧义".into());
     }
+    Ok(if deepseek {
+        Some("deepseek-export")
+    } else if chatgpt {
+        Some("chatgpt-export")
+    } else if qwen {
+        Some("qwen-export")
+    } else {
+        None
+    })
 }
 
 pub fn detect_import_format(text: &str) -> Result<String> {
@@ -268,8 +280,8 @@ pub fn detect_import_format(text: &str) -> Result<String> {
         if value["schema"] == "recallcard.conversation/1" {
             return Ok("recallcard-conversation".into());
         }
-        let values: Vec<&Value> = value
-            .as_array()
+        let values: Vec<&Value> = crate::import_qwen::wrapper_values(&value)?
+            .or_else(|| value.as_array())
             .map(|a| a.iter().collect())
             .unwrap_or_else(|| vec![&value]);
         let mut found = BTreeSet::new();
@@ -297,7 +309,7 @@ pub fn detect_import_format(text: &str) -> Result<String> {
             return Ok("manual-jsonl".into());
         }
     }
-    Err("未识别出支持的会话结构；请选择官方 DeepSeek / ChatGPT 导出、RecallCard 会话 JSON 或 Claude Code JSONL".into())
+    Err("未识别出支持的会话结构；请选择官方 DeepSeek / ChatGPT / Qwen 导出、RecallCard 会话 JSON 或 Claude Code JSONL".into())
 }
 
 /// 只读有界文件入口；调用方确认时还必须核对身份及整文件摘要。
@@ -377,8 +389,8 @@ impl<'a> ImportBuilder<'a> {
         Ok(())
     }
     fn json(&mut self, value: &Value) -> Result<bool> {
-        let values: Vec<&Value> = value
-            .as_array()
+        let values: Vec<&Value> = crate::import_qwen::wrapper_values(value)?
+            .or_else(|| value.as_array())
             .map(|a| a.iter().collect())
             .unwrap_or_else(|| vec![value]);
         let mut recognized = false;
@@ -401,6 +413,21 @@ impl<'a> ImportBuilder<'a> {
                     ChatgptCoverage::default(),
                     parsed.coverage,
                 )?;
+            } else if platform == "qwen-export" {
+                let parsed = parse_qwen_conversation(conv, self.scope)?;
+                let key = selection_key("qwen", &parsed.source_id);
+                self.add_conversation(
+                    "qwen",
+                    parsed.source_id,
+                    parsed.title,
+                    parsed.events,
+                    ChatgptCoverage::default(),
+                    DeepseekCoverage::default(),
+                )?;
+                self.coverage.qwen.add(&parsed.coverage);
+                self.conversations[self.conversation_index[&key]]
+                    .qwen_coverage
+                    .add(&parsed.coverage);
             } else {
                 let parsed = parse_chatgpt_conversation(conv, self.scope)?;
                 self.add_conversation(
@@ -441,6 +468,7 @@ impl<'a> ImportBuilder<'a> {
                     tool_messages: 0,
                     coverage: ChatgptCoverage::default(),
                     deepseek_coverage: DeepseekCoverage::default(),
+                    qwen_coverage: QwenCoverage::default(),
                 });
                 self.conversations.len() - 1
             });
@@ -523,6 +551,9 @@ impl<'a> ImportBuilder<'a> {
         }
         if self.conversations.iter().any(|c| c.platform == "deepseek") {
             self.coverage.notes.push("DeepSeek 保留导出树全部可识别的可见消息节点及父子编号；兄弟分支不是连续对话，也无法判断网站当前选中分支。THINK、工具/搜索片段、附件内容和附件链接均不导入；混合角色和不支持的消息按项统计跳过。只覆盖所提供文件，不表示完整账号历史。".into());
+        }
+        if self.conversations.iter().any(|c| c.platform == "qwen") {
+            self.coverage.notes.push("Qwen 只读取 history 一次并保留全部分支；messages 当前路径是重复投影。仅用户正文与 assistant answer 为可见正文，附件只保留元数据，不下载外链；思考、工具负载及空白省略均单独统计。".into());
         }
         if self.conversations.is_empty() {
             self.coverage.notes.push("文件中没有可识别的会话 JSON；Markdown、账号信息及其他未支持内容仅统计为跳过，没有导入消息。".into());

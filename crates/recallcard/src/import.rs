@@ -14,7 +14,7 @@ pub fn import_text(vault: &Vault, format: &str, text: &str, scope: &str) -> Resu
         .collect::<Vec<_>>();
     let after = vault.events()?.len();
     Ok(
-        json!({"ok":true,"events_added":after.saturating_sub(before),"events_seen":ids.len(),"refs":ids.iter().map(|i|format!("event:{i}")).collect::<Vec<_>>(),"coverage":{"messages":"partial","tools":if format=="claude-code"{"partial"}else{"unsupported"},"files":"unsupported","citations":"partial","branches":if format=="chatgpt-export"{"selected_current_branch"}else if format=="deepseek-export"{"all_exported_nodes_not_linear"}else{"partial"},"hidden_reasoning":"not_collected"},"note":"仅导入显式提供的文件；导入中断可安全重复运行，已写原始事件不回滚"}),
+        json!({"ok":true,"events_added":after.saturating_sub(before),"events_seen":ids.len(),"refs":ids.iter().map(|i|format!("event:{i}")).collect::<Vec<_>>(),"coverage":{"messages":"partial","tools":if format=="claude-code"{"partial"}else{"unsupported"},"files":"unsupported","citations":"partial","branches":if format=="chatgpt-export"{"selected_current_branch"}else if format=="deepseek-export"||format=="qwen-export"{"all_exported_nodes_not_linear"}else{"partial"},"hidden_reasoning":"not_collected"},"note":"仅导入显式提供的文件；导入中断可安全重复运行，已写原始事件不回滚"}),
     )
 }
 
@@ -32,16 +32,18 @@ pub(crate) fn parse_text(format: &str, text: &str, scope: &str) -> Result<Vec<Ev
                 .map(|l| serde_json::from_str::<EventInput>(l).map_err(|e| e.to_string()))
                 .collect::<Result<Vec<_>>>()?,
             "claude-code" => claude_code(text, scope)?,
-            "chatgpt-export" | "deepseek-export" => crate::import_bundle::parse_import_bytes(format, text.as_bytes(), scope)?.events,
+            "chatgpt-export" | "deepseek-export" | "qwen-export" => crate::import_bundle::parse_import_bytes(format, text.as_bytes(), scope)?.events,
             "recallcard-conversation" => {
                 crate::conversation::Conversation::parse(text)?.events(scope)?
             }
             _ => return Err(
-                "支持的格式：recallcard-conversation、manual-jsonl、claude-code、chatgpt-export、deepseek-export"
+                "支持的格式：recallcard-conversation、manual-jsonl、claude-code、chatgpt-export、deepseek-export、qwen-export"
                     .into(),
             ),
         };
-    if inputs.len() > 5000 && !matches!(format, "deepseek-export" | "chatgpt-export") {
+    if inputs.len() > 5000
+        && !matches!(format, "deepseek-export" | "chatgpt-export" | "qwen-export")
+    {
         return Err(
             "单批最多导入 5000 个事件；请在备份预览中选择较少会话，或将过长会话分批导出".into(),
         );

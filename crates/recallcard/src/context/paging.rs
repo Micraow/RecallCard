@@ -90,7 +90,10 @@ impl Context<'_> {
                         .map_err(|e| e.to_string())
                 })
                 .collect::<Result<BTreeSet<_>>>()?;
-            let metadata = json!({"kind":"event","scope":event.data.scope,"role":event.data.role,"origin":event.data.origin,"occurred_at":event.data.occurred_at,"source":source,"source_truncated":source_truncated,"part_origins":part_origins,"revision_of":event.data.revision_of,"reply_to":event.data.reply_to,"content_retained":retained,"chatgpt":{"on_current_path":event.data.metadata.pointer("/chatgpt/on_current_path").and_then(Value::as_bool)},"capture":{"completeness":completeness.map(|s|truncate_utf8(s,64)),"completeness_truncated":completeness.is_some_and(|s|s.len()>64),"redacted":event.data.capture.redacted,"redaction_count":event.data.capture.redaction_count}});
+            let mut metadata = json!({"kind":"event","scope":event.data.scope,"role":event.data.role,"origin":event.data.origin,"occurred_at":event.data.occurred_at,"source":source,"source_truncated":source_truncated,"part_origins":part_origins,"revision_of":event.data.revision_of,"reply_to":event.data.reply_to,"content_retained":retained,"chatgpt":{"on_current_path":event.data.metadata.pointer("/chatgpt/on_current_path").and_then(Value::as_bool)},"capture":{"completeness":completeness.map(|s|truncate_utf8(s,64)),"completeness_truncated":completeness.is_some_and(|s|s.len()>64),"redacted":event.data.capture.redacted,"redaction_count":event.data.capture.redaction_count}});
+            if event.data.metadata["qwen"].is_object() {
+                metadata["qwen"] = json!({"on_current_path":event.data.metadata.pointer("/qwen/on_current_path").and_then(Value::as_bool)});
+            }
             (
                 serde_json::to_value(&event).map_err(|e| e.to_string())?,
                 text,

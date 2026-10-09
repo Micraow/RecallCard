@@ -22,7 +22,7 @@ pub(super) struct ConversationBranches {
 impl ConversationBranches {
     pub fn new(events: Vec<Event>) -> Result<Self> {
         let explicit_graph = events.iter().any(|event| {
-            event.data.metadata["deepseek"].is_object()
+            (event.data.metadata["deepseek"].is_object() || event.data.metadata["qwen"].is_object())
                 || event.data.metadata.get("previous_message_id").is_some()
         });
         if !explicit_graph {
@@ -43,7 +43,12 @@ impl ConversationBranches {
         // 重复身份不猜测父节点；失去可见父节点时从此处断开，不能跨 scope 回查。
         let mut positions = BTreeMap::new();
         for (index, event) in events.iter().enumerate() {
-            let id = event.data.metadata["deepseek"]["node_id"]
+            let graph = if event.data.metadata["qwen"].is_object() {
+                &event.data.metadata["qwen"]
+            } else {
+                &event.data.metadata["deepseek"]
+            };
+            let id = graph["node_id"]
                 .as_str()
                 .unwrap_or(&event.data.source.message_id);
             positions
@@ -57,7 +62,11 @@ impl ConversationBranches {
         let mut omitted = vec![0; events.len()];
         for (index, event) in events.iter().enumerate() {
             let metadata = &event.data.metadata;
-            let deepseek = &metadata["deepseek"];
+            let deepseek = if metadata["qwen"].is_object() {
+                &metadata["qwen"]
+            } else {
+                &metadata["deepseek"]
+            };
             omitted[index] = deepseek["omitted_parent_nodes"].as_u64().unwrap_or(0);
             let parent = if let Some(parent) = deepseek.get("nearest_visible_parent_id") {
                 parent.as_str()
@@ -150,7 +159,7 @@ impl ConversationBranches {
             "child_count":self.child_counts[index],
             "omitted_parent_nodes":self.omitted[index],
             "gap_before":self.gaps[index],
-            "on_current_path":self.events[index].data.metadata.pointer("/chatgpt/on_current_path")
+            "on_current_path":self.events[index].data.metadata.pointer("/chatgpt/on_current_path").or_else(||self.events[index].data.metadata.pointer("/qwen/on_current_path"))
         })
     }
 

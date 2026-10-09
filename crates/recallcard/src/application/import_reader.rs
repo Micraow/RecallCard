@@ -5,11 +5,12 @@ use crate::{
     import::{parse_chatgpt_conversation_all, ChatgptCoverage},
     import_bundle,
     import_deepseek::{parse_deepseek_conversation, DeepseekCoverage},
+    import_qwen::{parse_qwen_conversation, QwenCoverage},
     EventInput,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
 };
 use zip::{CompressionMethod, ZipArchive};
@@ -28,6 +29,8 @@ pub struct ReadReport {
     pub file_references: u64,
     pub citations: u64,
     pub trace_placeholders: u64,
+    #[serde(default)]
+    pub qwen: QwenCoverage,
 }
 
 pub struct ImportedConversation {
@@ -37,6 +40,7 @@ pub struct ImportedConversation {
     pub events: Vec<EventInput>,
     pub chatgpt_coverage: ChatgptCoverage,
     pub deepseek_coverage: DeepseekCoverage,
+    pub qwen_coverage: QwenCoverage,
 }
 
 fn invalid_archive(message: &str) -> AppError {
@@ -86,10 +90,13 @@ where
             "请选择有效资料范围",
         )
     })?;
-    if !matches!(format, "auto" | "deepseek-export" | "chatgpt-export") {
+    if !matches!(
+        format,
+        "auto" | "deepseek-export" | "chatgpt-export" | "qwen-export"
+    ) {
         return Err(AppError::new(
             ErrorCode::UnsupportedFormat,
-            "此导入服务目前支持 DeepSeek 与 ChatGPT 官方 JSON / ZIP",
+            "此导入服务目前支持 DeepSeek、ChatGPT 与 Qwen 官方 JSON / ZIP",
             "选择官方导出；其他旧格式仍可使用兼容命令",
         ));
     }
@@ -260,7 +267,10 @@ impl<R: Read, P: FnMut(&ReadReport) -> AppResult<()>> JsonReader<'_, R, P> {
             };
             if depth == 0
                 && !string
-                && (matches!(b, b' ' | b'\n' | b'\r' | b'\t') || b == b',' || b == b']')
+                && (matches!(b, b' ' | b'\n' | b'\r' | b'\t')
+                    || b == b','
+                    || b == b']'
+                    || b == b'}')
             {
                 return Ok((bytes, Some(b)));
             }
@@ -300,6 +310,139 @@ impl<R: Read, P: FnMut(&ReadReport) -> AppResult<()>> JsonReader<'_, R, P> {
     }
 }
 
+fn array_values<
+    R: Read,
+    S: FnMut(ImportedConversation) -> AppResult<()>,
+    P: FnMut(&ReadReport) -> AppResult<()>,
+>(
+    stream: &mut JsonReader<'_, R, P>,
+    format: &str,
+    scope: &str,
+    limits: ImportLimits,
+    sink: &mut S,
+    qwen_only: bool,
+) -> AppResult<()> {
+    let mut next = stream.nonspace()?.ok_or_else(invalid_json)?;
+    if next == b']' {
+        return Ok(());
+    }
+    loop {
+        let (bytes, end) = stream.value(next)?;
+        if qwen_only {
+            let value = import_bundle::strict_json(&bytes).map_err(|_| invalid_json())?;
+            if import_bundle::provider(&value).map_err(|_| invalid_json())? != Some("qwen-export") {
+                return Err(AppError::new(
+                    ErrorCode::UnsupportedFormat,
+                    "Qwen data 含非 Qwen 会话；不猜测来源",
+                    "请提供完整官方导出",
+                ));
+            }
+        }
+        process_value(&bytes, format, scope, limits, stream.report, sink)?;
+        let delimiter = match end {
+            Some(b) if !matches!(b, b' ' | b'\n' | b'\r' | b'\t') => Some(b),
+            _ => stream.nonspace()?,
+        };
+        match delimiter {
+            Some(b']') => return Ok(()),
+            Some(b',') => {
+                next = stream.nonspace()?.ok_or_else(invalid_json)?;
+                if next == b']' {
+                    return Err(invalid_json());
+                }
+            }
+            _ => return Err(invalid_json()),
+        }
+    }
+}
+
+/// 顶层对象按字段框定；Qwen data 数组逐会话暂存，完整包装校验前不会提交。
+fn root_object<
+    R: Read,
+    S: FnMut(ImportedConversation) -> AppResult<()>,
+    P: FnMut(&ReadReport) -> AppResult<()>,
+>(
+    stream: &mut JsonReader<'_, R, P>,
+    format: &str,
+    scope: &str,
+    limits: ImportLimits,
+    sink: &mut S,
+) -> AppResult<()> {
+    let mut fields = serde_json::Map::new();
+    let mut seen = BTreeSet::new();
+    let mut size = 2usize;
+    let mut data_array = false;
+    let mut next = stream.nonspace()?.ok_or_else(invalid_json)?;
+    if next != b'}' {
+        loop {
+            if next != b'"' {
+                return Err(invalid_json());
+            }
+            let (key, end) = stream.value(next)?;
+            if end.is_some() || key.len() > 8192 {
+                return Err(invalid_json());
+            }
+            let name: String = serde_json::from_slice(&key).map_err(|_| invalid_json())?;
+            if !seen.insert(name.clone()) || stream.nonspace()? != Some(b':') {
+                return Err(invalid_json());
+            }
+            let first = stream.nonspace()?.ok_or_else(invalid_json)?;
+            let end = if name == "data" && first == b'[' {
+                data_array = true;
+                array_values(stream, format, scope, limits, sink, true)?;
+                None
+            } else {
+                let (bytes, end) = stream.value(first)?;
+                size = size
+                    .saturating_add(key.len())
+                    .saturating_add(bytes.len())
+                    .saturating_add(2);
+                if size > limits.conversation_bytes {
+                    return Err(resource(
+                        "单个会话超过配置的内存字节上限；整份导出不受此单会话阈值限制",
+                    ));
+                }
+                let value = import_bundle::strict_json(&bytes).map_err(|_| invalid_json())?;
+                fields.insert(name, value);
+                end
+            };
+            let delimiter = match end {
+                Some(b) if !matches!(b, b' ' | b'\n' | b'\r' | b'\t') => Some(b),
+                _ => stream.nonspace()?,
+            };
+            match delimiter {
+                Some(b'}') => break,
+                Some(b',') => {
+                    next = stream.nonspace()?.ok_or_else(invalid_json)?;
+                    if next == b'}' {
+                        return Err(invalid_json());
+                    }
+                }
+                _ => return Err(invalid_json()),
+            }
+        }
+    }
+    if data_array {
+        if fields.len() != 2
+            || fields.get("success") != Some(&serde_json::Value::Bool(true))
+            || fields
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty)
+        {
+            return Err(AppError::new(
+                ErrorCode::InvalidConversation,
+                "Qwen 导出包装无效或请求未成功",
+                "重新取得完整官方导出；暂存未写入事实源",
+            ));
+        }
+    } else {
+        let bytes = serde_json::to_vec(&fields).map_err(|_| invalid_json())?;
+        process_value(&bytes, format, scope, limits, stream.report, sink)?;
+    }
+    Ok(())
+}
+
 fn read_json_stream<R, S, P>(
     reader: R,
     format: &str,
@@ -321,34 +464,15 @@ where
         probe,
         pending: 0,
     };
-    let first = stream.nonspace()?.ok_or_else(invalid_json)?;
-    if first == b'[' {
-        let mut next = stream.nonspace()?.ok_or_else(invalid_json)?;
-        if next != b']' {
-            loop {
-                let (bytes, end) = stream.value(next)?;
-                process_value(&bytes, format, scope, limits, stream.report, sink)?;
-                let delimiter = match end {
-                    Some(b) if !matches!(b, b' ' | b'\n' | b'\r' | b'\t') => Some(b),
-                    _ => stream.nonspace()?,
-                };
-                match delimiter {
-                    Some(b']') => break,
-                    Some(b',') => {
-                        next = stream.nonspace()?.ok_or_else(invalid_json)?;
-                        if next == b']' {
-                            return Err(invalid_json());
-                        }
-                    }
-                    _ => return Err(invalid_json()),
-                }
+    match stream.nonspace()?.ok_or_else(invalid_json)? {
+        b'[' => array_values(&mut stream, format, scope, limits, sink, false)?,
+        b'{' => root_object(&mut stream, format, scope, limits, sink)?,
+        first => {
+            let (bytes, end) = stream.value(first)?;
+            process_value(&bytes, format, scope, limits, stream.report, sink)?;
+            if end.is_some_and(|b| !matches!(b, b' ' | b'\n' | b'\r' | b'\t')) {
+                return Err(invalid_json());
             }
-        }
-    } else {
-        let (bytes, end) = stream.value(first)?;
-        process_value(&bytes, format, scope, limits, stream.report, sink)?;
-        if end.is_some_and(|b| !matches!(b, b' ' | b'\n' | b'\r' | b'\t')) {
-            return Err(invalid_json());
         }
     }
     if stream.nonspace()?.is_some() {
@@ -370,7 +494,12 @@ pub(super) fn adapter_error(message: String, platform: &str) -> AppError {
     } else {
         AppError::new(
             ErrorCode::InvalidConversation,
-            format!("{platform} 会话身份、时间或分支关系无效"),
+            if platform == "Qwen" && message.starts_with("Qwen ") && message.len() <= 240 {
+                // Qwen 适配器使用固定字段诊断，不回显正文、原始字段值或附件地址。
+                message
+            } else {
+                format!("{platform} 会话身份、时间或分支关系无效")
+            },
             "重新取得完整官方导出；原始资料未被修改",
         )
     }
@@ -412,6 +541,18 @@ fn process_value<S: FnMut(ImportedConversation) -> AppResult<()>>(
             events: p.events,
             chatgpt_coverage: ChatgptCoverage::default(),
             deepseek_coverage: p.coverage,
+            qwen_coverage: QwenCoverage::default(),
+        }
+    } else if provider == "qwen-export" {
+        let p = parse_qwen_conversation(&value, scope).map_err(|e| adapter_error(e, "Qwen"))?;
+        ImportedConversation {
+            platform: "qwen".into(),
+            source_id: p.source_id,
+            title: p.title,
+            events: p.events,
+            chatgpt_coverage: ChatgptCoverage::default(),
+            deepseek_coverage: DeepseekCoverage::default(),
+            qwen_coverage: p.coverage,
         }
     } else {
         let p = parse_chatgpt_conversation_all(&value, scope)
@@ -423,6 +564,7 @@ fn process_value<S: FnMut(ImportedConversation) -> AppResult<()>>(
             events: p.events,
             chatgpt_coverage: p.coverage,
             deepseek_coverage: DeepseekCoverage::default(),
+            qwen_coverage: QwenCoverage::default(),
         }
     };
     if provider == "deepseek-export" {
@@ -464,6 +606,11 @@ fn process_value<S: FnMut(ImportedConversation) -> AppResult<()>>(
             .hidden_reasoning_messages_skipped
         + conversation.chatgpt_coverage.other_branch_messages_skipped)
         as u64;
+    report.qwen.add(&conversation.qwen_coverage);
+    report.hidden_fragments += conversation.qwen_coverage.hidden_fragments_skipped as u64;
+    report.unsupported_fragments += conversation.qwen_coverage.unsupported_fragments_skipped as u64;
+    report.omitted_messages += conversation.qwen_coverage.empty_messages_skipped as u64;
+    report.file_references += conversation.qwen_coverage.attachment_references as u64;
     sink(conversation)
 }
 

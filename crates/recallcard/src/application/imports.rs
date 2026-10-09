@@ -448,12 +448,12 @@ impl ImportService {
         }
         if !matches!(
             request.format.as_str(),
-            "auto" | "chatgpt-export" | "deepseek-export"
+            "auto" | "chatgpt-export" | "deepseek-export" | "qwen-export"
         ) {
             return Err(error(
                 ErrorCode::UnsupportedFormat,
                 "此服务只接受支持的官方导出格式",
-                "选择自动识别、ChatGPT 或 DeepSeek 官方导出",
+                "选择自动识别、ChatGPT、DeepSeek 或 Qwen 官方导出",
             ));
         }
         let mut sources = Vec::new();
@@ -1081,6 +1081,7 @@ fn merge_report(total: &mut ReadReport, part: &ReadReport) {
     total.file_references += part.file_references;
     total.citations += part.citations;
     total.trace_placeholders += part.trace_placeholders;
+    total.qwen.add(&part.qwen);
 }
 
 fn encode_stage(staged: &StagedConversation) -> AppResult<Vec<u8>> {

@@ -188,7 +188,7 @@ export function SourcesPage({
           ) : (
             <EmptyState icon="sources" title="所有背景，都有来处">
               <p>
-                导入 ChatGPT、DeepSeek 的官方导出文件。
+                导入 ChatGPT、DeepSeek、Qwen 的官方导出文件。
                 <br />
                 保存后即可搜索原话，不必先等待记忆整理。
               </p>

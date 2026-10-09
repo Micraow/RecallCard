@@ -181,6 +181,8 @@ export const platformLabel = (platform: string) =>
     "chatgpt-export": "ChatGPT",
     deepseek: "DeepSeek",
     "deepseek-export": "DeepSeek",
+    qwen: "Qwen",
+    "qwen-export": "Qwen",
     claude: "Claude",
     "recallcard-desktop": "本地笔记",
     codex: "Codex",
