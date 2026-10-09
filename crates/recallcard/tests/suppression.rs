@@ -108,6 +108,14 @@ fn old_rules_without_source_hashes_still_cover_new_revisions() {
     std::fs::write(path, serde_json::to_vec(&rule).unwrap()).unwrap();
     let future = capture(&v, "personal", "one", "合成新修订");
     assert!(v.is_suppressed(&future.id).unwrap());
+    assert!(v
+        .dream_export(std::slice::from_ref(&future.id), &[], "personal")
+        .is_err());
+    let hidden_memory = memory(&v, &future.id);
+    let unrelated = capture(&v, "personal", "unrelated", "合成独立来源");
+    assert!(v
+        .dream_export(&[unrelated.id], &[hidden_memory.id], "personal")
+        .is_err());
     assert!(context(&v)
         .read(ReadArgs {
             refs: vec![format!("event:{}", future.id)],
@@ -135,6 +143,14 @@ fn persisted_source_hash_survives_missing_original_without_leaking_identity_text
     remove_event(&v.root().join("events"), &old.id);
     let future = capture(&v, "personal", "one", "合成重新捕获");
     assert!(v.is_suppressed(&future.id).unwrap());
+    assert!(v
+        .dream_export(std::slice::from_ref(&future.id), &[], "personal")
+        .is_err());
+    let hidden_memory = memory(&v, &future.id);
+    let unrelated = capture(&v, "personal", "unrelated", "合成独立来源");
+    assert!(v
+        .dream_export(&[unrelated.id], &[hidden_memory.id], "personal")
+        .is_err());
     assert!(context(&v)
         .read(ReadArgs {
             refs: vec![format!("event:{}", future.id)],

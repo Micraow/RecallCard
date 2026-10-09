@@ -380,6 +380,10 @@ impl<'a> Context<'a> {
         }
         Ok(true)
     }
+    fn memory_documents(&self) -> Result<Vec<Document>> {
+        let guard = self.vault.read_guard()?;
+        self.memory_documents_locked(&guard)
+    }
     pub fn bootstrap(&self, args: BootstrapArgs) -> Result<Value> {
         bootstrap_projection(&self.documents()?, &self.access.scopes(), args, Utc::now())
     }
@@ -415,7 +419,11 @@ impl<'a> Context<'a> {
         }
         // worker 等待期间不持有 Vault 锁，遗忘/撤权写入可立即生效。
         let candidate_result = if let Some(semantic) = self.semantic {
-            let snapshot = self.documents()?;
+            let snapshot = if matches!(args.target.as_str(), "memories" | "views") {
+                self.memory_documents()?
+            } else {
+                self.documents()?
+            };
             let now = Utc::now();
             let mut semantic_args = args.clone();
             if semantic_args.target == "views" {
@@ -434,7 +442,11 @@ impl<'a> Context<'a> {
         };
         // worker 返回后重读正本并重新计算有效时间；保持最终读取锁到响应构造结束。
         let _final_read_guard = self.vault.read_guard()?;
-        let current = self.documents()?;
+        let current = if matches!(args.target.as_str(), "memories" | "views") {
+            self.memory_documents_locked(&_final_read_guard)?
+        } else {
+            self.documents()?
+        };
         let now = Utc::now();
         let mut searchable = current.clone();
         if args.include_navigation || args.target == "views" {
@@ -1128,8 +1140,11 @@ fn json_size(value: &Value) -> Result<usize> {
 impl<'a> Context<'a> {
     pub fn embedding_corpus(&self) -> Result<Value> {
         let now = Utc::now();
-        let documents =
-            crate::semantic::corpus_documents(&self.documents()?, &self.access.scopes(), now);
+        let documents = crate::semantic::corpus_documents(
+            &self.memory_documents()?,
+            &self.access.scopes(),
+            now,
+        );
         let generation = hash(&serde_json::to_vec(&documents).map_err(|e| e.to_string())?);
         Ok(
             json!({"schema":"recallcard.embedding-corpus/1","generation":generation,"scope":self.access.scopes(),"documents":documents}),

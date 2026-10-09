@@ -190,6 +190,12 @@ impl Vault {
     }
     /// 调用方已经在同一锁内读取并验证了完整 Event 快照；不重复扫描，也不跨请求保存身份。
     pub(crate) fn suppressed_ids_from_events(&self, events: &[Event]) -> Result<BTreeSet<String>> {
+        self.suppressed_ids_from_event_iter(events.iter())
+    }
+    pub(crate) fn suppressed_ids_from_event_iter<'a>(
+        &self,
+        events: impl Iterator<Item = &'a Event> + Clone,
+    ) -> Result<BTreeSet<String>> {
         self.ensure_no_pending_dream()?;
         let mut ids = BTreeSet::new();
         let mut source_hashes = BTreeSet::new();
@@ -203,7 +209,7 @@ impl Vault {
             source_hashes.extend(rule.source_hashes);
         }
         if !ids.is_empty() {
-            for event in events {
+            for event in events.clone() {
                 if ids.contains(&event.id) {
                     source_hashes.insert(suppression_source_hash(event));
                 }

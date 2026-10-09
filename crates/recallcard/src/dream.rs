@@ -171,6 +171,22 @@ impl Vault {
         }
         let sources = unique(source_ids, "Dream 来源")?;
         let memories = unique(memory_ids, "Dream 旧记忆")?;
+        let mut selected_memories = Vec::new();
+        let mut required_sources = sources
+            .iter()
+            .map(|id| event_ref(id))
+            .collect::<Result<BTreeSet<_>>>()?;
+        for reference in memories {
+            let (id, revision) = memory_ref(&reference)?;
+            let memory = self.memory(&id)?;
+            if revision.is_some_and(|r| r != memory.revision) {
+                return Err("导出指定的记忆版本已经过期".into());
+            }
+            required_sources.extend(memory.data.source_refs.iter().cloned());
+            selected_memories.push(memory);
+        }
+        let mut events = crate::vault::EventSnapshot::new(self, &_lock);
+        let suppressed = self.suppressed_ids_for_sources(&required_sources, &mut events)?;
         let mut job = DreamJob {
             schema: JOB_SCHEMA.into(),
             job_id: String::new(),
@@ -185,21 +201,16 @@ impl Vault {
         };
         for id in sources {
             let id = event_ref(&id)?;
-            let event = self.event(&id)?;
-            self.check_dream_source(&event, scope)?;
+            let event = events.event(&id)?;
+            self.check_dream_source(&event, scope, &suppressed)?;
             job.source_refs.push(DreamSource {
                 reference: format!("event:{id}"),
                 content_hash: digest(&event)?,
                 event,
             });
         }
-        for id in memories {
-            let (id, requested_revision) = memory_ref(&id)?;
-            let memory = self.memory(&id)?;
-            if requested_revision.is_some_and(|r| r != memory.revision) {
-                return Err("导出指定的记忆版本已经过期".into());
-            }
-            self.check_dream_memory(&memory, scope)?;
+        for memory in selected_memories {
+            self.check_dream_memory_with(&memory, scope, |id| events.event(id), &suppressed)?;
             job.memory_read_set.push(DreamReadMemory {
                 reference: format!("memory:{}@{}", memory.id, memory.revision),
                 content_hash: digest(&memory)?,
@@ -380,8 +391,13 @@ impl Vault {
         }
         Ok(Some(receipt))
     }
-    fn check_dream_source(&self, event: &Event, scope: &str) -> Result<()> {
-        if self.is_suppressed(&event.id)? {
+    fn check_dream_source(
+        &self,
+        event: &Event,
+        scope: &str,
+        suppressed: &BTreeSet<String>,
+    ) -> Result<()> {
+        if suppressed.contains(&event.id) {
             return Err("Dream 来源已被抑制，不能导出或重新提炼".into());
         }
         if event.data.scope != scope {
@@ -392,21 +408,19 @@ impl Vault {
         }
         Ok(())
     }
-    fn check_dream_memory(&self, memory: &Memory, scope: &str) -> Result<()> {
-        self.check_dream_memory_with(memory, scope, |id| self.event(id))
-    }
     fn check_dream_memory_with(
         &self,
         memory: &Memory,
         scope: &str,
         event: impl FnMut(&str) -> Result<Event>,
+        suppressed: &BTreeSet<String>,
     ) -> Result<()> {
-        if self.is_suppressed(&memory.id)?
+        if suppressed.contains(&memory.id)
             || memory
                 .data
                 .source_refs
                 .iter()
-                .any(|id| self.is_suppressed(id).unwrap_or(true))
+                .any(|id| suppressed.contains(id))
         {
             return Err("Dream 旧记忆或其来源已被抑制".into());
         }
@@ -423,10 +437,11 @@ impl Vault {
         guard: &crate::vault::WriteGuard,
     ) -> Result<DreamReview> {
         let mut events = crate::vault::EventSnapshot::new(self, guard);
+        let suppressed = self.suppressed_ids_from_event_iter(events.all()?.values())?;
         let mut allowed_sources = BTreeSet::new();
         for source in &job.source_refs {
             let current = events.event(&source.event.id)?;
-            self.check_dream_source(&current, &job.allowed_scope)?;
+            self.check_dream_source(&current, &job.allowed_scope, &suppressed)?;
             if digest(&current)? != source.content_hash {
                 return Err("Dream 来源哈希已改变，请重新导出任务".into());
             }
@@ -450,7 +465,12 @@ impl Vault {
         let mut baseline = BTreeMap::new();
         for old in &job.memory_read_set {
             let current = self.memory(&old.memory.id)?;
-            self.check_dream_memory_with(&current, &job.allowed_scope, |id| events.event(id))?;
+            self.check_dream_memory_with(
+                &current,
+                &job.allowed_scope,
+                |id| events.event(id),
+                &suppressed,
+            )?;
             if current.revision != old.memory.revision || digest(&current)? != old.content_hash {
                 return Err("Dream 旧记忆 read-set 已过期，请重新读取和整理，不能覆盖".into());
             }

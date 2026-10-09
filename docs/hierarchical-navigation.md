@@ -87,3 +87,11 @@ View 本身尚未进入 semantic Memory 索引。配置语义能力后，`includ
 根目录优先显示紧凑的路由条目：title、明确标作 excerpt 的短简介、当前贡献者的 ref/evidence/state/origin 及贡献者总数。根的固定标题不再重复整份贡献者元数据。`child_count` / `children_complete` 区分“全部直接子目录已列出”与“更多提示/贡献者元数据仍可续页”；完整内容仍在子目录和后续页，不把截取文字当完整事实。常见的三个顶级分支可在默认1500字节中同时出现；更多或更长条目仍严格分页，不保证任意规模都能塞入固定预算。
 
 bootstrap / 文档检索构造当前 Document 投影时，先读取一次完整且已校验的 Event 快照，再在同一锁内用该快照扩展 suppression，避免为了遗忘规则先扫两遍、随后又读取第三遍。它不是跨请求缓存，不减少5982等原文活动计数，不略过 scope、修订或来源规则。
+
+Memory / View 专用检索与 embedding 导出只构造当前授权 Memory 投影，并逐条验证它们实际来源的 scope 与抑制状态；不会把未整理原文悄悄当作向量覆盖。语义 worker 返回后仍在新的读取锁内重新验证当前正本。all / events 检索与 bootstrap 活动统计继续使用完整 Event 投影。
+
+Dream export 在同一锁内一次解析所选 Memory，联合新来源与旧 Memory 来源计算当前 suppression；显式 Memory 版本仍必须匹配。Dream review/apply 每次各建一个全量 Event 快照，同时用于 suppression、来源 hash、同身份新修订和证据验证，避免逐来源重复全库扫描。快照绝不跨 export、review、apply 或后续请求复用，旧无摘要规则与原始文件缺失后的持久化来源摘要仍需生效。
+
+### 本机 IPC 验证边界
+
+IPC 默认端点不会直接拼接 Vault 路径；文件名由 Vault 规范路径和 scope 集合的摘要生成，长度固定。它的父目录来自 `RECALLCARD_STATE_DIR` 或系统 runtime/state/data 目录，因此自定义状态目录过长仍可能超过 Unix 的保守 100 字节上限，这是独立的可用性限制。当前需要为 daemon 与客户端显式配置相同的短 `--endpoint` / `--ipc-endpoint`，不会自动回退到权限未知的共享目录。实际 socket bind 被系统拒绝与“端点路径过长”必须分别记录；无 socket 的路径测试不能冒充守护进程、权限或 IPC 端到端验收。
