@@ -59,6 +59,7 @@ pub(super) struct Match<'a> {
     pub score: f64,
     pub document: &'a Document,
     pub related_refs: Vec<String>,
+    pub score_source_ref: Option<String>,
 }
 pub(super) fn group_sources<'a>(ranked: Vec<(f64, &'a Document)>, query: &str) -> Vec<Match<'a>> {
     let mut owners = BTreeMap::new();
@@ -81,29 +82,52 @@ pub(super) fn group_sources<'a>(ranked: Vec<(f64, &'a Document)>, query: &str) -
         }
     }
     let mut related: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (_, doc) in &ranked {
+    let mut source_scores: BTreeMap<String, (f64, String)> = BTreeMap::new();
+    for (score, doc) in &ranked {
         if doc.kind == "event" {
             if let Some(owner) = owners.get(&doc.reference) {
                 related
                     .entry(owner.clone())
                     .or_default()
                     .push(doc.reference.clone());
+                let best = source_scores
+                    .entry(owner.clone())
+                    .or_insert((*score, doc.reference.clone()));
+                if score.total_cmp(&best.0).is_gt()
+                    || (score.total_cmp(&best.0).is_eq() && doc.reference < best.1)
+                {
+                    *best = (*score, doc.reference.clone());
+                }
             }
         }
     }
-    ranked
+    let mut groups: Vec<_> = ranked
         .into_iter()
         .filter_map(|(score, doc)| {
             if doc.kind == "event" && owners.contains_key(&doc.reference) {
                 return None;
             }
+            // 仅保留已授权且实际命中的成员最高分，不因来源数量增加而加分。
+            let (score, score_source_ref) = match source_scores.remove(&doc.reference) {
+                Some((source_score, reference)) if source_score > score => {
+                    (source_score, Some(reference))
+                }
+                _ => (score, None),
+            };
             Some(Match {
                 score,
                 document: doc,
                 related_refs: related.remove(&doc.reference).unwrap_or_default(),
+                score_source_ref,
             })
         })
-        .collect()
+        .collect();
+    groups.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then(a.document.reference.cmp(&b.document.reference))
+    });
+    groups
 }
 fn item(entry: &Match<'_>, query: &str, limit: usize) -> Result<Value> {
     let doc = entry.document;
@@ -111,6 +135,9 @@ fn item(entry: &Match<'_>, query: &str, limit: usize) -> Result<Value> {
     value["ref"] = value["reference"].take();
     value.as_object_mut().unwrap().remove("reference");
     value["score"] = json!(entry.score);
+    if let Some(reference) = &entry.score_source_ref {
+        value["score_source_ref"] = json!(reference);
+    }
     let (start, end) = matching_window(&doc.text, query, limit);
     value["text"] = json!(&doc.text[start..end]);
     value["text_truncated"] = json!(start != 0 || end != doc.text.len());
@@ -252,4 +279,80 @@ pub(super) fn response(
         return Err("预算不足以容纳搜索状态".into());
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn document(reference: &str, kind: &str, sources: &[&str]) -> Document {
+        Document {
+            reference: reference.into(),
+            text: "合成命中".into(),
+            scope: "personal".into(),
+            kind: kind.into(),
+            evidence_refs: sources.iter().map(|s| (*s).into()).collect(),
+            session_ref: None,
+            state: "tentative".into(),
+            occurred_at: None,
+            valid_from: None,
+            valid_to: None,
+            time_note: String::new(),
+            evidence: "AssistantSuggestion".into(),
+            labels: vec![],
+            entities: vec![],
+            protected: false,
+        }
+    }
+
+    #[test]
+    fn grouped_score_is_maximum_with_exact_deterministic_provenance() {
+        let memory = document("memory:m", "memory", &["event:a", "event:b"]);
+        let a = document("event:a", "event", &[]);
+        let b = document("event:b", "event", &[]);
+        let stronger = document("event:stronger", "event", &[]);
+        let groups = group_sources(
+            vec![(5.0, &stronger), (4.0, &b), (4.0, &a), (2.0, &memory)],
+            "命中",
+        );
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].document.reference, "event:stronger");
+        assert_eq!(groups[1].score, 4.0, "不能把两个来源的得分相加");
+        assert_eq!(groups[1].score_source_ref.as_deref(), Some("event:a"));
+        let serialized = item(&groups[1], "命中", 96).unwrap();
+        assert_eq!(serialized["score_source_ref"], "event:a");
+        assert_eq!(serialized["evidence"], "AssistantSuggestion");
+        assert_eq!(serialized["state"], "tentative");
+        assert_eq!(serialized["text"], "合成命中");
+    }
+
+    #[test]
+    fn memory_score_is_not_falsely_attributed_to_a_weaker_or_equal_source() {
+        let memory = document("memory:m", "memory", &["event:a"]);
+        let source = document("event:a", "event", &[]);
+        for source_score in [2.0, 5.0] {
+            let groups = group_sources(vec![(5.0, &memory), (source_score, &source)], "命中");
+            assert_eq!(groups[0].score, 5.0);
+            assert_eq!(groups[0].score_source_ref, None);
+            assert!(item(&groups[0], "命中", 96)
+                .unwrap()
+                .get("score_source_ref")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn absent_source_scores_and_nonmatching_memories_do_not_create_inheritance() {
+        let mut memory = document("memory:m", "memory", &["event:a"]);
+        let source = document("event:a", "event", &[]);
+        let groups = group_sources(vec![(2.0, &memory)], "命中");
+        assert_eq!(groups[0].score, 2.0);
+        assert_eq!(groups[0].score_source_ref, None);
+        memory.text = "另一段没有查询词的说明".into();
+        let groups = group_sources(vec![(5.0, &source), (2.0, &memory)], "命中");
+        assert_eq!(groups.len(), 2);
+        assert!(groups
+            .iter()
+            .all(|g| g.score_source_ref.is_none() && g.related_refs.is_empty()));
+    }
 }

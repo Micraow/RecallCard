@@ -154,6 +154,65 @@ fn compact_first_page_shares_space_and_cursor_covers_every_distinct_match() {
     }
     assert_eq!(seen.len(), 7);
 }
+
+#[test]
+fn weak_label_summary_preserves_its_strong_source_and_remains_pageable() {
+    let (_dir, vault) = setup();
+    let source = event(&vault, "beacon-choice", "user", "航标计划选择琥珀格式。");
+    for index in 0..8 {
+        event(
+            &vault,
+            &format!("beacon-advice-{index}"),
+            "assistant",
+            "航标计划可以考虑其他格式，这只是等待讨论的建议。",
+        );
+    }
+    let memory = vault
+        .add_memory(
+            serde_json::from_value(json!({
+                "content":"采用琥珀格式。", "source_refs":[source],
+                "labels":["航标计划资料"], "evidence":"user_explicit"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let grouped = query(&vault, "航标计划");
+    let first = &grouped["results"][0];
+    assert_eq!(grouped["match_count"], 9);
+    assert_eq!(first["ref"], format!("memory:{}@1", memory.id));
+    assert_eq!(first["score_source_ref"], format!("event:{source}"));
+    assert_eq!(first["related_refs"][0], format!("event:{source}"));
+    assert_eq!(first["evidence"], "UserExplicit");
+    assert_eq!(first["text"], "采用琥珀格式。");
+    let mut raw = args("航标计划", 12000);
+    raw.target = "events".into();
+    assert_eq!(
+        c(&vault).search(raw).unwrap()["results"][0]["ref"],
+        format!("event:{source}")
+    );
+    let mut paged = args("航标计划", 2200);
+    paged.limit = 2;
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        let page = c(&vault).search(paged.clone()).unwrap();
+        assert!(serde_json::to_vec(&page).unwrap().len() <= 2200);
+        for record in page["results"].as_array().unwrap() {
+            assert!(seen.insert(record["ref"].as_str().unwrap().to_owned()));
+        }
+        if page["next_cursor"].is_null() {
+            break;
+        }
+        paged.cursor = page["next_cursor"].as_str().map(str::to_owned);
+    }
+    assert_eq!(seen.len(), 9);
+    vault
+        .suppress(&source, "合成样本来源已隐藏".into())
+        .unwrap();
+    let hidden = query(&vault, "航标计划");
+    assert_eq!(hidden["match_count"], 8);
+    assert!(!hidden.to_string().contains(&source));
+    assert!(!hidden.to_string().contains(&memory.id));
+}
 #[test]
 fn exhausted_budget_supplies_a_working_retry_size_and_no_matches_stays_distinct() {
     let (_d, v) = setup();

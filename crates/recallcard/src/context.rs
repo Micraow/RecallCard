@@ -312,7 +312,14 @@ impl<'a> Context<'a> {
             &serde_json::to_vec(
                 &ranked
                     .iter()
-                    .map(|item| (item.score, &item.document.reference, &item.related_refs))
+                    .map(|item| {
+                        (
+                            item.score,
+                            &item.document.reference,
+                            &item.related_refs,
+                            &item.score_source_ref,
+                        )
+                    })
                     .collect::<Vec<_>>(),
             )
             .map_err(|e| e.to_string())?,
