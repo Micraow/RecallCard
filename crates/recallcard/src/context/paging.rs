@@ -154,6 +154,9 @@ impl Context<'_> {
             return Err("相邻来源导航只用于 Event；请先 sources(memory) 再读取来源".into());
         }
         if kind == "view" {
+            if id.starts_with("nav/") {
+                return self.navigation_page(&args, sources);
+            }
             if args.detail == "compact" {
                 return Err("view 请使用默认 full 目录，再逐个紧凑读取 Event/Memory".into());
             }

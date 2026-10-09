@@ -90,7 +90,15 @@ fn fixed_schema_fields_and_operations_match_rust_result() {
     let prefix = task.split_once(DYNAMIC).unwrap().0;
     let schema_start = prefix.find("\n{\n").unwrap() + 1;
     let schema: Value = serde_json::from_str(&prefix[schema_start..]).unwrap();
-    let serialized = serde_json::to_value(parse_result_text(&minimal()).unwrap()).unwrap();
+    let mut parsed = parse_result_text(&minimal()).unwrap();
+    assert!(
+        serde_json::to_value(&parsed).unwrap()["proposals"][0]
+            .get("navigation")
+            .is_none(),
+        "旧结果必须省略缺省 hints，保持原摘要兼容"
+    );
+    parsed.proposals[0].navigation = Some(vec![]);
+    let serialized = serde_json::to_value(parsed).unwrap();
     let actual: Vec<_> = serialized.as_object().unwrap().keys().collect();
     let advertised: Vec<_> = schema["properties"].as_object().unwrap().keys().collect();
     assert_eq!(actual, advertised);

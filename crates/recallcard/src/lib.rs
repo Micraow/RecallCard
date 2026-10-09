@@ -1,5 +1,6 @@
 //! RecallCard 的本地事实源；索引和视图都可重建。
 pub mod model;
+pub mod navigation;
 pub mod vault;
 pub use model::*;
 pub use vault::Vault;

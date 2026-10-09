@@ -209,6 +209,8 @@ pub enum Evidence {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryInput {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub navigation: Vec<crate::navigation::Hint>,
     pub content: String,
     pub source_refs: Vec<String>,
     pub evidence: Evidence,
@@ -257,6 +259,7 @@ pub struct Memory {
 
 impl MemoryInput {
     pub fn validate(&self) -> Result<()> {
+        crate::navigation::validate(&self.navigation)?;
         nonempty(&self.content, "记忆内容")?;
         validate_scope(&self.scope)?;
         if !["user", "dream", "import"].contains(&self.authority.as_str()) {

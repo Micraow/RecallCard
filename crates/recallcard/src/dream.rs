@@ -66,6 +66,8 @@ fn suggestion() -> Evidence {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DreamProposal {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub navigation: Option<Vec<crate::navigation::Hint>>,
     pub operation: DreamOperation,
     pub scope: String,
     #[serde(default)]
@@ -460,6 +462,14 @@ impl Vault {
         let mut diagnostics = vec!["结构/来源校验不能证明自然语言结论真实，请人工核对 diff".into()];
         let mut can_apply = true;
         for (index, proposal) in result.proposals.iter().enumerate() {
+            crate::navigation::validate(proposal.navigation.as_deref().unwrap_or_default())?;
+            if matches!(
+                proposal.operation,
+                DreamOperation::Noop | DreamOperation::Conflict
+            ) && proposal.navigation.as_ref().is_some_and(|h| !h.is_empty())
+            {
+                return Err("noop/conflict 不接受导航修改".into());
+            }
             if proposal.scope != job.allowed_scope {
                 return Err("Dream 提议不能扩大或改变授权 scope".into());
             }
@@ -494,6 +504,7 @@ impl Vault {
                 .clone()
                 .ok_or("新增/修改提议必须提供 content")?;
             let mut input = MemoryInput {
+                navigation: proposal.navigation.clone().unwrap_or_default(),
                 content,
                 source_refs: refs,
                 evidence: proposal.evidence.clone(),
@@ -541,6 +552,9 @@ impl Vault {
                         .get(&id)
                         .ok_or("修改目标不在 Job 的 memory_read_set 内")?
                         .clone();
+                    if !before.data.navigation.is_empty() && proposal.navigation.is_none() {
+                        return Err("更新已有导航记忆须明确提供完整 navigation；不会静默丢入口或保留可能过期的简介".into());
+                    }
                     if before.revision != expected {
                         return Err("修改目标版本与任务基线不一致".into());
                     }

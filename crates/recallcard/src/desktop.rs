@@ -277,6 +277,7 @@ impl DesktopSession {
         let context = self.context(session_id, scope)?;
         let response = context
             .search(SearchArgs {
+                include_navigation: false,
                 query: query.into(),
                 target: target.into(),
                 session_ref: None,

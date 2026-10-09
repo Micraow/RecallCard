@@ -233,6 +233,11 @@ enum Command {
     /// 根据 canonical Memory 重新生成人类视图
     #[command(hide = true)]
     Views,
+    /// 为明确指定的范围导出离线 Markdown 层级目录（旧快照不会自动更新）
+    NavigationExport {
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+    },
     /// 检查 schema、摘要与证据完整性
     Doctor,
     /// 为 AI 读取固定范围的启动背景；新信息仍可通过 search 查找
@@ -250,6 +255,9 @@ enum Command {
         scope: Vec<String>,
         #[arg(long, default_value = "all")]
         target: String,
+        /// 显式加入分层目录通道；默认保持原 Memory/Event 检索行为
+        #[arg(long)]
+        include_navigation: bool,
         #[arg(long, default_value_t = 5)]
         limit: usize,
         /// 返回内容的 UTF-8 字节上限；不是模型 token 计数
@@ -707,6 +715,7 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Sync { remote } => vault.sync(&remote),
         Command::Status { .. } => vault.git_status(),
         Command::Views => Ok(json!({"ok":true,"memories":vault.rebuild_views()?})),
+        Command::NavigationExport { scope } => vault.export_navigation(scope),
         Command::Doctor => vault.doctor(),
         Command::Bootstrap {
             scope,
@@ -716,6 +725,7 @@ fn run(cli: Cli) -> Result<Value> {
             query,
             scope,
             target,
+            include_navigation,
             limit,
             budget_tokens,
             session_ref,
@@ -738,6 +748,7 @@ fn run(cli: Cli) -> Result<Value> {
                 None => Context::new(&vault, access),
             };
             context.search(SearchArgs {
+                include_navigation,
                 query,
                 target,
                 session_ref,
