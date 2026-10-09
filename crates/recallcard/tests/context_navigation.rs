@@ -625,3 +625,48 @@ fn tentative_hint_provenance_survives_overview_detail_and_markdown() {
             && text.contains("derived_memory_navigation_hint")
     );
 }
+
+#[test]
+fn default_root_budget_exposes_three_routing_choices_with_provenance() {
+    let d = tempfile::tempdir().unwrap();
+    let v = Vault::init(d.path()).unwrap();
+    let src = source(&v, "personal", "compact-root");
+    publish(
+        &v,
+        "personal",
+        &src,
+        json!([
+            {"path":"topics/papers","title":"论文阅读","description":"合成论文阅读需求：需要翻译、理解和比较论证。"},
+            {"path":"workflows/browser","title":"网页工作流","description":"合成网页工作流：使用浏览器整理资料并核对引用。"},
+            {"path":"constraints/cost","title":"费用限制","description":"合成费用约束：先核对本次预算，再选择运行方式。"}
+        ]),
+    );
+    let page = read(&v, "view:nav/_root", Value::Null, 1500).unwrap();
+    assert!(serde_json::to_vec(&page).unwrap().len() <= 1500);
+    assert_eq!(page["child_count"], 3);
+    assert_eq!(page["children_complete"], true);
+    assert_eq!(page["entries_are_excerpts"], true);
+    assert_eq!(page["hints_are_not_certified_facts"], true);
+    let entries = page["entries"].as_array().unwrap();
+    assert_eq!(
+        entries.iter().filter(|item| item["kind"] == "view").count(),
+        3
+    );
+    for entry in entries.iter().filter(|item| item["kind"] == "view") {
+        assert_eq!(entry["contributors"][0]["evidence"], "UserExplicit");
+        assert_eq!(entry["contributors"][0]["state"], "active");
+        assert_eq!(
+            entry["contributors"][0]["origin"],
+            "derived_memory_navigation_hint"
+        );
+        assert!(entry["contributors"][0]["memory_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("memory:"));
+        assert!(
+            read(&v, entry["ref"].as_str().unwrap(), Value::Null, 8192).unwrap()["results"][0]
+                ["description_provenance"]
+                .is_object()
+        );
+    }
+}

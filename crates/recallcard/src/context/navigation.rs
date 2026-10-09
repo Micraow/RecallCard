@@ -16,6 +16,16 @@ fn overview(node: &Node) -> Value {
         "aliases":node.aliases.iter().take(3).map(|s|short(s,48)).collect::<Vec<_>>(),
         "overview_only":true})
 }
+// 根入口先公开紧凑的路由选择；完整提示和所有贡献者仍在子目录及后续页。
+fn root_child_overview(node: &Node) -> Value {
+    let description = node.descriptions.first();
+    let contributor = description
+        .and_then(|d| node.contributors.get(&d.memory_ref))
+        .or_else(|| node.contributors.values().next());
+    json!({"ref":node.reference,"kind":"view","title":short(&node.title,128),
+        "description_excerpt":description.map(|d|short(&d.text,48)),
+        "contributors":contributor.into_iter().collect::<Vec<_>>(),"contributor_count":node.contributors.len()})
+}
 pub(super) fn index(docs: &[Document], scopes: &[String], now: DateTime<Utc>) -> Result<Index> {
     Index::build(docs, scopes, now)
 }
@@ -54,7 +64,11 @@ impl Context<'_> {
             .collect::<BTreeMap<_, _>>();
         let mut entries = Vec::new();
         for child in &node.children {
-            entries.push(overview(&nav.nodes[child]));
+            entries.push(if reference == ROOT {
+                root_child_overview(&nav.nodes[child])
+            } else {
+                overview(&nav.nodes[child])
+            });
         }
         for reference in &node.memories {
             let doc = by_ref
@@ -94,8 +108,21 @@ impl Context<'_> {
         if start > entries.len() {
             return Err("导航游标偏移超过当前入口范围".into());
         }
-        let metadata = overview(node);
+        let metadata = if reference == ROOT {
+            json!({"ref":ROOT,"kind":"view","title":node.title})
+        } else {
+            overview(node)
+        };
         let mut response = json!({"results":[metadata],"entries":[],"status":"complete","truncated":false,"next_cursor":null,"snapshot":nav.generation,"reference_data":true,"budget_unit":"utf8_bytes","projection":"live_authorized_navigation","entry_count":entries.len(),"orphan_count":nav.orphan_refs.len(),"diagnostic_count":node.diagnostics.len()});
+        if reference == ROOT {
+            if node.diagnostics.is_empty() {
+                response.as_object_mut().unwrap().remove("diagnostic_count");
+            }
+            response["entries_are_excerpts"] = json!(true);
+            response["hints_are_not_certified_facts"] = json!(true);
+            response["child_count"] = json!(node.children.len());
+            response["children_complete"] = json!(false);
+        }
         if !node.diagnostics.is_empty() {
             response["diagnostics"] = json!(node
                 .diagnostics
@@ -110,6 +137,9 @@ impl Context<'_> {
                 .as_array_mut()
                 .unwrap()
                 .push(entries[offset].clone());
+            if reference == ROOT {
+                response["children_complete"] = json!(offset + 1 >= node.children.len());
+            }
             let candidate_pending = offset + 1 < entries.len();
             response["truncated"] = json!(candidate_pending);
             response["status"] = json!(if candidate_pending {
@@ -127,6 +157,9 @@ impl Context<'_> {
                 break;
             }
             offset += 1;
+        }
+        if reference == ROOT {
+            response["children_complete"] = json!(offset >= node.children.len());
         }
         let pending = offset < entries.len();
         response["next_cursor"] = if pending {
