@@ -168,6 +168,11 @@ impl<'a> Context<'a> {
             .iter()
             .map(|e| (e.id.as_str(), e.data.revision_key()))
             .collect();
+        // 当前读锁快照内复用已验证的 Event 范围；不能跨请求缓存权限或来源。
+        let source_scopes: BTreeMap<&str, &str> = events
+            .iter()
+            .map(|event| (event.id.as_str(), event.data.scope.as_str()))
+            .collect();
         // 兼容旧正本：历史上的跨范围/跨来源修订边不允许隐藏另一份资料。
         let revisions: BTreeSet<String> = events
             .iter()
@@ -220,7 +225,12 @@ impl<'a> Context<'a> {
             });
         }
         for memory in self.vault.memories()? {
-            if !self.memory_visible(&memory, &suppressed)? {
+            if !self.memory_visible_with_scope(&memory, &suppressed, |id| {
+                source_scopes
+                    .get(id)
+                    .map(|scope| (*scope).to_owned())
+                    .ok_or_else(|| format!("找不到原始事件 {id}"))
+            })? {
                 continue;
             }
             docs.push(Document::from_memory(&memory)?);
@@ -229,6 +239,16 @@ impl<'a> Context<'a> {
         Ok(docs)
     }
     fn memory_visible(&self, memory: &Memory, suppressed: &BTreeSet<String>) -> Result<bool> {
+        self.memory_visible_with_scope(memory, suppressed, |id| {
+            Ok(self.vault.event(id)?.data.scope)
+        })
+    }
+    fn memory_visible_with_scope(
+        &self,
+        memory: &Memory,
+        suppressed: &BTreeSet<String>,
+        mut source_scope: impl FnMut(&str) -> Result<String>,
+    ) -> Result<bool> {
         if !self.access.permits(&memory.data.scope)
             || suppressed.contains(&memory.id)
             || memory.state == MemoryState::Retracted
@@ -239,7 +259,7 @@ impl<'a> Context<'a> {
             if suppressed.contains(id) {
                 return Ok(false);
             }
-            if !self.access.permits(&self.vault.event(id)?.data.scope) {
+            if !self.access.permits(&source_scope(id)?) {
                 return Ok(false);
             }
         }
