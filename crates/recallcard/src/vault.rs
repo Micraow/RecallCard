@@ -20,6 +20,8 @@ pub(crate) struct EventSnapshot<'a> {
     vault: &'a Vault,
     _guard: &'a WriteGuard,
     events: Option<std::collections::BTreeMap<String, Event>>,
+    #[cfg(unix)]
+    locator: Option<crate::event_locator::Locator>,
 }
 impl<'a> EventSnapshot<'a> {
     pub(crate) fn new(vault: &'a Vault, guard: &'a WriteGuard) -> Self {
@@ -27,6 +29,8 @@ impl<'a> EventSnapshot<'a> {
             vault,
             _guard: guard,
             events: None,
+            #[cfg(unix)]
+            locator: None,
         }
     }
     pub(crate) fn all(&mut self) -> Result<&std::collections::BTreeMap<String, Event>> {
@@ -43,6 +47,13 @@ impl<'a> EventSnapshot<'a> {
     }
     pub(crate) fn event(&mut self, id: &str) -> Result<Event> {
         validate_id(id, "evt_")?;
+        #[cfg(unix)]
+        if self.events.is_none() {
+            if self.locator.is_none() {
+                self.locator = Some(crate::event_locator::Locator::open(self.vault)?);
+            }
+            return self.locator.as_mut().unwrap().event(self.vault, id);
+        }
         self.all()?
             .get(id)
             .cloned()
@@ -526,7 +537,7 @@ impl Vault {
         let access = crate::policy::Access::new(scopes.clone())?;
         let _lock = self.lock()?;
         self.ensure_derived()?;
-        let docs = crate::context::Context::new(self, access).memory_documents_locked()?;
+        let docs = crate::context::Context::new(self, access).memory_documents_locked(&_lock)?;
         let navigation = crate::navigation::Index::build(&docs, &scopes, Utc::now())?;
         let pages = navigation.markdown_pages();
         let parent = self.root.join("generated/views");

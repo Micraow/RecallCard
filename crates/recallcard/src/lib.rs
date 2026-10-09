@@ -34,3 +34,6 @@ pub use vault_stream::{ChunkReceipt, EventStreamWriter};
 
 mod build_info;
 pub use build_info::{build_info, BuildInfo};
+
+#[cfg(unix)]
+mod event_locator;

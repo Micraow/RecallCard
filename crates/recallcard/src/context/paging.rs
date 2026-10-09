@@ -173,7 +173,11 @@ impl Context<'_> {
         }
         let _read_guard = self.vault.read_guard()?;
         let mut events = crate::vault::EventSnapshot::new(self.vault, &_read_guard);
-        let suppressed = self.vault.suppressed_ids()?;
+        let suppressed = if args.include_adjacent {
+            self.vault.suppressed_ids()?
+        } else {
+            self.targeted_suppression(&args.refs, &mut events)?
+        };
         let mut adjacency = None;
         let mut source_generation = None;
         // 每一页重新检查授权和抑制；不得凭游标绕过。

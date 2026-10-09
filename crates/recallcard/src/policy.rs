@@ -113,9 +113,8 @@ impl Vault {
         }
         self.suppressed_ids_impl(true)
     }
-    fn suppressed_ids_impl(&self, dream_recovery: bool) -> Result<BTreeSet<String>> {
-        let mut ids = BTreeSet::new();
-        let mut source_hashes = BTreeSet::new();
+    fn suppression_rules(&self) -> Result<Vec<Suppression>> {
+        let mut rules = Vec::new();
         for path in files_recursive(&self.root().join("control/suppressions"), "json")? {
             let s: Suppression = read_json(&path)?;
             validate_record_id(&s.id)?;
@@ -133,6 +132,66 @@ impl Vault {
                     return Err("抑制规则来源摘要无效".into());
                 }
             }
+            rules.push(s);
+        }
+        Ok(rules)
+    }
+    pub(crate) fn directly_suppressed_ids(&self) -> Result<BTreeSet<String>> {
+        let mut ids = BTreeSet::new();
+        for rule in self
+            .suppression_rules()?
+            .into_iter()
+            .filter(|rule| rule.active)
+        {
+            ids.insert(rule.id);
+            ids.extend(rule.source_refs);
+        }
+        Ok(ids)
+    }
+    /// 只扩展本次确实要读的来源；规则每次重读，身份来自已验证的当前 Event，非缓存字段。
+    pub(crate) fn suppressed_ids_for_sources(
+        &self,
+        sources: &BTreeSet<String>,
+        events: &mut crate::vault::EventSnapshot<'_>,
+    ) -> Result<BTreeSet<String>> {
+        self.ensure_no_pending_dream()?;
+        let mut ids = BTreeSet::new();
+        let mut hashes = BTreeSet::new();
+        for rule in self
+            .suppression_rules()?
+            .into_iter()
+            .filter(|rule| rule.active)
+        {
+            ids.insert(rule.id);
+            ids.extend(rule.source_refs);
+            hashes.extend(rule.source_hashes);
+        }
+        for id in ids.iter().filter(|id| id.starts_with("evt_")) {
+            match events.event(id) {
+                Ok(event) => {
+                    hashes.insert(suppression_source_hash(&event));
+                }
+                Err(error) if error == format!("找不到原始事件 {id}") => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if !hashes.is_empty() {
+            for id in sources {
+                if ids.contains(id) {
+                    continue;
+                }
+                let event = events.event(id)?;
+                if hashes.contains(&suppression_source_hash(&event)) {
+                    ids.insert(id.clone());
+                }
+            }
+        }
+        Ok(ids)
+    }
+    fn suppressed_ids_impl(&self, dream_recovery: bool) -> Result<BTreeSet<String>> {
+        let mut ids = BTreeSet::new();
+        let mut source_hashes = BTreeSet::new();
+        for s in self.suppression_rules()? {
             if s.active {
                 ids.insert(s.id);
                 source_hashes.extend(s.source_hashes);

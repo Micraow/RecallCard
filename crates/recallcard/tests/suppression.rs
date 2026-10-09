@@ -108,6 +108,12 @@ fn old_rules_without_source_hashes_still_cover_new_revisions() {
     std::fs::write(path, serde_json::to_vec(&rule).unwrap()).unwrap();
     let future = capture(&v, "personal", "one", "合成新修订");
     assert!(v.is_suppressed(&future.id).unwrap());
+    assert!(context(&v)
+        .read(ReadArgs {
+            refs: vec![format!("event:{}", future.id)],
+            budget_tokens: 12000
+        })
+        .is_err());
 }
 #[test]
 fn persisted_source_hash_survives_missing_original_without_leaking_identity_text() {
@@ -129,6 +135,12 @@ fn persisted_source_hash_survives_missing_original_without_leaking_identity_text
     remove_event(&v.root().join("events"), &old.id);
     let future = capture(&v, "personal", "one", "合成重新捕获");
     assert!(v.is_suppressed(&future.id).unwrap());
+    assert!(context(&v)
+        .read(ReadArgs {
+            refs: vec![format!("event:{}", future.id)],
+            budget_tokens: 12000
+        })
+        .is_err());
 }
 #[test]
 fn corrupt_suppression_hash_or_filename_fails_closed() {
@@ -144,8 +156,20 @@ fn corrupt_suppression_hash_or_filename_fails_closed() {
     rule["source_hashes"] = json!(["not-a-digest"]);
     std::fs::write(&path, serde_json::to_vec(&rule).unwrap()).unwrap();
     assert!(v.suppressed_ids().is_err());
+    assert!(context(&v)
+        .read(ReadArgs {
+            refs: vec![format!("event:{}", old.id)],
+            budget_tokens: 12000
+        })
+        .is_err());
     rule["source_hashes"] = json!([]);
     std::fs::write(&path, serde_json::to_vec(&rule).unwrap()).unwrap();
     std::fs::rename(&path, path.with_file_name("wrong.json")).unwrap();
     assert!(v.suppressed_ids().is_err());
+    assert!(context(&v)
+        .read(ReadArgs {
+            refs: vec![format!("event:{}", old.id)],
+            budget_tokens: 12000
+        })
+        .is_err());
 }

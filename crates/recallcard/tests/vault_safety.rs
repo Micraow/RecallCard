@@ -917,3 +917,101 @@ fn untrusted_redaction_counter_cannot_overflow_and_panic() {
         assert!(event.data.capture.redacted);
     }
 }
+
+#[cfg(unix)]
+fn context_event(vault: &Vault, id: &str) -> Result<Value, String> {
+    recallcard::context::Context::new(
+        vault,
+        recallcard::policy::Access::new(vec!["personal".into()]).unwrap(),
+    )
+    .read(recallcard::context::ReadArgs {
+        refs: vec![format!("event:{id}")],
+        budget_tokens: 12000,
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn warm_locator_detects_duplicate_in_changed_other_segment() {
+    let (_dir, v) = vault();
+    let first = v
+        .capture(event_input(Role::User, Origin::Native, "定位甲"))
+        .unwrap();
+    let second = v
+        .capture(event_input(Role::User, Origin::Native, "定位乙"))
+        .unwrap();
+    context_event(&v, &first.id).unwrap();
+    assert!(v
+        .state_dir()
+        .unwrap()
+        .join("event-locator-v1.json")
+        .is_file());
+    fs::copy(
+        record_path(&v, "events", &first.id),
+        record_path(&v, "events", &second.id),
+    )
+    .unwrap();
+    assert!(context_event(&v, &first.id).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn warm_locator_detects_same_size_corruption_even_with_restored_mtime() {
+    let (_dir, v) = vault();
+    let first = v
+        .capture(event_input(Role::User, Origin::Native, "完整甲"))
+        .unwrap();
+    let second = v
+        .capture(event_input(Role::User, Origin::Native, "完整乙"))
+        .unwrap();
+    context_event(&v, &first.id).unwrap();
+    let path = record_path(&v, "events", &second.id);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, text.replace("完整乙", "完整丙")).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert!(context_event(&v, &first.id).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn locator_wrong_path_is_only_a_hint_and_suppression_stays_live() {
+    let (_dir, v) = vault();
+    let first = v
+        .capture(event_input(Role::User, Origin::Native, "提示甲"))
+        .unwrap();
+    let second = v
+        .capture(event_input(Role::User, Origin::Native, "提示乙"))
+        .unwrap();
+    context_event(&v, &first.id).unwrap();
+    let path = v.state_dir().unwrap().join("event-locator-v1.json");
+    let mut cache: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    cache["paths"][&first.id] = serde_json::json!(record_path(&v, "events", &second.id));
+    fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+    let result = context_event(&v, &first.id).unwrap();
+    assert_eq!(result["results"][0]["record"]["id"], first.id);
+    v.suppress(&first.id, "合成撤回".into()).unwrap();
+    assert!(context_event(&v, &first.id).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn locator_rebuilds_after_segment_move_and_never_grants_scope() {
+    let (_dir, v) = vault();
+    let first = v
+        .capture(event_input(Role::User, Origin::Native, "移动甲"))
+        .unwrap();
+    let mut private = event_input(Role::User, Origin::Native, "隐藏乙");
+    private.scope = "project:hidden".into();
+    let hidden = v.capture(private).unwrap();
+    context_event(&v, &first.id).unwrap();
+    let original = record_path(&v, "events", &first.id);
+    fs::rename(&original, original.with_file_name("moved-segment.jsonl")).unwrap();
+    assert!(context_event(&v, &first.id).is_ok());
+    assert!(context_event(&v, &hidden.id).is_err());
+}

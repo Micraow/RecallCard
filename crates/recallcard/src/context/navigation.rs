@@ -27,7 +27,7 @@ impl Context<'_> {
             );
         }
         let _guard = self.vault.read_guard()?;
-        let docs = self.memory_documents_locked()?;
+        let docs = self.memory_documents_locked(&_guard)?;
         let scopes = self.access.scopes();
         let nav = index(&docs, &scopes, Utc::now())?;
         let reference = &args.refs[0];

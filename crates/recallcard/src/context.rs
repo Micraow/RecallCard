@@ -308,25 +308,34 @@ impl<'a> Context<'a> {
     }
     /// 导航只需要 Memory。逐条验证 Event 来源权限，但不构造或保留无关正文。
     /// 必须持有当前请求的 Vault 锁；不缓存来源权限或隐藏状态。
-    pub(crate) fn memory_documents_locked(&self) -> Result<Vec<Document>> {
-        let suppressed = self.vault.suppressed_ids()?;
+    pub(crate) fn memory_documents_locked(
+        &self,
+        guard: &crate::vault::WriteGuard,
+    ) -> Result<Vec<Document>> {
         let memories = self.vault.memories()?;
+        let directly_suppressed = self.vault.directly_suppressed_ids()?;
         let needed: BTreeSet<_> = memories
             .iter()
             .filter(|m| {
                 self.access.permits(&m.data.scope)
-                    && !suppressed.contains(&m.id)
                     && m.state != MemoryState::Retracted
+                    && !directly_suppressed.contains(&m.id)
+                    && !m
+                        .data
+                        .source_refs
+                        .iter()
+                        .any(|id| directly_suppressed.contains(id))
             })
             .flat_map(|m| m.data.source_refs.iter().cloned())
             .collect();
+        let mut events = crate::vault::EventSnapshot::new(self.vault, guard);
+        let suppressed = self
+            .vault
+            .suppressed_ids_for_sources(&needed, &mut events)?;
         let mut source_scopes = BTreeMap::new();
-        self.vault.visit_events(|event| {
-            if needed.contains(&event.id) {
-                source_scopes.insert(event.id, event.data.scope);
-            }
-            Ok(())
-        })?;
+        for id in needed {
+            source_scopes.insert(id.clone(), events.event(&id)?.data.scope);
+        }
         let mut docs = Vec::new();
         for memory in memories {
             if self.memory_visible_with_scope(&memory, &suppressed, |id| {
@@ -582,6 +591,29 @@ impl<'a> Context<'a> {
         }
         Ok(response)
     }
+    fn targeted_suppression(
+        &self,
+        refs: &[String],
+        events: &mut crate::vault::EventSnapshot<'_>,
+    ) -> Result<BTreeSet<String>> {
+        let mut sources = BTreeSet::new();
+        let direct = self.vault.directly_suppressed_ids()?;
+        for reference in refs {
+            let (kind, id, _) = parse_ref(reference)?;
+            match kind {
+                "event" => {
+                    sources.insert(id.to_owned());
+                }
+                "memory" => {
+                    if !direct.contains(id) {
+                        sources.extend(self.vault.memory(id)?.data.source_refs);
+                    }
+                }
+                _ => return self.vault.suppressed_ids(),
+            }
+        }
+        self.vault.suppressed_ids_for_sources(&sources, events)
+    }
     fn read_internal(&self, args: ReadArgs, sources: bool) -> Result<Value> {
         if args
             .refs
@@ -614,7 +646,7 @@ impl<'a> Context<'a> {
         let mut results = Vec::new();
         let mut used = 180usize;
         let mut pending = Vec::new();
-        let suppressed = self.vault.suppressed_ids()?;
+        let suppressed = self.targeted_suppression(&args.refs, &mut events)?;
         let now = Utc::now();
         for reference in &args.refs {
             let (kind, id, revision) = parse_ref(reference)?;
