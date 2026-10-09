@@ -754,3 +754,34 @@ fn cli_mcp_reuses_real_worker_query_cache_and_budget_with_fake_provider() {
         vec!["call"]
     );
 }
+
+#[test]
+fn memory_semantics_routes_only_current_authorized_navigation() {
+    let _fixture_guard = fixture_process_guard();
+    let fixture = Fixture::new();
+    let query = "synthetic_nonlexical_route";
+    let semantic = SemanticSearch::new(fixture.config(query)).unwrap();
+    let context = Context::with_semantic(&fixture.vault, access(), &semantic);
+    let mut request = args(query);
+    request.target = "views".into();
+    let response = context.search(request.clone()).unwrap();
+    assert!(contains(&response, "view:nav/_unfiled"));
+    assert_eq!(response["coverage"]["navigation"]["semantic_views"], false);
+    assert_eq!(
+        response["coverage"]["navigation"]["semantic_routing"],
+        "via_current_memory_embeddings"
+    );
+    assert_eq!(response["coverage"]["semantic_search"], "available");
+    assert!(response["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["kind"] == "view"));
+    fixture
+        .vault
+        .suppress(&fixture.source_id, "合成来源撤回".into())
+        .unwrap();
+    let hidden = context.search(request).unwrap();
+    assert!(!contains(&hidden, "view:nav/_unfiled"));
+    assert_eq!(hidden["coverage"]["semantic_search"], "unavailable");
+}

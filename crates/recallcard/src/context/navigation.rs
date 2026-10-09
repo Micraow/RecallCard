@@ -266,3 +266,26 @@ pub(super) fn preserve_channels(ranked: Vec<search::Match<'_>>) -> Vec<search::M
     }
     out
 }
+
+/// 仅在正本二次校验之后，将 Memory 向量候选映射到当前授权目录。
+/// 不信任缓存中的路径/标题，不扩展权限，也不把目录提示当作事实。
+pub(super) fn semantic_routes(docs: &[Document], memories: &[String]) -> Vec<String> {
+    let ranks = memories
+        .iter()
+        .enumerate()
+        .map(|(rank, reference)| (reference.as_str(), rank))
+        .collect::<BTreeMap<_, _>>();
+    let mut routes = docs
+        .iter()
+        .filter(|doc| doc.kind == "view")
+        .filter_map(|doc| {
+            doc.evidence_refs
+                .iter()
+                .filter_map(|reference| ranks.get(reference.as_str()))
+                .min()
+                .map(|rank| (*rank, doc.reference.clone()))
+        })
+        .collect::<Vec<_>>();
+    routes.sort();
+    routes.into_iter().map(|(_, reference)| reference).collect()
+}

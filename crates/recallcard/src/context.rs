@@ -405,21 +405,24 @@ impl<'a> Context<'a> {
             return Err("未知 target/detail".into());
         }
         // worker 等待期间不持有 Vault 锁，遗忘/撤权写入可立即生效。
-        let candidate_result =
-            if let Some(semantic) = self.semantic.filter(|_| args.target != "views") {
-                let snapshot = self.documents()?;
-                let now = Utc::now();
-                let selected = search_documents(&snapshot, &args, now);
-                Some(semantic.candidates(
-                    &args.query,
-                    &snapshot,
-                    &selected,
-                    &self.access.scopes(),
-                    now,
-                ))
-            } else {
-                None
-            };
+        let candidate_result = if let Some(semantic) = self.semantic {
+            let snapshot = self.documents()?;
+            let now = Utc::now();
+            let mut semantic_args = args.clone();
+            if semantic_args.target == "views" {
+                semantic_args.target = "memories".into();
+            }
+            let selected = search_documents(&snapshot, &semantic_args, now);
+            Some(semantic.candidates(
+                &args.query,
+                &snapshot,
+                &selected,
+                &self.access.scopes(),
+                now,
+            ))
+        } else {
+            None
+        };
         // worker 返回后重读正本并重新计算有效时间；保持最终读取锁到响应构造结束。
         let _final_read_guard = self.vault.read_guard()?;
         let current = self.documents()?;
@@ -457,8 +460,15 @@ impl<'a> Context<'a> {
         }
         let mut ranked = rank(&docs, &tokens, &args.query);
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.reference.cmp(&b.1.reference)));
+        let mut semantic_navigation_count = 0;
         if let Some(references) = &semantic_refs {
-            ranked = fuse(&docs, &ranked, references);
+            let mut routes = references.clone();
+            if args.include_navigation || args.target == "views" {
+                let navigation_refs = navigation::semantic_routes(&docs, references);
+                semantic_navigation_count = navigation_refs.len();
+                routes.extend(navigation_refs);
+            }
+            ranked = fuse(&docs, &ranked, &routes);
         }
         let ranked = search::group_sources(ranked, &args.query);
         let navigation_count = ranked.iter().filter(|m| m.document.kind == "view").count();
@@ -515,7 +525,7 @@ impl<'a> Context<'a> {
             coverage["lexical_note"] = json!("词法候选不等于答案，请用 read/sources 核对。");
         }
         if args.include_navigation || args.target == "views" {
-            coverage["navigation"] = json!({"available":true,"view_candidates":navigation_count,"fact_candidates":fact_count,"ranking":"two_fact_then_one_view_when_mixed","projection":"current_authorized_memories","semantic_views":false});
+            coverage["navigation"] = json!({"available":true,"view_candidates":navigation_count,"fact_candidates":fact_count,"ranking":"two_fact_then_one_view_when_mixed","projection":"current_authorized_memories","semantic_views":false,"semantic_routing":"via_current_memory_embeddings","semantic_view_candidates":semantic_navigation_count,"unorganized_events":"not_covered_by_memory_embeddings"});
         }
         if args.event_filter.as_ref().is_some_and(EventFilter::active) {
             coverage["event_filter"] = json!(args.event_filter);
