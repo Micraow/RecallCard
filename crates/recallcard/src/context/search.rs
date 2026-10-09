@@ -33,6 +33,47 @@ pub(super) fn query_terms(text: &str) -> Vec<String> {
         .into_iter()
         .collect()
 }
+/// 长中文问句采用字符双字组候选召回；短词组/空格关键词仍为严格 AND。
+/// 不使用项目名、问题模板、领域词典或验收问题特判；带引号的查询保持精确模式。
+pub(super) fn natural_han_query(text: &str) -> bool {
+    if text.contains(['"', '“', '”']) {
+        return false;
+    }
+    let terms = query_terms(text);
+    let longest = terms
+        .iter()
+        .filter(|s| s.chars().all(han))
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0);
+    let count = text.chars().filter(|c| han(*c)).count();
+    longest >= 6 && (count >= 12 || text.contains(['，', '。', '？', '?', '；', '：', ',', ';']))
+}
+pub(super) fn ranking_terms(text: &str) -> Vec<String> {
+    if !natural_han_query(text) {
+        return query_terms(text);
+    }
+    super::tokenize(text)
+        .into_iter()
+        .filter(|s| !s.chars().all(han) || s.chars().count() == 2)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+pub(super) fn han_term(term: &str) -> bool {
+    term.chars().all(han)
+}
+pub(super) fn coherent_han_overlap(query: &str, fields: &[String]) -> bool {
+    let chars = query.chars().collect::<Vec<_>>();
+    chars
+        .windows(3)
+        .filter(|part| part.iter().all(|c| han(*c)))
+        .any(|part| {
+            fields
+                .iter()
+                .any(|field| field.contains(&part.iter().collect::<String>()))
+        })
+}
 pub(super) fn term_matches(field: &str, term: &str) -> bool {
     if term.chars().all(han) {
         return field.contains(term);

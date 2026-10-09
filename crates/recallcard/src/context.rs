@@ -451,7 +451,7 @@ impl<'a> Context<'a> {
             None => None,
         };
         let generation = hash(&serde_json::to_vec(&docs).map_err(|e| e.to_string())?);
-        let tokens = search::query_terms(&args.query);
+        let tokens = search::ranking_terms(&args.query);
         if tokens.is_empty() {
             return Err("查询必须包含中文词组、文字或数字".into());
         }
@@ -510,6 +510,10 @@ impl<'a> Context<'a> {
             0
         };
         let mut coverage = json!({"event_search":"available","semantic_search":"unavailable","undreamed_events_included":true,"scope_filtered":true,"indexed_generation":generation,"lexical_matching":"all_terms","source_grouping":"memory_with_matching_source_events"});
+        if search::natural_han_query(&args.query) {
+            coverage["lexical_matching"] = json!("natural_han_bigrams_exact_identifiers");
+            coverage["lexical_note"] = json!("词法候选不等于答案，请用 read/sources 核对。");
+        }
         if args.include_navigation || args.target == "views" {
             coverage["navigation"] = json!({"available":true,"view_candidates":navigation_count,"fact_candidates":fact_count,"ranking":"two_fact_then_one_view_when_mixed","projection":"current_authorized_memories","semantic_views":false});
         }
@@ -857,7 +861,7 @@ fn matching_window(text: &str, query: &str, limit: usize) -> (usize, usize) {
     }
     let query = query.to_lowercase();
     let found = lowered.find(&query).or_else(|| {
-        let mut candidates = search::query_terms(&query)
+        let mut candidates = search::ranking_terms(&query)
             .into_iter()
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -963,25 +967,34 @@ fn fuse<'a>(
 }
 
 fn rank<'a>(docs: &'a [Document], query: &[String], raw: &str) -> Vec<(f64, &'a Document)> {
-    let corpus: Vec<Vec<String>> = docs
+    let natural = search::natural_han_query(raw);
+    let wanted: std::collections::HashSet<&str> = query.iter().map(String::as_str).collect();
+    let corpus: Vec<(BTreeMap<String, usize>, usize)> = docs
         .iter()
         .map(|doc| {
             let mut tokens = tokenize(&doc.text);
             for field in doc.entities.iter().chain(&doc.labels) {
                 tokens.extend(tokenize(field));
             }
-            tokens
+            let length = tokens.len();
+            let mut frequencies = BTreeMap::new();
+            for token in tokens {
+                if wanted.contains(token.as_str()) {
+                    *frequencies.entry(token).or_insert(0) += 1;
+                }
+            }
+            (frequencies, length)
         })
         .collect();
-    let avg = corpus.iter().map(|d| d.len()).sum::<usize>() as f64 / (docs.len().max(1) as f64);
+    let avg = corpus.iter().map(|d| d.1).sum::<usize>() as f64 / (docs.len().max(1) as f64);
     let mut output = Vec::new();
     let terms: BTreeSet<&String> = query.iter().collect();
     let raw = raw.to_lowercase();
     let df: BTreeMap<&String, usize> = terms
         .iter()
-        .map(|t| (*t, corpus.iter().filter(|d| d.contains(t)).count()))
+        .map(|t| (*t, corpus.iter().filter(|d| d.0.contains_key(*t)).count()))
         .collect();
-    for (doc, tokens) in docs.iter().zip(&corpus) {
+    for (doc, (tokens, token_count)) in docs.iter().zip(&corpus) {
         let fields = std::iter::once(doc.text.to_lowercase())
             .chain(
                 doc.entities
@@ -990,20 +1003,47 @@ fn rank<'a>(docs: &'a [Document], query: &[String], raw: &str) -> Vec<(f64, &'a 
                     .map(|s| s.to_lowercase()),
             )
             .collect::<Vec<_>>();
-        if !terms
+        let matched = terms
             .iter()
-            .all(|term| fields.iter().any(|field| search::term_matches(field, term)))
-        {
-            continue;
+            .copied()
+            .filter(|term| fields.iter().any(|field| search::term_matches(field, term)))
+            .collect::<BTreeSet<_>>();
+        if !natural {
+            if matched.len() != terms.len() {
+                continue;
+            }
+        } else {
+            // Latin/code/numeric identifiers remain exact required anchors (Cache != Cached).
+            let identifiers = terms.iter().filter(|term| !search::han_term(term)).count();
+            if terms
+                .iter()
+                .any(|term| !search::han_term(term) && !matched.contains(*term))
+            {
+                continue;
+            }
+            let han_matches = matched.iter().filter(|term| search::han_term(term)).count();
+            let weight = |term: &&String| {
+                let n = df[*term] as f64;
+                1.0 + (1.0 + (docs.len() as f64 - n + 0.5) / (n + 0.5)).ln()
+            };
+            let covered = matched.iter().map(weight).sum::<f64>()
+                / terms.iter().map(weight).sum::<f64>().max(f64::EPSILON);
+            if identifiers == 0 {
+                if han_matches < 3 || covered < 0.15 || !search::coherent_han_overlap(&raw, &fields)
+                {
+                    continue;
+                }
+            } else if han_matches == 0 {
+                continue;
+            }
         }
         let mut score = 0.0;
-        for term in &terms {
-            let tf = tokens.iter().filter(|t| *t == *term).count() as f64;
-            let tf = tf.max(1.0);
+        for term in &matched {
+            let tf = (*tokens.get(*term).unwrap_or(&0) as f64).max(1.0);
             let n = df[*term] as f64;
             let idf = (1.0 + (docs.len() as f64 - n + 0.5) / (n + 0.5)).ln();
             score +=
-                idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * tokens.len() as f64 / avg.max(1.0)));
+                idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * *token_count as f64 / avg.max(1.0)));
         }
         if doc.text.to_lowercase().contains(&raw) {
             score += 5.0;

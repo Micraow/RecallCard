@@ -254,3 +254,94 @@ fn exhausted_budget_supplies_a_working_retry_size_and_no_matches_stays_distinct(
         .unwrap();
     assert!(!good["results"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn natural_han_question_uses_generic_ngrams_but_retains_exact_identifiers_and_negatives() {
+    let (_d, v) = setup();
+    let wanted = event(
+        &v,
+        "wanted",
+        "user",
+        "青松资料导出采用离线流程，保留全部原始注释，格式使用 Cache storage。",
+    );
+    event(
+        &v,
+        "wrong",
+        "user",
+        "Cached storage 用于图片预览，其他要求尚未确定。",
+    );
+    let result = query(&v, "之前青松资料导出采用什么流程，原始注释有哪些保留要求？");
+    assert_eq!(result["results"][0]["ref"], format!("event:{wanted}"));
+    assert_eq!(
+        result["coverage"]["lexical_matching"],
+        "natural_han_bigrams_exact_identifiers"
+    );
+    let result = query(
+        &v,
+        "之前青松资料导出采用 Cache storage 时，有哪些原始注释的要求？",
+    );
+    assert_eq!(result["match_count"], 1);
+    assert_eq!(result["results"][0]["ref"], format!("event:{wanted}"));
+    assert_eq!(
+        query(
+            &v,
+            "之前青松资料导出采用 MissingIdentifier 时，有哪些原始注释的要求？"
+        )["status"],
+        "no_matches"
+    );
+    assert_eq!(
+        query(&v, "银河蝴蝶迁徙轨道的规律究竟是什么？")["status"],
+        "no_matches"
+    );
+    assert_eq!(
+        query(&v, "\"之前青松资料导出采用什么流程\"")["status"],
+        "no_matches"
+    );
+}
+
+#[test]
+fn natural_han_search_preserves_scope_suppression_and_budget_boundaries() {
+    let (_d, v) = setup();
+    let id = event(
+        &v,
+        "visible",
+        "user",
+        "蓝溪资料备份采用离线磁盘，所有原始标记保留。",
+    );
+    v.capture(serde_json::from_value(json!({"scope":"work","role":"user","origin":"native","content":"蓝溪资料备份含有跨范围隐藏线索。","source":{"platform":"synthetic","conversation_id":"hidden","message_id":"one"}})).unwrap()).unwrap();
+    let q = "之前蓝溪资料备份采取什么方式，原始标记应该怎样处理？";
+    let result = c(&v).search(args(q, 1500)).unwrap();
+    assert!(serde_json::to_vec(&result).unwrap().len() <= 1500);
+    assert!(!result.to_string().contains("跨范围隐藏线索"));
+    v.suppress(&id, "撤回".into()).unwrap();
+    assert_eq!(query(&v, q)["status"], "no_matches");
+}
+
+#[test]
+fn natural_query_does_not_fold_partial_sources_into_a_weak_memory() {
+    let (_d, v) = setup();
+    let source = event(
+        &v,
+        "original",
+        "user",
+        "石桥资料同步必须离线，旧版本保留历史标记；完整来源不可上传。",
+    );
+    let memory=v.add_memory(serde_json::from_value(json!({"content":"石桥资料同步曾讨论离线方案。","source_refs":[source],"evidence":"user_explicit"})).unwrap()).unwrap();
+    let result = query(&v, "之前石桥资料同步对离线方式和历史标记有哪些要求？");
+    let refs = result["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["ref"].as_str())
+        .collect::<Vec<_>>();
+    assert!(refs.contains(&format!("event:{source}").as_str()));
+    assert!(refs.contains(&format!("memory:{}@1", memory.id).as_str()));
+    assert!(result["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "event")
+        .all(|r| r["evidence"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("User/"))));
+}
