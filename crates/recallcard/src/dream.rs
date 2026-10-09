@@ -731,19 +731,14 @@ impl Vault {
         if coverage != tx.receipt.source_coverage {
             return Err("事务来源覆盖收据不一致".into());
         }
-        // 恢复时不经过公共读取屏障，但仍逐条确认来源及 suppression 没有被外部替换。
-        let suppressed = self.suppressed_ids_for_dream_recovery()?;
+        // 恢复时不经过 Dream 自身的公共读取屏障，Event 事务仍须在读取前阻断。
+        self.check_dream_recovery_barrier()?;
         let allowed: BTreeSet<_> = tx
             .job
             .source_refs
             .iter()
             .map(|s| s.event.id.as_str())
             .collect();
-        let mut recovery_sources: BTreeSet<String> =
-            allowed.iter().map(|id| (*id).to_string()).collect();
-        for after in tx.writes.iter().filter_map(|change| change.after.as_ref()) {
-            recovery_sources.extend(after.data.source_refs.iter().cloned());
-        }
         let source_keys: BTreeMap<_, _> = tx
             .job
             .source_refs
@@ -759,11 +754,10 @@ impl Vault {
             }) {
                 return Err("恢复时整理来源已有新修订，停止发布旧事实".into());
             }
-            if recovery_sources.contains(&event.id) {
-                current_events.insert(event.id.clone(), event);
-            }
+            current_events.insert(event.id.clone(), event);
             Ok(())
         })?;
+        let suppressed = self.suppressed_ids_for_dream_recovery(current_events.values())?;
         for source in &tx.job.source_refs {
             let current = current_events
                 .get(&source.event.id)

@@ -95,3 +95,5 @@ Dream export 在同一锁内一次解析所选 Memory，联合新来源与旧 Me
 ### 本机 IPC 验证边界
 
 IPC 默认端点不会直接拼接 Vault 路径；文件名由 Vault 规范路径和 scope 集合的摘要生成，长度固定。它的父目录来自 `RECALLCARD_STATE_DIR` 或系统 runtime/state/data 目录，因此自定义状态目录过长仍可能超过 Unix 的保守 100 字节上限，这是独立的可用性限制。当前需要为 daemon 与客户端显式配置相同的短 `--endpoint` / `--ipc-endpoint`，不会自动回退到权限未知的共享目录。实际 socket bind 被系统拒绝与“端点路径过长”必须分别记录；无 socket 的路径测试不能冒充守护进程、权限或 IPC 端到端验收。
+
+Dream 已批准事务的发布/恢复也复用一次经过校验的完整 Event 快照：同一快照用于旧规则来源身份扩展、新修订检测与来源摘要核对。读取前、计算抑制时仍检查未完成 Event 事务；普通读取不能借此绕过 Dream 屏障。恢复阶段因此会持有完整 Event 正文，内存规模与 review 的快照相同，不能宣称流式恒定内存。生成导航缓存仍完整收集 Event 中的 scope，再只构造 Memory 投影；只有原文的 scope 不会丢失，生成结果须与原完整投影相同。

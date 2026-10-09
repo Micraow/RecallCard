@@ -104,14 +104,21 @@ impl Vault {
     }
     pub fn suppressed_ids(&self) -> Result<BTreeSet<String>> {
         self.ensure_no_pending_dream()?;
-        self.suppressed_ids_impl(false)
+        self.suppressed_ids_impl()
     }
     /// 仅限持有 Vault 写锁的 Dream 事务验证；绝不用于普通检索或模型读取。
-    pub(crate) fn suppressed_ids_for_dream_recovery(&self) -> Result<BTreeSet<String>> {
+    pub(crate) fn suppressed_ids_for_dream_recovery<'a>(
+        &self,
+        events: impl Iterator<Item = &'a Event> + Clone,
+    ) -> Result<BTreeSet<String>> {
+        self.check_dream_recovery_barrier()?;
+        self.suppressed_ids_from_event_iter_unchecked(events)
+    }
+    pub(crate) fn check_dream_recovery_barrier(&self) -> Result<()> {
         if self.state_dir()?.join("event-transaction.json").exists() {
             return Err("存在未恢复的事件事务，不能恢复 Dream".into());
         }
-        self.suppressed_ids_impl(true)
+        Ok(())
     }
     fn suppression_rules(&self) -> Result<Vec<Suppression>> {
         let mut rules = Vec::new();
@@ -197,6 +204,13 @@ impl Vault {
         events: impl Iterator<Item = &'a Event> + Clone,
     ) -> Result<BTreeSet<String>> {
         self.ensure_no_pending_dream()?;
+        self.suppressed_ids_from_event_iter_unchecked(events)
+    }
+    // 仅供已检查相应事务屏障的同锁快照调用，不用于绕过公共读取屏障。
+    fn suppressed_ids_from_event_iter_unchecked<'a>(
+        &self,
+        events: impl Iterator<Item = &'a Event> + Clone,
+    ) -> Result<BTreeSet<String>> {
         let mut ids = BTreeSet::new();
         let mut source_hashes = BTreeSet::new();
         for rule in self
@@ -222,7 +236,7 @@ impl Vault {
         }
         Ok(ids)
     }
-    fn suppressed_ids_impl(&self, dream_recovery: bool) -> Result<BTreeSet<String>> {
+    fn suppressed_ids_impl(&self) -> Result<BTreeSet<String>> {
         let mut ids = BTreeSet::new();
         let mut source_hashes = BTreeSet::new();
         for s in self.suppression_rules()? {
@@ -243,22 +257,14 @@ impl Vault {
                 }
                 Ok(())
             };
-            if dream_recovery {
-                self.visit_events_unchecked(collect_hashes)?;
-            } else {
-                self.visit_events(collect_hashes)?;
-            }
+            self.visit_events(collect_hashes)?;
             let expand_revisions = |event: Event| {
                 if source_hashes.contains(&suppression_source_hash(&event)) {
                     ids.insert(event.id);
                 }
                 Ok(())
             };
-            if dream_recovery {
-                self.visit_events_unchecked(expand_revisions)?;
-            } else {
-                self.visit_events(expand_revisions)?;
-            }
+            self.visit_events(expand_revisions)?;
         }
         Ok(ids)
     }

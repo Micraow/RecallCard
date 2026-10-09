@@ -779,3 +779,75 @@ fn review_snapshot_is_not_reused_after_external_source_revision() {
         .contains("新修订"));
     assert!(vault.memories().unwrap().is_empty());
 }
+
+#[test]
+fn recovery_checks_event_transaction_barrier_before_reading_events() {
+    let (_dir, vault) = vault();
+    let source = event(&vault, "事件事务屏障", "user", "personal");
+    let job = vault.dream_export(&[source.id], &[], "personal").unwrap();
+    let result = result(&job, vec![add(&job.source_refs[0].event)]);
+    stage_interrupted(&vault, &job, &result);
+    let pending = vault.state_dir().unwrap().join("event-transaction.json");
+    fs::write(&pending, b"{}").unwrap();
+    let corrupt = vault.root().join("events/corrupt.jsonl");
+    fs::write(&corrupt, b"not-json").unwrap();
+    assert!(vault
+        .dream_recover()
+        .unwrap_err()
+        .contains("未恢复的事件事务"));
+    assert!(fs::read_dir(vault.root().join("memories"))
+        .unwrap()
+        .next()
+        .is_none());
+    fs::remove_file(pending).unwrap();
+    fs::remove_file(corrupt).unwrap();
+    assert_eq!(vault.dream_recover().unwrap()["recovered"], true);
+}
+
+#[test]
+fn recovery_snapshot_respects_legacy_and_persisted_suppression_identity() {
+    for missing_original in [false, true] {
+        let (_dir, vault) = vault();
+        let old = event(&vault, "恢复抑制身份", "user", "personal");
+        let mut changed = old.data.clone();
+        changed.content = "合成同来源新修订".into();
+        let current = vault.capture(changed).unwrap();
+        vault.suppress(&old.id, "合成临时规则".into()).unwrap();
+        vault.restore(&old.id).unwrap();
+        let job = vault.dream_export(&[current.id], &[], "personal").unwrap();
+        let result = result(&job, vec![add(&job.source_refs[0].event)]);
+        stage_interrupted(&vault, &job, &result);
+        let path = vault
+            .root()
+            .join("control/suppressions")
+            .join(format!("{}.json", old.id));
+        let mut rule: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        rule["active"] = true.into();
+        if missing_original {
+            fn remove_original(path: &std::path::Path, id: &str) {
+                for entry in fs::read_dir(path).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        remove_original(&path, id);
+                    } else if path.file_stem().and_then(|s| s.to_str()) == Some(id) {
+                        fs::remove_file(path).unwrap();
+                    }
+                }
+            }
+            remove_original(&vault.root().join("events"), &old.id);
+        } else {
+            rule.as_object_mut().unwrap().remove("source_hashes");
+        }
+        fs::write(path, serde_json::to_vec(&rule).unwrap()).unwrap();
+        assert!(vault.dream_recover().unwrap_err().contains("抑制"));
+        assert!(fs::read_dir(vault.root().join("memories"))
+            .unwrap()
+            .next()
+            .is_none());
+        assert!(vault
+            .state_dir()
+            .unwrap()
+            .join("dream-transaction.json")
+            .exists());
+    }
+}

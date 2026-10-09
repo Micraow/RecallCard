@@ -670,3 +670,31 @@ fn default_root_budget_exposes_three_routing_choices_with_provenance() {
         );
     }
 }
+
+#[test]
+fn rebuilt_navigation_cache_matches_full_projection_including_event_only_scopes() {
+    let d = tempfile::tempdir().unwrap();
+    let v = Vault::init(d.path()).unwrap();
+    let src = source(&v, "personal", "cache-visible");
+    publish(&v, "personal", &src, json!([{"path":"topics/cache"}]));
+    source(&v, "project:event-only", "cache-no-memory");
+    let scopes = vec!["personal".into(), "project:event-only".into()];
+    for suppress in [false, true] {
+        if suppress {
+            v.suppress(&src, "合成隐藏来源".into()).unwrap();
+        }
+        let context = Context::new(&v, Access::new(scopes.clone()).unwrap());
+        let expected = recallcard::navigation::Index::build(
+            &context.documents().unwrap(),
+            &scopes,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        v.rebuild_views().unwrap();
+        let cache: Value = serde_json::from_slice(
+            &std::fs::read(v.root().join("generated/navigation.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cache, serde_json::to_value(expected).unwrap());
+    }
+}

@@ -527,7 +527,7 @@ impl Vault {
         }
         let scopes = scopes.into_iter().collect::<Vec<_>>();
         let docs = crate::context::Context::new(self, crate::policy::Access::new(scopes.clone())?)
-            .documents_locked()?;
+            .memory_documents_locked(&_lock)?;
         let navigation = crate::navigation::Index::build(&docs, &scopes, Utc::now())?;
         self.write_replace(&self.root.join("generated/navigation.json"), &navigation)?;
         Ok(memories.len())
