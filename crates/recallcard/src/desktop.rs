@@ -281,6 +281,7 @@ impl DesktopSession {
                 target: target.into(),
                 session_ref: None,
                 as_of: None,
+                event_filter: None,
                 limit: 30,
                 detail: "context".into(),
                 budget_tokens: RESPONSE_LIMIT,

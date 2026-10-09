@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+mod adjacency;
 mod paging;
 mod search;
 pub use paging::ReadPageArgs;
@@ -20,6 +21,8 @@ pub struct SearchArgs {
     pub session_ref: Option<String>,
     #[serde(default)]
     pub as_of: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub event_filter: Option<EventFilter>,
     #[serde(default = "five")]
     pub limit: usize,
     #[serde(default = "context_detail")]
@@ -32,6 +35,47 @@ pub struct SearchArgs {
     pub budget_tokens: usize,
     #[serde(default)]
     pub cursor: Option<String>,
+}
+/// 显式原始事件过滤；不把 Memory 的证据等级伪装成某个说话人的原话。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventFilter {
+    #[serde(default)]
+    pub role: Option<Role>,
+    #[serde(default)]
+    pub occurred_from: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub occurred_until: Option<DateTime<Utc>>,
+    /// 只匹配来源明确记录的当前路径标记；未知关系不会当作 true 或 false。
+    #[serde(default)]
+    pub on_current_path: Option<bool>,
+}
+impl EventFilter {
+    fn active(&self) -> bool {
+        self.role.is_some()
+            || self.occurred_from.is_some()
+            || self.occurred_until.is_some()
+            || self.on_current_path.is_some()
+    }
+    fn permits(&self, document: &Document) -> bool {
+        if !self.active() {
+            return true;
+        }
+        document.kind == "event"
+            && self
+                .role
+                .as_ref()
+                .is_none_or(|role| document.role.as_ref() == Some(role))
+            && self
+                .occurred_from
+                .is_none_or(|start| document.occurred_at.is_some_and(|time| time >= start))
+            && self
+                .occurred_until
+                .is_none_or(|end| document.occurred_at.is_some_and(|time| time <= end))
+            && self
+                .on_current_path
+                .is_none_or(|path| document.on_current_path == Some(path))
+    }
 }
 fn all() -> String {
     "all".into()
@@ -79,6 +123,10 @@ pub struct Document {
     pub text: String,
     pub scope: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_current_path: Option<bool>,
     pub evidence_refs: Vec<String>,
     pub session_ref: Option<String>,
     pub state: String,
@@ -100,6 +148,8 @@ impl Document {
             text: memory.data.content.clone(),
             scope: memory.data.scope.clone(),
             kind: "memory".into(),
+            role: None,
+            on_current_path: None,
             evidence_refs: memory
                 .data
                 .source_refs
@@ -207,6 +257,13 @@ impl<'a> Context<'a> {
                 text: event.data.text(),
                 scope: event.data.scope.clone(),
                 kind: "event".into(),
+                role: Some(event.data.role.clone()),
+                on_current_path: event
+                    .data
+                    .metadata
+                    .pointer("/qwen/on_current_path")
+                    .or_else(|| event.data.metadata.pointer("/chatgpt/on_current_path"))
+                    .and_then(Value::as_bool),
                 evidence_refs: vec![format!("event:{}", event.id)],
                 session_ref: Some(event.data.session_key()),
                 state: "captured".into(),
@@ -273,6 +330,20 @@ impl<'a> Context<'a> {
     }
     pub fn search(&self, args: SearchArgs) -> Result<Value> {
         check_budget(args.budget_tokens)?;
+        if let Some(filter) = &args.event_filter {
+            if filter
+                .occurred_from
+                .zip(filter.occurred_until)
+                .is_some_and(|(start, end)| start > end)
+            {
+                return Err("occurred_from 不能晚于 occurred_until".into());
+            }
+            if filter.active() && args.target == "memories" {
+                return Err(
+                    "event_filter 只筛选原始 Event；核对 Memory 的角色请读取 sources".into(),
+                );
+            }
+        }
         nonempty(&args.query, "查询")?;
         if args.query.len() > 4096 || args.limit == 0 || args.limit > 50 {
             return Err("query/limit 超过上限（4096 字节/1–50条）".into());
@@ -349,13 +420,14 @@ impl<'a> Context<'a> {
         );
         let binding = hash(
             format!(
-                "{}:{}:{}:{}:{:?}:{:?}:{:?}",
+                "{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}",
                 generation,
                 ranking_signature,
                 args.query,
                 args.target,
                 args.session_ref,
                 args.as_of,
+                args.event_filter,
                 self.access.scopes()
             )
             .as_bytes(),
@@ -370,6 +442,10 @@ impl<'a> Context<'a> {
             0
         };
         let mut coverage = json!({"event_search":"available","semantic_search":"unavailable","undreamed_events_included":true,"scope_filtered":true,"indexed_generation":generation,"lexical_matching":"all_terms","source_grouping":"memory_with_matching_source_events"});
+        if args.event_filter.as_ref().is_some_and(EventFilter::active) {
+            coverage["event_filter"] = json!(args.event_filter);
+            coverage["filter_note"] = json!("只匹配原始Event；时间和当前路径未知不匹配对应条件；未自动扩展角色、时间、分支或权限");
+        }
         if let Some(references) = &semantic_refs {
             coverage["semantic_search"] = json!("available");
             coverage["semantic_candidates"] = json!(references.len());
@@ -722,6 +798,13 @@ fn search_documents(
     documents
         .iter()
         .filter(|document| {
+            if args
+                .event_filter
+                .as_ref()
+                .is_some_and(|filter| !filter.permits(document))
+            {
+                return false;
+            }
             if (args.target == "memories" && document.kind != "memory")
                 || (args.target == "events" && document.kind != "event")
                 || args

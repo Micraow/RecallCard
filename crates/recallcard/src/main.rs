@@ -185,6 +185,12 @@ enum Command {
         /// 使用上一页返回的不透明 next_cursor 继续读取
         #[arg(long)]
         cursor: Option<String>,
+        /// 显式返回受权限约束的相邻来源和后续用户消息引用
+        #[arg(long)]
+        include_adjacent: bool,
+        /// compact 优先正文与必要引用；full 保留详细来源投影
+        #[arg(long, default_value = "full", value_parser = ["full", "compact"])]
+        detail: String,
     },
     /// 返回原始证据；大记录可按固定范围有界续读
     Sources {
@@ -197,6 +203,12 @@ enum Command {
         offset_bytes: Option<usize>,
         #[arg(long)]
         cursor: Option<String>,
+        /// 显式返回受权限约束的相邻来源和后续用户消息引用
+        #[arg(long)]
+        include_adjacent: bool,
+        /// compact 优先正文与必要引用；full 保留详细来源投影
+        #[arg(long, default_value = "full", value_parser = ["full", "compact"])]
+        detail: String,
     },
     /// 按当前授权/抑制状态导出可选Embedding输入；不会发送云端
     #[command(hide = true)]
@@ -247,6 +259,16 @@ enum Command {
         session_ref: Option<String>,
         #[arg(long)]
         as_of: Option<chrono::DateTime<chrono::Utc>>,
+        /// 仅筛选原始事件说话人；不由查询文本自动猜测
+        #[arg(long, value_parser = ["user", "assistant", "system", "tool"])]
+        role: Option<String>,
+        #[arg(long)]
+        occurred_from: Option<chrono::DateTime<chrono::Utc>>,
+        #[arg(long)]
+        occurred_until: Option<chrono::DateTime<chrono::Utc>>,
+        /// 仅匹配导出明确标记的当前路径；未知关系不匹配
+        #[arg(long)]
+        on_current_path: Option<bool>,
         #[arg(long, default_value = "context")]
         detail: String,
         #[arg(long)]
@@ -596,8 +618,15 @@ fn run(cli: Cli) -> Result<Value> {
             budget_bytes,
             offset_bytes,
             cursor,
+            include_adjacent,
+            detail,
         } => {
-            if budget_bytes.is_some() || offset_bytes.is_some() || cursor.is_some() {
+            if budget_bytes.is_some()
+                || offset_bytes.is_some()
+                || cursor.is_some()
+                || include_adjacent
+                || detail != "full"
+            {
                 if scope.is_empty() {
                     return Err("有界读取需要明确 --scope；请使用授权范围".into());
                 }
@@ -607,6 +636,8 @@ fn run(cli: Cli) -> Result<Value> {
                         budget_tokens: budget_bytes.unwrap_or(1500),
                         offset_bytes,
                         cursor,
+                        include_adjacent,
+                        detail,
                     },
                 );
             }
@@ -633,11 +664,15 @@ fn run(cli: Cli) -> Result<Value> {
             budget_bytes,
             offset_bytes,
             cursor,
+            include_adjacent,
+            detail,
         } => {
             if budget_bytes.is_some()
                 || offset_bytes.is_some()
                 || cursor.is_some()
                 || !scope.is_empty()
+                || include_adjacent
+                || detail != "full"
             {
                 if scope.is_empty() {
                     return Err("有界来源读取需要明确 --scope；请使用授权范围".into());
@@ -648,6 +683,8 @@ fn run(cli: Cli) -> Result<Value> {
                         budget_tokens: budget_bytes.unwrap_or(1500),
                         offset_bytes,
                         cursor,
+                        include_adjacent,
+                        detail,
                     },
                 );
             }
@@ -683,6 +720,10 @@ fn run(cli: Cli) -> Result<Value> {
             budget_tokens,
             session_ref,
             as_of,
+            role,
+            occurred_from,
+            occurred_until,
+            on_current_path,
             detail,
             cursor,
             semantic_config,
@@ -701,6 +742,25 @@ fn run(cli: Cli) -> Result<Value> {
                 target,
                 session_ref,
                 as_of,
+                event_filter: if role.is_some()
+                    || occurred_from.is_some()
+                    || occurred_until.is_some()
+                    || on_current_path.is_some()
+                {
+                    Some(recallcard::context::EventFilter {
+                        role: role
+                            .map(|role| {
+                                serde_json::from_value(json!(role))
+                                    .map_err(|_| "未知角色".to_string())
+                            })
+                            .transpose()?,
+                        occurred_from,
+                        occurred_until,
+                        on_current_path,
+                    })
+                } else {
+                    None
+                },
                 limit,
                 detail,
                 budget_tokens,

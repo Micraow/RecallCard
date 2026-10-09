@@ -183,7 +183,11 @@ fn envelope(
 }
 fn compact_status(value: &mut Value) {
     let coverage = &value["coverage"];
-    value["coverage"] = json!({"event_search":coverage["event_search"],"semantic_search":coverage["semantic_search"],"scope_filtered":true});
+    let mut compact = json!({"event_search":coverage["event_search"],"semantic_search":coverage["semantic_search"],"scope_filtered":true});
+    if let Some(filter) = coverage.get("event_filter") {
+        compact["event_filter"] = filter.clone();
+    }
+    value["coverage"] = compact;
 }
 pub(super) fn response(
     ranked: &[Match<'_>],
@@ -287,6 +291,8 @@ mod tests {
 
     fn document(reference: &str, kind: &str, sources: &[&str]) -> Document {
         Document {
+            role: None,
+            on_current_path: None,
             reference: reference.into(),
             text: "合成命中".into(),
             scope: "personal".into(),

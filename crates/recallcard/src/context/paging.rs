@@ -15,6 +15,104 @@ pub struct ReadPageArgs {
     pub cursor: Option<String>,
     #[serde(default)]
     pub offset_bytes: Option<usize>,
+    #[serde(default)]
+    pub include_adjacent: bool,
+    #[serde(default = "read_detail")]
+    pub detail: String,
+}
+fn read_detail() -> String {
+    "full".into()
+}
+
+// 只压缩传输投影；正文读取、来源权限和 generation 校验始终使用完整正本。
+fn compact_metadata(metadata: &Value) -> Value {
+    let event = metadata["kind"] == "event";
+    let keys: &[&str] = if event {
+        &[
+            "kind",
+            "scope",
+            "role",
+            "origin",
+            "occurred_at",
+            "content_retained",
+        ]
+    } else {
+        &[
+            "kind",
+            "scope",
+            "revision",
+            "state",
+            "evidence",
+            "observed_at",
+            "valid_from",
+            "valid_to",
+            "time_note",
+            "time_note_truncated",
+            "source_count",
+        ]
+    };
+    let mut value = serde_json::Map::new();
+    for key in keys {
+        if let Some(field) = metadata.get(*key) {
+            value.insert((*key).into(), field.clone());
+        }
+    }
+    if event {
+        value.insert(
+            "source_platform".into(),
+            metadata["source"]["platform"].clone(),
+        );
+        value.insert(
+            "capture_completeness".into(),
+            metadata["capture"]["completeness"].clone(),
+        );
+        if metadata["capture"]["redacted"] == true {
+            value.insert("redacted".into(), json!(true));
+        }
+        for provider in ["qwen", "chatgpt"] {
+            if let Some(path) = metadata[provider]["on_current_path"].as_bool() {
+                value.insert("on_current_path".into(), json!(path));
+            }
+        }
+    }
+    if let Some(links) = metadata.get("adjacent") {
+        let mut links = links.clone();
+        let object = links.as_object_mut().unwrap();
+        for key in [
+            "previous_ref",
+            "next_user_ref",
+            "user_traversal_limited",
+            "branch_choice_required",
+            "ambiguous_source_identity",
+        ] {
+            if object
+                .get(key)
+                .is_some_and(|field| field.is_null() || field == false)
+            {
+                object.remove(key);
+            }
+        }
+        if object
+            .get("branch_choices")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        {
+            object.remove("branch_choices");
+        }
+        if object.get("other_branch_count") == Some(&json!(0)) {
+            object.remove("other_branch_count");
+        }
+        if object
+            .get("next_ref_count")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count <= 3)
+        {
+            object.remove("next_ref_count");
+        }
+        object.remove("relation");
+        value.insert("adjacent".into(), links);
+    }
+    Value::Object(value)
 }
 
 impl Context<'_> {
@@ -26,11 +124,17 @@ impl Context<'_> {
     }
     fn read_page_internal(&self, args: ReadPageArgs, sources: bool) -> Result<Value> {
         check_budget(args.budget_tokens)?;
+        if !["full", "compact"].contains(&args.detail.as_str()) {
+            return Err("未知读取 detail；可用 full 或 compact".into());
+        }
         if args.refs.is_empty() || args.refs.len() > 32 {
             return Err("refs 必须包含 1–32 个引用".into());
         }
         if args.cursor.is_some() && args.offset_bytes.is_some() {
             return Err("cursor 与 offset_bytes 不能同时使用".into());
+        }
+        if (args.include_adjacent || args.detail == "compact") && args.refs.len() != 1 {
+            return Err("紧凑读取或相邻来源导航只接受一个 Event/Memory 引用".into());
         }
         if args.refs.len() != 1 {
             if args.cursor.is_some() || args.offset_bytes.is_some() {
@@ -46,7 +150,13 @@ impl Context<'_> {
         }
         let reference = &args.refs[0];
         let (kind, id, revision) = parse_ref(reference)?;
+        if args.include_adjacent && kind != "event" {
+            return Err("相邻来源导航只用于 Event；请先 sources(memory) 再读取来源".into());
+        }
         if kind == "view" {
+            if args.detail == "compact" {
+                return Err("view 请使用默认 full 目录，再逐个紧凑读取 Event/Memory".into());
+            }
             if args.cursor.is_some() || args.offset_bytes.is_some() {
                 return Err("view 不支持正文游标；请逐个读取 records/pending_refs".into());
             }
@@ -61,8 +171,10 @@ impl Context<'_> {
         let _read_guard = self.vault.read_guard()?;
         let mut events = crate::vault::EventSnapshot::new(self.vault, &_read_guard);
         let suppressed = self.vault.suppressed_ids()?;
+        let mut adjacency = None;
+        let mut source_generation = None;
         // 每一页重新检查授权和抑制；不得凭游标绕过。
-        let (record, text, metadata, projection, retained) = if kind == "event" {
+        let (record, text, mut metadata, projection, retained) = if kind == "event" {
             let event = events.event(id)?;
             if !self.access.permits(&event.data.scope) || suppressed.contains(id) {
                 return Err("引用不可访问或已被抑制".into());
@@ -94,6 +206,29 @@ impl Context<'_> {
             if event.data.metadata["qwen"].is_object() {
                 metadata["qwen"] = json!({"on_current_path":event.data.metadata.pointer("/qwen/on_current_path").and_then(Value::as_bool)});
             }
+            if let Some((links, generation)) = if args.include_adjacent {
+                self.adjacent(&event, &mut events, &suppressed)?
+            } else {
+                None
+            } {
+                metadata["adjacent"] = links.clone();
+                adjacency = Some(links);
+                source_generation = Some(generation);
+            }
+            if args.include_adjacent {
+                let object = metadata.as_object_mut().unwrap();
+                for key in ["reply_to", "revision_of"] {
+                    if object.get(key).is_some_and(Value::is_null) {
+                        object.remove(key);
+                    }
+                }
+                if object["part_origins"].as_array().is_some_and(Vec::is_empty) {
+                    object.remove("part_origins");
+                }
+                if object["chatgpt"]["on_current_path"].is_null() {
+                    object.remove("chatgpt");
+                }
+            }
             (
                 serde_json::to_value(&event).map_err(|e| e.to_string())?,
                 text,
@@ -122,30 +257,49 @@ impl Context<'_> {
             )
         };
         let snapshot = hash(&serde_json::to_vec(&record).map_err(|e| e.to_string())?);
-        let binding = page_binding(
-            reference,
-            &snapshot,
-            &self.access.scopes(),
-            if sources { "source-text" } else { "text" },
-        );
+        let binding_snapshot = source_generation
+            .as_ref()
+            .map(|generation| hash(format!("{snapshot}:{generation}").as_bytes()))
+            .unwrap_or_else(|| snapshot.clone());
+        let mode = match (sources, args.include_adjacent) {
+            (true, true) => "source-text-adjacent",
+            (false, true) => "text-adjacent",
+            (true, false) => "source-text",
+            (false, false) => "text",
+        };
+        let mode = if args.detail == "compact" {
+            format!("{mode}:compact")
+        } else {
+            mode.into()
+        };
+        let binding = page_binding(reference, &binding_snapshot, &self.access.scopes(), &mode);
         let offset = page_position(&args, &binding)?;
         if offset > text.len() || !text.is_char_boundary(offset) {
             return Err("offset_bytes 必须是正文范围内的 UTF-8 字符边界".into());
         }
-        if args.cursor.is_none() && args.offset_bytes.is_none() {
-            let full = json!({"results":[{"ref":reference,"record":record,"content_retained":retained,"retention":if retained{"inline"}else{"content_not_retained"}}],"truncated":false,"pending_refs":[],"next_cursor":null,"status":"complete","budget_unit":"utf8_bytes"});
+        if args.cursor.is_none() && args.offset_bytes.is_none() && args.detail == "full" {
+            let mut full = json!({"results":[{"ref":reference,"record":record,"content_retained":retained,"retention":if retained{"inline"}else{"content_not_retained"}}],"truncated":false,"pending_refs":[],"next_cursor":null,"status":"complete","budget_unit":"utf8_bytes"});
+            if let Some(links) = &adjacency {
+                full["results"][0]["adjacent"] = links.clone();
+            }
             if json_size(&full)? <= args.budget_tokens {
                 return Ok(full);
             }
         }
         // text 是明确标记的正文投影，不伪装成完整 Event/Memory 正本。
+        if args.detail == "compact" {
+            metadata = compact_metadata(&metadata);
+        }
         let mut end = (offset + args.budget_tokens).min(text.len());
         loop {
             while !text.is_char_boundary(end) {
                 end -= 1;
             }
             let next_cursor = (end < text.len()).then(|| format!("p1:{binding}:{end}"));
-            let response = json!({"results":[{"ref":reference,"metadata":metadata,"text":&text[offset..end],"text_range":{"start_byte":offset,"end_byte":end,"total_bytes":text.len(),"projection":projection},"snapshot":snapshot,"record_complete":false}],"truncated":end<text.len(),"pending_refs":[],"next_cursor":next_cursor,"status":if end<text.len(){"partial"}else{"complete"},"budget_unit":"utf8_bytes"});
+            let mut response = json!({"results":[{"ref":reference,"metadata":metadata,"text":&text[offset..end],"text_range":{"start_byte":offset,"end_byte":end,"total_bytes":text.len(),"projection":projection},"snapshot":snapshot,"record_complete":false}],"truncated":end<text.len(),"pending_refs":[],"next_cursor":next_cursor,"status":if end<text.len(){"partial"}else{"complete"},"budget_unit":"utf8_bytes"});
+            if args.detail == "compact" {
+                response["detail"] = json!("compact");
+            }
             let size = json_size(&response)?;
             if size <= args.budget_tokens && (end > offset || offset == text.len()) {
                 return Ok(response);
@@ -172,14 +326,23 @@ impl Context<'_> {
         }
         let reference = &args.refs[0];
         let snapshot = hash(&serde_json::to_vec(memory).map_err(|e| e.to_string())?);
-        let binding = page_binding(reference, &snapshot, &self.access.scopes(), "source-refs");
+        let binding = page_binding(
+            reference,
+            &snapshot,
+            &self.access.scopes(),
+            if args.detail == "compact" {
+                "source-refs:compact"
+            } else {
+                "source-refs"
+            },
+        );
         let offset = page_position(args, &binding)?;
         let refs = &memory.data.source_refs;
         if offset > refs.len() {
             return Err("来源游标超出范围".into());
         }
         // 小证据集合保留完整 events 合同；大集合按预算返回来源列表，不把全部正文塞入响应。
-        if args.cursor.is_none() {
+        if args.cursor.is_none() && args.detail == "full" {
             let mut selected = Vec::new();
             let mut bytes = 0usize;
             for id in refs {
@@ -208,7 +371,10 @@ impl Context<'_> {
         for id in refs.iter().skip(offset) {
             items.push(format!("event:{id}"));
             let next = offset + items.len();
-            let candidate = json!({"results":[{"ref":reference,"source_refs":items,"source_range":{"start":offset,"end":next,"total":refs.len()},"snapshot":snapshot}],"truncated":next<refs.len(),"pending_refs":[],"next_cursor":if next<refs.len(){Some(format!("p1:{binding}:{next}"))}else{None},"status":"source_refs","budget_unit":"utf8_bytes","hint":"逐个 read source_refs 获取原始正文；按 next_cursor 继续来源列表"});
+            let mut candidate = json!({"results":[{"ref":reference,"source_refs":items,"source_range":{"start":offset,"end":next,"total":refs.len()},"snapshot":snapshot}],"truncated":next<refs.len(),"pending_refs":[],"next_cursor":if next<refs.len(){Some(format!("p1:{binding}:{next}"))}else{None},"status":"source_refs","budget_unit":"utf8_bytes","hint":"逐个 read source_refs 获取原始正文；按 next_cursor 继续来源列表"});
+            if args.detail == "compact" {
+                candidate["detail"] = json!("compact");
+            }
             if response.is_null() {
                 minimum_budget = json_size(&candidate)?;
             }
