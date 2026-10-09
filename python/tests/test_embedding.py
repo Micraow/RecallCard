@@ -105,6 +105,16 @@ class EmbeddingTests(unittest.TestCase):
             with self.subTest(endpoint=endpoint):
                 self.assertError("invalid_endpoint", EmbeddingSpace.from_dict, {**asdict(SPACE), "endpoint": endpoint})
 
+    def test_loopback_space_is_offline_only_and_cannot_send_credentials(self):
+        for endpoint in ("http://127.0.0.1:46709/v1/embeddings", "http://[::1]:46709/v1/embeddings"):
+            space = EmbeddingSpace.from_dict({**asdict(SPACE), "endpoint": endpoint})
+            transport = FakeTransport()
+            client = EmbeddingClient(approval=NetworkApproval(True, endpoint, ("project:fixture",), ("corpus",)), transport=transport)
+            self.assertError("invalid_endpoint", client.embed, space, ["合成资料"], ["project:fixture"], "corpus")
+            self.assertEqual(transport.calls, [])
+        for endpoint in ("http://localhost:46709/v1/embeddings", "http://127.0.0.1.evil.invalid/x", "http://key@127.0.0.1/x", "http://127.0.0.1/x?q=x"):
+            self.assertError("invalid_endpoint", EmbeddingSpace.from_dict, {**asdict(SPACE), "endpoint": endpoint})
+
     def test_no_implicit_preprocessing_or_empty_inputs(self):
         self.assertEqual("  材料\r\n", SPACE.prepare("  材料\r\n", "corpus"))
         self.assertEqual("文档\n内容", replace(SPACE, document_instruction="文档").prepare("内容", "corpus"))

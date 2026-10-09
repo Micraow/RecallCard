@@ -71,3 +71,5 @@ View 本身尚未进入 semantic Memory 索引。配置语义能力后，`includ
 需要历史信息时先 `bootstrap`，再从实际返回的根引用用 `read` 逐层选择目录、Memory，并用 `sources` 和原 Event 核对。目录不足、跨主题定位时优先使用已配置的 embedding 语义候选；词法 `search` 是辅助入口。bootstrap 的活动提示与稳定规则都遵循这个顺序。目录未整理或未覆盖不代表原文不存在，检索候选也不等于足够回答的证据。
 
 当前语义实现只对授权、当前有效的 Memory 建立候选映射，导航 View 通过当前 Memory 候选映射而非独立向量；未配置时应明确报告 unavailable，不得暗示已覆盖原始历史。实际验收必须区分：已知来源的脚本遍历、助手逐步选择的 mock 轨迹、真正盲测的自主模型读取。十个自然问题的词法无匹配记录没有执行目录回退，因此不能当成目录能力失败；只有一个主题已整理时也不能宣称覆盖全部问题。
+
+离线向量空间允许数字 loopback HTTP endpoint（127.0.0.1 / ::1）作为真实本机模型来源元数据；缓存校验与 query_vector 不联网。此兼容项不会开放网络 provider：EmbeddingClient.embed 仍在取密钥或调用 transport 前强制 HTTPS。现阶段本机模型由独立可信宿主计算，再输入离线缓存；尚不能声称产品内的本机 provider 编码链路已经完成。
