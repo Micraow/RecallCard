@@ -15,6 +15,40 @@ pub struct Vault {
     root: PathBuf,
 }
 pub struct WriteGuard(File);
+/// 只在调用方已持有的锁内延迟读取一次正本；不能跨请求或事务阶段保存。
+pub(crate) struct EventSnapshot<'a> {
+    vault: &'a Vault,
+    _guard: &'a WriteGuard,
+    events: Option<std::collections::BTreeMap<String, Event>>,
+}
+impl<'a> EventSnapshot<'a> {
+    pub(crate) fn new(vault: &'a Vault, guard: &'a WriteGuard) -> Self {
+        Self {
+            vault,
+            _guard: guard,
+            events: None,
+        }
+    }
+    pub(crate) fn all(&mut self) -> Result<&std::collections::BTreeMap<String, Event>> {
+        if self.events.is_none() {
+            self.events = Some(
+                self.vault
+                    .events()?
+                    .into_iter()
+                    .map(|event| (event.id.clone(), event))
+                    .collect(),
+            );
+        }
+        Ok(self.events.as_ref().unwrap())
+    }
+    pub(crate) fn event(&mut self, id: &str) -> Result<Event> {
+        validate_id(id, "evt_")?;
+        self.all()?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("找不到原始事件 {id}"))
+    }
+}
 impl Drop for WriteGuard {
     fn drop(&mut self) {
         let _ = self.0.unlock();
@@ -407,11 +441,17 @@ impl Vault {
         }
     }
     pub fn validate_evidence(&self, input: &MemoryInput) -> Result<()> {
+        Self::validate_evidence_with(input, |id| self.event(id))
+    }
+    pub(crate) fn validate_evidence_with(
+        input: &MemoryInput,
+        mut event: impl FnMut(&str) -> Result<Event>,
+    ) -> Result<()> {
         input.validate()?;
         let sources: Vec<Event> = input
             .source_refs
             .iter()
-            .map(|id| self.event(id))
+            .map(|id| event(id))
             .collect::<Result<_>>()?;
         if sources.iter().any(|e| !e.data.has_original_evidence()) {
             return Err("注入的上下文不能作为新的记忆证据".into());

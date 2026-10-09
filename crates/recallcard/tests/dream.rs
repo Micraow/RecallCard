@@ -753,3 +753,29 @@ fn real_cli_protected_approval_flag_is_required() {
     cli_ok(cli(vault.root(), &approved, Some(&result)));
     assert_eq!(vault.memory(&old.id).unwrap().revision, 2);
 }
+
+#[test]
+fn review_snapshot_is_not_reused_after_external_source_revision() {
+    let (_dir, vault) = vault();
+    let first = event(&vault, "多源一", "user", "personal");
+    let second = event(&vault, "多源二", "user", "personal");
+    let job = vault
+        .dream_export(&[first.id.clone(), second.id.clone()], &[], "personal")
+        .unwrap();
+    let mut proposal = add(&first);
+    proposal["source_refs"] = json!([first.id, second.id]);
+    let result = result(&job, vec![proposal]);
+    let review = vault.dream_review(&result).unwrap();
+    assert!(review.can_apply);
+    let external = Vault::open(vault.root()).unwrap();
+    let mut revised = second.data.clone();
+    revised.content = "合成后续修订：旧信息作废".into();
+    let newer = external.capture(revised).unwrap();
+    assert_eq!(newer.data.revision_of.as_deref(), Some(second.id.as_str()));
+    assert!(vault.dream_review(&result).unwrap_err().contains("新修订"));
+    assert!(vault
+        .dream_apply(&result, &review.result_hash, false)
+        .unwrap_err()
+        .contains("新修订"));
+    assert!(vault.memories().unwrap().is_empty());
+}

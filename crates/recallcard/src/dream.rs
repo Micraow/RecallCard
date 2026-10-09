@@ -238,7 +238,7 @@ impl Vault {
                 diagnostics: vec!["相同结果已发布，无需再次写入".into()],
             });
         }
-        self.review_current(&job, result, result_hash)
+        self.review_current(&job, result, result_hash, &_lock)
     }
 
     /// 必须显式批准该完整结果摘要；受保护目标另外需要明确批准。
@@ -259,7 +259,7 @@ impl Vault {
             self.refresh_dream_views()?;
             return Ok(receipt);
         }
-        let review = self.review_current(&job, result, result_hash.clone())?;
+        let review = self.review_current(&job, result, result_hash.clone(), &_lock)?;
         if !review.can_apply {
             return Err("结果包含未解决的 conflict，不能发布；请重新整理完整结果".into());
         }
@@ -391,6 +391,14 @@ impl Vault {
         Ok(())
     }
     fn check_dream_memory(&self, memory: &Memory, scope: &str) -> Result<()> {
+        self.check_dream_memory_with(memory, scope, |id| self.event(id))
+    }
+    fn check_dream_memory_with(
+        &self,
+        memory: &Memory,
+        scope: &str,
+        event: impl FnMut(&str) -> Result<Event>,
+    ) -> Result<()> {
         if self.is_suppressed(&memory.id)?
             || memory
                 .data
@@ -403,17 +411,19 @@ impl Vault {
         if memory.data.scope != scope {
             return Err("Dream 旧记忆超出授权 scope".into());
         }
-        self.validate_evidence(&memory.data)
+        Self::validate_evidence_with(&memory.data, event)
     }
     fn review_current(
         &self,
         job: &DreamJob,
         result: &DreamResult,
         result_hash: String,
+        guard: &crate::vault::WriteGuard,
     ) -> Result<DreamReview> {
+        let mut events = crate::vault::EventSnapshot::new(self, guard);
         let mut allowed_sources = BTreeSet::new();
         for source in &job.source_refs {
-            let current = self.event(&source.event.id)?;
+            let current = events.event(&source.event.id)?;
             self.check_dream_source(&current, &job.allowed_scope)?;
             if digest(&current)? != source.content_hash {
                 return Err("Dream 来源哈希已改变，请重新导出任务".into());
@@ -426,7 +436,7 @@ impl Vault {
             .iter()
             .map(|source| (source.event.id.clone(), source.event.data.revision_key()))
             .collect();
-        self.visit_events(|event| {
+        for event in events.all()?.values() {
             if event.data.revision_of.as_ref().is_some_and(|id| {
                 source_keys
                     .get(id)
@@ -434,12 +444,11 @@ impl Vault {
             }) {
                 return Err("Dream 来源已有新修订，不能发布旧事实".into());
             }
-            Ok(())
-        })?;
+        }
         let mut baseline = BTreeMap::new();
         for old in &job.memory_read_set {
             let current = self.memory(&old.memory.id)?;
-            self.check_dream_memory(&current, &job.allowed_scope)?;
+            self.check_dream_memory_with(&current, &job.allowed_scope, |id| events.event(id))?;
             if current.revision != old.memory.revision || digest(&current)? != old.content_hash {
                 return Err("Dream 旧记忆 read-set 已过期，请重新读取和整理，不能覆盖".into());
             }
@@ -500,7 +509,7 @@ impl Vault {
                 valid_from: proposal.valid_from,
                 valid_to: proposal.valid_to,
             };
-            self.validate_evidence(&input)?;
+            Self::validate_evidence_with(&input, |id| events.event(id))?;
             match proposal.operation {
                 DreamOperation::Add => {
                     if proposal.target_ref.is_some() || proposal.expected_revision.is_some() {

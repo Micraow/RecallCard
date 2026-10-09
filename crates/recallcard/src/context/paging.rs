@@ -59,10 +59,11 @@ impl Context<'_> {
             );
         }
         let _read_guard = self.vault.read_guard()?;
+        let mut events = crate::vault::EventSnapshot::new(self.vault, &_read_guard);
         let suppressed = self.vault.suppressed_ids()?;
         // 每一页重新检查授权和抑制；不得凭游标绕过。
         let (record, text, metadata, projection, retained) = if kind == "event" {
-            let event = self.vault.event(id)?;
+            let event = events.event(id)?;
             if !self.access.permits(&event.data.scope) || suppressed.contains(id) {
                 return Err("引用不可访问或已被抑制".into());
             }
@@ -99,14 +100,14 @@ impl Context<'_> {
             )
         } else {
             let memory = self.vault.memory(id)?;
-            if !self.memory_visible(&memory, &suppressed)? {
+            if !self.memory_visible(&memory, &suppressed, &mut events)? {
                 return Err("引用不可访问或已被抑制".into());
             }
             if revision.is_some_and(|r| r != memory.revision) {
                 return Err("引用的记忆版本已变化，请重新搜索".into());
             }
             if sources {
-                return self.memory_sources_page(&memory, &args);
+                return self.memory_sources_page(&memory, &args, &mut events);
             }
             let metadata = json!({"kind":"memory","scope":memory.data.scope,"revision":memory.revision,"state":memory.state,"evidence":memory.data.evidence,"observed_at":memory.data.observed_at,"valid_from":memory.data.valid_from,"valid_to":memory.data.valid_to,"time_note":truncate_utf8(&memory.data.time_note,256),"time_note_truncated":memory.data.time_note.len()>256,"source_count":memory.data.source_refs.len()});
             (
@@ -155,7 +156,12 @@ impl Context<'_> {
         }
     }
 
-    fn memory_sources_page(&self, memory: &Memory, args: &ReadPageArgs) -> Result<Value> {
+    fn memory_sources_page(
+        &self,
+        memory: &Memory,
+        args: &ReadPageArgs,
+        events: &mut crate::vault::EventSnapshot<'_>,
+    ) -> Result<Value> {
         if args.offset_bytes.is_some() {
             return Err(
                 "sources(memory) 返回来源列表；请对单个 event 使用 read 的 offset_bytes".into(),
@@ -169,25 +175,25 @@ impl Context<'_> {
         if offset > refs.len() {
             return Err("来源游标超出范围".into());
         }
-        // 小证据集合保留完整 events 合同；大集合不将所有正文同时加载到内存。
+        // 小证据集合保留完整 events 合同；大集合按预算返回来源列表，不把全部正文塞入响应。
         if args.cursor.is_none() {
-            let mut events = Vec::new();
+            let mut selected = Vec::new();
             let mut bytes = 0usize;
             for id in refs {
-                let event = self.vault.event(id)?;
+                let event = events.event(id)?;
                 bytes += serde_json::to_vec(&event).map_err(|e| e.to_string())?.len();
                 if bytes > args.budget_tokens {
                     break;
                 }
-                events.push(event);
+                selected.push(event);
             }
-            if events.len() == refs.len() {
-                let missing = events
+            if selected.len() == refs.len() {
+                let missing = selected
                     .iter()
                     .filter(|e| e.data.kind == "file" && e.data.text().is_empty())
                     .map(|e| format!("event:{}", e.id))
                     .collect::<Vec<_>>();
-                let full = json!({"results":[{"ref":reference,"events":events,"content_not_retained":missing}],"truncated":false,"pending_refs":[],"next_cursor":null,"status":"complete","budget_unit":"utf8_bytes"});
+                let full = json!({"results":[{"ref":reference,"events":selected,"content_not_retained":missing}],"truncated":false,"pending_refs":[],"next_cursor":null,"status":"complete","budget_unit":"utf8_bytes"});
                 if json_size(&full)? <= args.budget_tokens {
                     return Ok(full);
                 }

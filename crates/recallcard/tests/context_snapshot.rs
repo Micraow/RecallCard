@@ -84,4 +84,94 @@ fn legacy_memory_cannot_leak_a_cross_scope_source() {
     assert!(content.contains(&old_source));
     std::fs::write(path, content.replace(&old_source, &foreign.id)).unwrap();
     assert_eq!(search(&v).unwrap()["status"], "no_matches");
+    let context = Context::new(&v, Access::new(vec!["personal".into()]).unwrap());
+    for result in reads(&context, &format!("memory:{memory}")) {
+        assert_eq!(result.unwrap_err(), "引用不可访问或已被抑制");
+    }
+}
+
+fn reads(context: &Context<'_>, reference: &str) -> Vec<Result<Value, String>> {
+    let args = json!({"refs":[reference],"budget_bytes":16000});
+    vec![
+        context.read(serde_json::from_value(args.clone()).unwrap()),
+        context.sources(serde_json::from_value(args.clone()).unwrap()),
+        context.read_page(serde_json::from_value(args.clone()).unwrap()),
+        context.sources_page(serde_json::from_value(args).unwrap()),
+    ]
+}
+
+#[test]
+fn same_context_read_requests_observe_external_capture_and_suppression() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+    let (_, first) = add(&vault, "first");
+    assert!(reads(&context, &format!("memory:{first}"))
+        .iter()
+        .all(Result::is_ok));
+    let external = Vault::open(vault.root()).unwrap();
+    let (source, second) = add(&external, "second");
+    let reference = format!("memory:{second}");
+    assert!(reads(&context, &reference).iter().all(Result::is_ok));
+    external.suppress(&source, "合成外部隐藏".into()).unwrap();
+    for result in reads(&context, &reference) {
+        assert_eq!(result.unwrap_err(), "引用不可访问或已被抑制");
+    }
+    assert!(reads(&context, &format!("memory:{first}"))
+        .iter()
+        .all(Result::is_ok));
+}
+
+#[test]
+fn all_read_paths_keep_missing_source_error_and_scope_short_circuit() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let (source, memory) = add(&vault, "missing");
+    std::fs::rename(
+        vault.root().join("events"),
+        vault.root().join("events-backup"),
+    )
+    .unwrap();
+    std::fs::create_dir(vault.root().join("events")).unwrap();
+    let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+    let expected = vault.event(&source).unwrap_err();
+    for reference in [format!("event:{source}"), format!("memory:{memory}")] {
+        for result in reads(&context, &reference) {
+            assert_eq!(result.unwrap_err(), expected);
+        }
+    }
+    let denied = Context::new(
+        &vault,
+        Access::new(vec!["project:elsewhere".into()]).unwrap(),
+    );
+    for result in reads(&denied, &format!("memory:{memory}")) {
+        assert_eq!(result.unwrap_err(), "引用不可访问或已被抑制");
+    }
+}
+
+#[test]
+fn source_lists_keep_declared_order_in_paged_and_multi_reference_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let (one, _) = add(&vault, "one");
+    let (two, _) = add(&vault, "two");
+    let memory = vault.add_memory(serde_json::from_value(json!({
+        "content":"两处合成依据", "source_refs":[two,one], "scope":"personal", "evidence":"user_explicit"
+    })).unwrap()).unwrap();
+    let expected = vault.sources(&memory.id).unwrap();
+    let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+    let reference = format!("memory:{}", memory.id);
+    for refs in [
+        vec![reference.clone()],
+        vec![reference.clone(), reference.clone()],
+    ] {
+        let result = context
+            .sources_page(
+                serde_json::from_value(json!({"refs":refs,"budget_bytes":16000})).unwrap(),
+            )
+            .unwrap();
+        for item in result["results"].as_array().unwrap() {
+            assert_eq!(item["events"], serde_json::to_value(&expected).unwrap());
+        }
+    }
 }

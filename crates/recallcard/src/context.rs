@@ -238,10 +238,13 @@ impl<'a> Context<'a> {
         docs.sort_by(|a, b| a.reference.cmp(&b.reference));
         Ok(docs)
     }
-    fn memory_visible(&self, memory: &Memory, suppressed: &BTreeSet<String>) -> Result<bool> {
-        self.memory_visible_with_scope(memory, suppressed, |id| {
-            Ok(self.vault.event(id)?.data.scope)
-        })
+    fn memory_visible(
+        &self,
+        memory: &Memory,
+        suppressed: &BTreeSet<String>,
+        events: &mut crate::vault::EventSnapshot<'_>,
+    ) -> Result<bool> {
+        self.memory_visible_with_scope(memory, suppressed, |id| Ok(events.event(id)?.data.scope))
     }
     fn memory_visible_with_scope(
         &self,
@@ -420,6 +423,7 @@ impl<'a> Context<'a> {
     }
     fn read_internal(&self, args: ReadArgs, sources: bool) -> Result<Value> {
         let _read_guard = self.vault.read_guard()?;
+        let mut events = crate::vault::EventSnapshot::new(self.vault, &_read_guard);
         check_budget(args.budget_tokens)?;
         if args.refs.is_empty() || args.refs.len() > 32 {
             return Err("refs 必须包含 1–32 个引用".into());
@@ -442,7 +446,7 @@ impl<'a> Context<'a> {
                     self.label_view(id, now, args.budget_tokens.saturating_sub(used))?
                 }
             } else if kind == "event" {
-                let event = self.vault.event(id)?;
+                let event = events.event(id)?;
                 if !self.access.permits(&event.data.scope) || suppressed.contains(id) {
                     return Err("引用不可访问或已被抑制".into());
                 }
@@ -450,14 +454,19 @@ impl<'a> Context<'a> {
                 json!({"ref":reference,"record":event,"content_retained":retained,"retention":if retained{"inline"}else{"content_not_retained"}})
             } else {
                 let memory = self.vault.memory(id)?;
-                if !self.memory_visible(&memory, &suppressed)? {
+                if !self.memory_visible(&memory, &suppressed, &mut events)? {
                     return Err("引用不可访问或已被抑制".into());
                 }
                 if revision.is_some_and(|r| r != memory.revision) {
                     return Err("引用的记忆版本已变化，请重新搜索".into());
                 }
                 if sources {
-                    let events = self.vault.sources(id)?;
+                    let events = memory
+                        .data
+                        .source_refs
+                        .iter()
+                        .map(|id| events.event(id))
+                        .collect::<Result<Vec<_>>>()?;
                     let missing = events
                         .iter()
                         .filter(|e| e.data.kind == "file" && e.data.text().is_empty())
