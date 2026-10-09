@@ -188,6 +188,34 @@ impl Vault {
         }
         Ok(ids)
     }
+    /// 调用方已经在同一锁内读取并验证了完整 Event 快照；不重复扫描，也不跨请求保存身份。
+    pub(crate) fn suppressed_ids_from_events(&self, events: &[Event]) -> Result<BTreeSet<String>> {
+        self.ensure_no_pending_dream()?;
+        let mut ids = BTreeSet::new();
+        let mut source_hashes = BTreeSet::new();
+        for rule in self
+            .suppression_rules()?
+            .into_iter()
+            .filter(|rule| rule.active)
+        {
+            ids.insert(rule.id);
+            ids.extend(rule.source_refs);
+            source_hashes.extend(rule.source_hashes);
+        }
+        if !ids.is_empty() {
+            for event in events {
+                if ids.contains(&event.id) {
+                    source_hashes.insert(suppression_source_hash(event));
+                }
+            }
+            for event in events {
+                if source_hashes.contains(&suppression_source_hash(event)) {
+                    ids.insert(event.id.clone());
+                }
+            }
+        }
+        Ok(ids)
+    }
     fn suppressed_ids_impl(&self, dream_recovery: bool) -> Result<BTreeSet<String>> {
         let mut ids = BTreeSet::new();
         let mut source_hashes = BTreeSet::new();

@@ -221,8 +221,8 @@ impl<'a> Context<'a> {
     }
     /// 调用方须持有读锁或写锁；用于在同一快照内预览并确认用户选择。
     pub(crate) fn documents_locked(&self) -> Result<Vec<Document>> {
-        let suppressed = self.vault.suppressed_ids()?;
         let events = self.vault.events()?;
+        let suppressed = self.vault.suppressed_ids_from_events(&events)?;
         let identities: BTreeMap<&str, String> = events
             .iter()
             .map(|e| (e.id.as_str(), e.data.revision_key()))
