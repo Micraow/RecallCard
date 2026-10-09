@@ -9,7 +9,7 @@ import type {
   Conversation,
   EventRecord,
 } from "../service/types";
-import type { MemoryConfig } from "../service/runtime";
+import type { MemoryConfig, MemoryJob } from "../service/runtime";
 import type { JobStatus } from "../service/contracts";
 import "../styles.css";
 
@@ -152,6 +152,11 @@ const completeJob: JobStatus = {
 };
 const mode = new URLSearchParams(location.search).get("state") || "normal";
 const connectionDemo = createConnectionDemo(mode);
+let modelRetryJob: MemoryJob | null = mode.startsWith("memory-") ? {
+  schema:"recallcard.application-job/1",job_id:"memory_synthetic_retry",request_id:"synthetic_retry",kind:"memory",scope:"personal",state:"needs_input",phase:"executing",can_resume:true,created_at:now,updated_at:now,
+  progress:{sources_selected:2,memories_read:0,sources_committed:0,memories_committed:0,sources_skipped:0,provider_calls:1,reserved_tokens:2000,input_tokens:null,output_tokens:null,source_cursor:null,receipt_id:null},
+  error:{code:mode==="memory-conflict"?"conflict":"model_unavailable",message:mode==="memory-conflict"?"候选含有需要人工判断的证据冲突":"模型未返回可用的完整结果",action:mode==="memory-conflict"?"先核对来源和当前记忆":"检查模型连接后重试",retryable:mode!=="memory-conflict",committed_events:0,file_name:null,member:null},
+}:null;
 let imported = !["first-use", "empty"].includes(mode);
 let jobs: JobStatus[] = imported ? [completeJob] : [];
 let notePreview: {
@@ -588,6 +593,12 @@ async function invoke(
     service: null,
     service_error: null,
   };
+  if (command === "memory_job_control" && modelRetryJob) {
+    if (mode === "memory-retry-error") throw new Error("本地任务状态暂不可读取，未确认重试结果");
+    if (args.jobId !== modelRetryJob.job_id || args.action !== "retry" || !modelRetryJob.error?.retryable) throw new Error("合成候选不支持此操作");
+    modelRetryJob={...modelRetryJob,state:"queued",error:null,can_resume:false};
+    return modelRetryJob;
+  }
   if (command === "memory_runtime_status")
     return {
       schema: "recallcard.memory-runtime/1",
@@ -618,7 +629,7 @@ async function invoke(
         reported_output_tokens: 0,
         calls_with_unknown_usage: 0,
       },
-      jobs: [],
+      jobs: modelRetryJob ? [modelRetryJob] : [],
       raw_search_available: true,
       budget_note: "token 预留是资源上限，不是准确费用",
     };

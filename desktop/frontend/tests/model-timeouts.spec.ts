@@ -28,3 +28,32 @@ test('慢模型等待可配置、审阅后只提交一次且保留既有预算',
  await page.keyboard.press('Escape');
  expect(await page.evaluate(()=>(window as any).__DEMO_CALLS__.filter((x:any)=>x.command==='configure_memory_model').length)).toBe(1);
 });
+
+test('需要处理的可恢复模型错误有重试入口，连续点击只提交一次',async({page})=>{
+ await page.goto('/demo.html?state=memory-timeout#activity');
+ const job=page.locator('.memory-runtime-job');
+ await expect(job).toContainText('模型未返回可用的完整结果');
+ await expect(job).toContainText('可能再次产生请求费用');
+ await job.getByRole('button',{name:'重试任务',exact:true}).evaluate(button=>{(button as HTMLButtonElement).click();(button as HTMLButtonElement).click();});
+ await expect(job).toContainText('等待整理');
+ const calls=await page.evaluate(()=>(window as any).__DEMO_CALLS__.filter((x:any)=>x.command==='memory_job_control'));
+ expect(calls).toHaveLength(1);
+ expect(calls[0].args).toMatchObject({jobId:'memory_synthetic_retry',action:'retry',scope:'personal',sessionId:'demo_session'});
+ await expect(job).not.toContainText('已完成');
+});
+test('证据冲突候选显示核对提示，不提供盲目重试',async({page})=>{
+ await page.goto('/demo.html?state=memory-conflict#activity');
+ const job=page.locator('.memory-runtime-job');
+ await expect(job).toContainText('先核对来源和当前记忆');
+ await expect(job.getByRole('button',{name:'重试任务',exact:true})).toHaveCount(0);
+ expect(await page.evaluate(()=>(window as any).__DEMO_CALLS__.filter((x:any)=>x.command==='memory_job_control'))).toHaveLength(0);
+});
+
+test('重试调用失败仍显示实际错误并恢复操作入口',async({page})=>{
+ await page.goto('/demo.html?state=memory-retry-error#activity');
+ const job=page.locator('.memory-runtime-job');
+ await job.getByRole('button',{name:'重试任务',exact:true}).click();
+ await expect(job).toContainText('未确认重试结果');
+ await expect(job.getByRole('button',{name:'重试任务',exact:true})).toBeEnabled();
+ expect(await page.evaluate(()=>(window as any).__DEMO_CALLS__.filter((x:any)=>x.command==='memory_job_control'))).toHaveLength(1);
+});

@@ -98,3 +98,8 @@ export const runtimeLabel = (state: string) =>
     needs_input: "需要处理",
     failed: "有任务失败",
   })[state] || "状态待检查";
+
+// 需要用户判断证据或受保护内容的候选不能当作可重发的网络故障。
+export const canRetryMemoryJob = (job: MemoryJob): boolean =>
+  ["failed", "needs_input"].includes(job.state) &&
+  job.can_resume && job.error?.retryable === true;

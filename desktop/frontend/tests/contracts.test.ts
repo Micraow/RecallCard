@@ -161,3 +161,15 @@ test("模型等待时间单独校验连接、读取与整个请求，不改变to
   assert.equal(validMemoryTimeouts({connect_seconds:15,read_seconds:300,operation_seconds:600}),true);
   for(const value of [{connect_seconds:121,read_seconds:300,operation_seconds:600},{connect_seconds:15,read_seconds:301,operation_seconds:300},{connect_seconds:0,read_seconds:30,operation_seconds:30},{connect_seconds:30,read_seconds:30,operation_seconds:1801}]) assert.equal(validMemoryTimeouts(value),false);
 });
+
+import { canRetryMemoryJob } from "../src/service/runtime.ts";
+test("仅可恢复的供应商错误显示重试，不把证据冲突当网络失败", () => {
+  const job:any={state:"needs_input",can_resume:true,error:{retryable:true}};
+  assert.equal(canRetryMemoryJob(job),true);
+  assert.equal(canRetryMemoryJob({...job,state:"failed"}),true);
+  for(const state of ["running","queued","completed","cancelled","paused"])
+    assert.equal(canRetryMemoryJob({...job,state}),false);
+  assert.equal(canRetryMemoryJob({...job,error:{retryable:false}}),false);
+  assert.equal(canRetryMemoryJob({...job,error:null}),false);
+  assert.equal(canRetryMemoryJob({...job,can_resume:false}),false);
+});

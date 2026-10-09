@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ScopedService } from '../service/client';
 import { appError, type AppError } from '../service/contracts';
 import { usePollingResource } from '../service/hooks';
 import type { ModelSetupRequest, ModelSetupSnapshot } from '../service/setup';
 import { dateLabel } from '../service/types';
-import { runtimeLabel, type MemoryJob } from '../service/runtime';
+import { canRetryMemoryJob, runtimeLabel, type MemoryJob } from '../service/runtime';
 import { Badge, Dialog, ErrorNotice, Loading } from './common';
 import { Icon } from './Icon';
 import { ModelSetupDialog } from './ModelSetup';
@@ -60,9 +60,23 @@ export function ModelRuntimePanel({ service, settings = false, refreshToken = 0 
 }
 function MemoryJobRow({ service, job, refresh }: { service: ScopedService; job: MemoryJob; refresh: () => void }) {
   const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
+  const submitting = useRef(false);
   const [error, setError] = useState<AppError | null>(null);
-  const controls = async (action: 'pause' | 'resume' | 'retry' | 'cancel') => { if (busy) return; setBusy(true); setError(null); try { await service.controlMemoryJob(job.job_id, action); refresh(); } catch(reason) { setError(appError(reason)); } finally { setBusy(false); } };
+  useEffect(() => { if (!submitting.current) { inFlight.current = false; setBusy(false); } }, [job]);
+  const controls = async (action: 'pause' | 'resume' | 'retry' | 'cancel') => {
+    if (inFlight.current) return;
+    inFlight.current = true; submitting.current = true; setBusy(true); setError(null);
+    try {
+      await service.controlMemoryJob(job.job_id, action);
+      // 收到新任务状态之前保持禁用，避免成功响应与轮询更新之间重发。
+    } catch (reason) {
+      setError(appError(reason));
+    } finally {
+      submitting.current = false; refresh();
+    }
+  };
   const label = ({queued:'等待整理',running:'正在整理',paused:'已暂停',needs_input:'需要处理',failed:'未完成',completed:'已完成',cancelled:'已取消'})[job.state];
   const phase = ({preflight:'检查资料',parsing:'读取来源',preparing:'准备有界来源',executing:'等待模型响应',validating:'核对证据与版本',committing:'保存记忆',indexing:'更新检索',finished:'处理结束'})[job.phase];
-  return <div className="memory-runtime-job"><div className="job-title"><strong>{phase}</strong><Badge tone={job.state==='needs_input'||job.state==='failed'?'warning':job.state==='completed'?'success':'muted'}>{label}</Badge><span className="row-date">{dateLabel(job.updated_at,true)}</span></div><p>读取 {job.progress.sources_selected} 条来源 · 已保存 {job.progress.memories_committed} 条记忆 · 跳过 {job.progress.sources_skipped} 条来源</p>{job.error && <ErrorNotice error={job.error} />}{error && <ErrorNotice error={error} />}<div className="connection-controls">{job.state==='running'||job.state==='queued'?<button className="button compact" disabled={busy} onClick={()=>void controls('pause')}>暂停任务</button>:job.state==='paused'?<button className="button compact" disabled={busy} onClick={()=>void controls('resume')}>继续任务</button>:job.state==='failed'&&job.can_resume?<button className="button compact" disabled={busy} onClick={()=>void controls('retry')}>重试任务</button>:null}{['needs_input','failed','paused'].includes(job.state)&&<button className="text-button" disabled={busy} onClick={()=>void controls('cancel')}>取消此候选任务</button>}</div></div>;
+  return <div className="memory-runtime-job"><div className="job-title"><strong>{phase}</strong><Badge tone={job.state==='needs_input'||job.state==='failed'?'warning':job.state==='completed'?'success':'muted'}>{label}</Badge><span className="row-date">{dateLabel(job.updated_at,true)}</span></div><p>读取 {job.progress.sources_selected} 条来源 · 已保存 {job.progress.memories_committed} 条记忆 · 跳过 {job.progress.sources_skipped} 条来源</p>{job.error && <ErrorNotice error={job.error} />}{canRetryMemoryJob(job) && <p className="field-hint">修复连接或额度后可重试；重试可能再次产生请求费用，上次预留预算不会自动退还。</p>}{error && <ErrorNotice error={error} />}<div className="connection-controls">{job.state==='running'||job.state==='queued'?<button className="button compact" disabled={busy} onClick={()=>void controls('pause')}>暂停任务</button>:job.state==='paused'?<button className="button compact" disabled={busy} onClick={()=>void controls('resume')}>继续任务</button>:canRetryMemoryJob(job)?<button className="button compact" disabled={busy} onClick={()=>void controls('retry')}>重试任务</button>:null}{['needs_input','failed','paused'].includes(job.state)&&<button className="text-button" disabled={busy} onClick={()=>void controls('cancel')}>取消此候选任务</button>}</div></div>;
 }
