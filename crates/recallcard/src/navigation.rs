@@ -81,10 +81,29 @@ pub struct Description {
     pub text: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Contributor {
+    pub memory_ref: String,
+    pub evidence: String,
+    pub state: String,
+    /// 派生提示本身的出处，不冒充原 Event 的说话人或授权。
+    pub origin: String,
+}
+impl Contributor {
+    fn from_document(doc: &Document) -> Self {
+        Self {
+            memory_ref: doc.reference.clone(),
+            evidence: doc.evidence.clone(),
+            state: doc.state.clone(),
+            origin: "derived_memory_navigation_hint".into(),
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Node {
     pub reference: String,
     pub title: String,
     pub descriptions: Vec<Description>,
+    pub contributors: BTreeMap<String, Contributor>,
     pub keywords: BTreeSet<String>,
     pub aliases: BTreeSet<String>,
     pub children: BTreeSet<String>,
@@ -99,6 +118,7 @@ impl Node {
             reference,
             title,
             descriptions: vec![],
+            contributors: BTreeMap::new(),
             keywords: BTreeSet::new(),
             aliases: BTreeSet::new(),
             children: BTreeSet::new(),
@@ -128,6 +148,11 @@ impl Index {
         let mut named_nodes = BTreeSet::new();
         for doc in &current {
             validate(&doc.navigation)?;
+            nodes
+                .get_mut(ROOT)
+                .unwrap()
+                .contributors
+                .insert(doc.reference.clone(), Contributor::from_document(doc));
             let fallback;
             let hints = if doc.navigation.is_empty() {
                 fallback = if doc.labels.iter().any(|l| l != "bootstrap") {
@@ -163,7 +188,8 @@ impl Index {
                 // 在复制到多个祖先前限制最坏文本体量；不依赖最后一次 JSON 分配才发现超限。
                 let hint_bytes = serde_json::to_vec(hint).map_err(|e| e.to_string())?.len()
                     + doc.entities.iter().map(String::len).sum::<usize>()
-                    + doc.reference.len();
+                    + doc.reference.len()
+                    + 128;
                 copied_text_bytes =
                     copied_text_bytes.saturating_add(hint_bytes.saturating_mul(parts.len() + 1));
                 if copied_text_bytes > MAX_DERIVED_TEXT_BYTES {
@@ -204,6 +230,8 @@ impl Index {
                         node.aliases.insert(hint.title.clone());
                     }
                     node.scopes.insert(doc.scope.clone());
+                    node.contributors
+                        .insert(doc.reference.clone(), Contributor::from_document(doc));
                     // 祖先也携带有来源的描述线索，模型不必猜一个空目录名的含义。
                     node.keywords.extend(hint.keywords.iter().cloned());
                     node.keywords.extend(doc.entities.iter().cloned());
@@ -339,6 +367,16 @@ impl Index {
                     markdown_text(reference),
                     to_root,
                     id
+                ));
+            }
+            text.push_str("\n## 提示贡献者（提示不是已认证事实）\n\n");
+            for contributor in node.contributors.values() {
+                text.push_str(&format!(
+                    "- {}：证据性质 {}；状态 {}；出处 {}\n",
+                    markdown_text(&contributor.memory_ref),
+                    markdown_text(&contributor.evidence),
+                    markdown_text(&contributor.state),
+                    contributor.origin
                 ));
             }
             text.push_str("\n## 有来源的导航简介\n\n");

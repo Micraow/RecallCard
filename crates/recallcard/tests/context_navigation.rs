@@ -155,6 +155,7 @@ fn paging_is_complete_bounded_and_cursors_bind_scope_detail_and_changed_memories
                 .as_array()
                 .unwrap()
                 .iter()
+                .filter(|e| e["kind"] == "view")
                 .map(|e| e["ref"].as_str().unwrap().to_string()),
         );
         if page["next_cursor"].is_null() {
@@ -579,4 +580,48 @@ fn memory_only_navigation_matches_full_authorized_projection() {
     let page = read(&v, "view:nav/_root", Value::Null, 4096).unwrap();
     assert_eq!(page["snapshot"], full.generation);
     assert_eq!(full.active_memory_count, 0);
+}
+
+#[test]
+fn tentative_hint_provenance_survives_overview_detail_and_markdown() {
+    let d = tempfile::tempdir().unwrap();
+    let v = Vault::init(d.path()).unwrap();
+    let event = v.capture(serde_json::from_value(json!({"role":"assistant","scope":"personal","origin":"assistant_output","content":"合成建议尚未确认","source":{"platform":"synthetic","conversation_id":"hint","message_id":"assistant"}})).unwrap()).unwrap();
+    let job = v
+        .dream_export(std::slice::from_ref(&event.id), &[], "personal")
+        .unwrap();
+    let result: DreamResult = serde_json::from_value(json!({"schema":"recallcard.dream-result/1","job_id":job.job_id,"input_hash":job.input_hash,"proposals":[{"operation":"add","scope":"personal","content":"合成建议尚未确认","source_refs":[event.id],"evidence":"assistant_suggestion","navigation":[{"path":"ideas/draft","title":"未确认方案","description":"建议采用方案甲"}]}]})).unwrap();
+    let review = v.dream_review(&result).unwrap();
+    v.dream_apply(&result, &review.result_hash, false).unwrap();
+    let page = read(&v, "view:nav/ideas/draft", Value::Null, 8192).unwrap();
+    assert_eq!(
+        page["results"][0]["description_provenance"]["state"],
+        "tentative"
+    );
+    assert_eq!(
+        page["results"][0]["description_provenance"]["evidence"],
+        "AssistantSuggestion"
+    );
+    let description = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "description")
+        .unwrap();
+    assert_eq!(description["provenance"]["state"], "tentative");
+    assert_eq!(
+        description["provenance"]["origin"],
+        "derived_memory_navigation_hint"
+    );
+    let export = v.export_navigation(vec!["personal".into()]).unwrap();
+    let path = std::path::Path::new(export["index"].as_str().unwrap())
+        .parent()
+        .unwrap()
+        .join("ideas/draft/INDEX.md");
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(
+        text.contains("tentative")
+            && text.contains("AssistantSuggestion")
+            && text.contains("derived_memory_navigation_hint")
+    );
 }

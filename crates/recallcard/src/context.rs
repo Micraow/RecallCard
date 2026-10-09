@@ -306,7 +306,7 @@ impl<'a> Context<'a> {
         docs.sort_by(|a, b| a.reference.cmp(&b.reference));
         Ok(docs)
     }
-    /// 导航/启动背景只需要 Memory。逐条验证 Event 来源权限，但不构造或保留无关正文。
+    /// 导航只需要 Memory。逐条验证 Event 来源权限，但不构造或保留无关正文。
     /// 必须持有当前请求的 Vault 锁；不缓存来源权限或隐藏状态。
     pub(crate) fn memory_documents_locked(&self) -> Result<Vec<Document>> {
         let suppressed = self.vault.suppressed_ids()?;
@@ -372,13 +372,7 @@ impl<'a> Context<'a> {
         Ok(true)
     }
     pub fn bootstrap(&self, args: BootstrapArgs) -> Result<Value> {
-        let _guard = self.vault.read_guard()?;
-        bootstrap_projection(
-            &self.memory_documents_locked()?,
-            &self.access.scopes(),
-            args,
-            Utc::now(),
-        )
+        bootstrap_projection(&self.documents()?, &self.access.scopes(), args, Utc::now())
     }
     pub fn search(&self, args: SearchArgs) -> Result<Value> {
         check_budget(args.budget_tokens)?;

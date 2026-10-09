@@ -8,6 +8,10 @@ fn overview(node: &Node) -> Value {
     json!({"ref":node.reference,"kind":"view","title":short(&node.title,128),
         "description":node.descriptions.first().map(|d|short(&d.text,160)),
         "description_memory_ref":node.descriptions.first().map(|d|&d.memory_ref),
+        "description_provenance":node.descriptions.first().and_then(|d|node.contributors.get(&d.memory_ref)),
+        "contributors":node.contributors.values().take(1).collect::<Vec<_>>(),
+        "contributor_count":node.contributors.len(),
+        "hints_are_not_certified_facts":true,
         "keywords":node.keywords.iter().take(5).map(|s|short(s,48)).collect::<Vec<_>>(),
         "aliases":node.aliases.iter().take(3).map(|s|short(s,48)).collect::<Vec<_>>(),
         "overview_only":true})
@@ -66,8 +70,11 @@ impl Context<'_> {
             }
         }
         // 完整导航提示可逐页读出；overview 不是完整目录元数据。
+        for contributor in node.contributors.values() {
+            entries.push(json!({"kind":"contributor","provenance":contributor}));
+        }
         for description in &node.descriptions {
-            entries.push(json!({"kind":"description","memory_ref":description.memory_ref,"text":description.text}));
+            entries.push(json!({"kind":"description","memory_ref":description.memory_ref,"text":description.text,"provenance":node.contributors.get(&description.memory_ref)}));
         }
         for (kind, values) in [("keyword", &node.keywords), ("alias", &node.aliases)] {
             for text in values {
