@@ -78,6 +78,8 @@ EXTENSION_ID=这里替换为Chrome显示的32字符扩展ID
 
 安装拒绝已有目标文件、安装根及文件的符号链接和 Windows 重解析点；用户明确选定路径中的 `/var` 等父目录别名会先解析为真实安装路径，再把真实绝对路径写入配置和 manifest。文件通过临时文件无覆盖发布，manifest 最后生成。失败时可能留下本次已完成的副本，但不会自动删文件或注册半成品，请检查后改用新的输出目录。Unix 新目录/可执行文件权限为 `0700`、配置/manifest 为 `0600`，启动时拒绝可被组或其他用户写入的配置和安装目录。Windows 不会自动调整或核验 ACL，须由使用者选择自己控制、其他用户不可写的目录。以上检查不抵御已控制同一本机账号的恶意进程。
 
+可选离线语义接入可在生成时加 `--semantic-config`，指向已有可信本机配置；固定路径保存到相邻启动配置，消息不能覆盖。此入口拒绝 `cloud_query`，不继承 query 外发权限，与 IPC 配置互斥。没有配置时 bootstrap 明示 `unavailable`；有配置时仅标记 `configured`，实际 search 验证索引与精确查询缓存后才标记 `available`。详见 [Native 离线语义接入](semantic-search-v0.3.md#浏览器-native-的离线接入)。
+
 配置最多 16 KiB、1–32 个不重复的有效 scope；拒绝未知/重复字段、错误版本、相对 Vault 路径、父目录跳转及不匹配的扩展来源。配置和安装目录应放在代码仓库、同步 Vault 之外，不要提交本机路径与权限配置。Host 的标准输出只有 Native Messaging 二进制分帧，诊断写标准错误。
 
 本机 manifest 的形状可参考 `extension/native-host-manifest.example.json`。`allowed_origins` 必须是准确的 `chrome-extension://<ID>/`，不能用通配符；`path` 指向可执行包装器或 Windows `.exe` 的绝对路径。[Chrome 官方 Native Messaging 文档](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)

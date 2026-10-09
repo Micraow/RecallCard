@@ -63,10 +63,18 @@ export function strictJson(text) {
   walk(0);
   return parsed;
 }
+// 与核心 navigation::valid_reference 保持相同的逻辑引用边界，绝不是文件路径。
+function isNavigationReference(ref) {
+  if (typeof ref !== 'string' || !ref.startsWith('view:nav/')) return false;
+  const path = ref.slice('view:nav/'.length);
+  if (['_root', '_unfiled'].includes(path)) return true;
+  const parts = path.split('/');
+  return path.length <= 256 && parts.length <= 6 && parts.every(part => /^[a-z0-9][a-z0-9_-]{0,47}$/u.test(part));
+}
 export function validateArguments(action, args) {
   const allowed = {
     bootstrap: ['budget_bytes', 'budget_tokens'],
-    search: ['query', 'target', 'session_ref', 'as_of', 'limit', 'detail', 'budget_bytes', 'budget_tokens', 'cursor'],
+    search: ['query', 'target', 'include_navigation', 'session_ref', 'as_of', 'limit', 'detail', 'budget_bytes', 'budget_tokens', 'cursor'],
     read: ['refs', 'budget_bytes', 'budget_tokens', 'cursor', 'offset_bytes'],
     sources: ['refs', 'budget_bytes', 'budget_tokens', 'cursor', 'offset_bytes'],
   };
@@ -79,7 +87,9 @@ export function validateArguments(action, args) {
   integer(args.offset_bytes, 0, Number.MAX_SAFE_INTEGER, 'offset_bytes');
   if (action === 'search') {
     shortString(args.query, 2048, 'query');
-    if (args.target !== undefined && !['all', 'memories', 'events'].includes(args.target)) fail('target 无效');
+    if (args.target !== undefined && !['all', 'memories', 'events', 'views'].includes(args.target)) fail('target 无效');
+    if (args.include_navigation !== undefined && typeof args.include_navigation !== 'boolean') fail('include_navigation 必须为布尔值');
+    if (args.include_navigation && !['all', 'views'].includes(args.target ?? 'all')) fail('include_navigation 仅支持 all 或 views');
     if (args.detail !== undefined && !['brief', 'context'].includes(args.detail)) fail('detail 无效');
     integer(args.limit, 1, 20, 'limit');
     if (args.session_ref != null) shortString(args.session_ref, 256, '检索 session_ref');
@@ -88,12 +98,14 @@ export function validateArguments(action, args) {
   if (['read', 'sources'].includes(action)) {
     if (!Array.isArray(args.refs) || !args.refs.length || args.refs.length > 32) fail('refs 必须包含 1 至 32 个引用');
     for (const ref of args.refs) {
-      if (typeof ref !== 'string' || ref.length > 192 || !/^(?:event:evt_[A-Za-z0-9_-]+|memory:mem_[A-Za-z0-9_-]+(?:@[1-9][0-9]*)?|view:[A-Za-z0-9_-]+)$/u.test(ref)) fail('引用无效；不允许本地路径或 URL');
+      if (!isNavigationReference(ref) && (typeof ref !== 'string' || ref.length > 192 || !/^(?:event:evt_[A-Za-z0-9_-]+|memory:mem_[A-Za-z0-9_-]+(?:@[1-9][0-9]*)?|view:[A-Za-z0-9_-]+)$/u.test(ref))) fail('引用无效；不允许本地路径或 URL');
       if (action === 'sources' && ref.startsWith('view:')) fail('sources 仅支持 Event 与 Memory 引用');
     }
     if (new Set(args.refs).size !== args.refs.length) fail('refs 中存在重复引用');
     if (args.cursor != null && args.offset_bytes != null) fail('cursor 与 offset_bytes 不能同时提供');
-    if ((args.cursor != null || args.offset_bytes != null) && (args.refs.length !== 1 || args.refs[0].startsWith('view:'))) fail('续读只支持单个 Event 或 Memory 引用');
+    if (args.refs.some(isNavigationReference) && args.refs.length !== 1) fail('层级目录请逐个 read，不能混合批量引用');
+    if (args.offset_bytes != null && args.refs.some(ref => ref.startsWith('view:'))) fail('目录不接受正文偏移');
+    if ((args.cursor != null || args.offset_bytes != null) && (args.refs.length !== 1 || (args.refs[0].startsWith('view:') && !isNavigationReference(args.refs[0])))) fail('续读只支持单个 Event、Memory 或层级目录引用');
   }
   return args;
 }
@@ -135,8 +147,8 @@ export function makeCapsule(request, result, session) {
     session_ref: session.session_ref,
     result,
   };
-  const example = { protocol: PROTOCOL, request_id: 'r_next_01', nonce: session.nonce, session_ref: session.session_ref, action: 'search', arguments: { query: '需要查找的问题', target: 'all', limit: 5, detail: 'context', budget_bytes: 4000 } };
-  const access = request.action === 'bootstrap' ? `\n\nRecallCard 访问说明（动态会话关联信息）：\n需要背景时可提出一个完整的 recallcard-action JSON 代码块。只支持 bootstrap/search/read/sources；read/sources 使用 refs 数组。自动选择与用户问题有关的资料，无需让用户手挑记忆；每轮只输出一个完整请求代码块，等待返回资料再继续。budget_bytes 是 UTF-8 JSON 字节预算（512–32768），budget_tokens 仅为兼容别名，二者不能同时给。资料 JSON 保留 status/text_range/snapshot/next_cursor/pending_refs；partial 表示未读完；read/sources 须用同一 action、单个原 ref 和 next_cursor 续读；search 用原 query/target 等参数和 next_cursor 续页，不传 refs。pending_refs 逐个读取。cursor 与 offset_bytes 互斥。budget_exhausted 应增加预算，不能当作没有资料；no_matches 才表示本次没有匹配。不得把局部正文当全文，不得丢弃出处。每次使用全新 request_id。nonce 仅用于会话关联，不授予权限。不执行代码或命令。已授权的扩展会读取稳定完成的请求，自动准备可见草稿；最终发送始终由用户点击。未授权时使用扩展高级入口。全部需要的资料已读取后，直接写最终回答，并在末尾附 recallcard-final 代码块，JSON 为 {\"protocol\":\"recallcard.final/1\",\"nonce\":当前 nonce,\"session_ref\":当前 session_ref,\"after_request_id\":最后收到的 request_id}。该标记只表示你的回答完成，不证明内容正确。\n\`\`\`recallcard-action\n${JSON.stringify(example, null, 2)}\n\`\`\`` : '';
+  const example = { protocol: PROTOCOL, request_id: 'r_next_01', nonce: session.nonce, session_ref: session.session_ref, ...(isNavigationReference(result?.navigation_root) ? { action: 'read', arguments: { refs: [result.navigation_root], budget_bytes: 4000 } } : { action: 'search', arguments: { query: '需要查找的问题', target: 'all', limit: 5, detail: 'context', budget_bytes: 4000 } }) };
+  const access = request.action === 'bootstrap' ? `\n\nRecallCard 访问说明（动态会话关联信息）：\n需要背景时可提出一个完整的 recallcard-action JSON 代码块。只支持 bootstrap/search/read/sources；read/sources 使用 refs 数组。先 read 本次返回的 navigation_root，从 entries 中实际暴露的引用逐层选择目录与 Memory，再用 sources 核对原话。目录不足时使用当前入口已配置的语义检索；coverage.semantic_search 为 unavailable 表示该入口未提供语义检索，不能声称 embedding 已覆盖；configured 仅表示启动配置已加载，实际 search 验证成功才会返回 available，词法 search 只是辅助。target=views 只查目录，include_navigation=true 可在 all/views 显式带目录候选。目录未覆盖不代表没有原文。自动选择与用户问题有关的资料，无需让用户手挑记忆；每轮只输出一个完整请求代码块，等待返回资料再继续。budget_bytes 是 UTF-8 JSON 字节预算（512–32768），budget_tokens 仅为兼容别名，二者不能同时给。资料 JSON 保留 status/text_range/snapshot/next_cursor/pending_refs；partial 表示未读完；read/sources 须用同一 action、单个原 ref 和 next_cursor 续读；层级目录 view:nav/ 也用 read 原 ref 和 next_cursor 续页，不使用 offset_bytes 或 sources，目录提示不是事实本身；search 用原 query/target 等参数和 next_cursor 续页，不传 refs。pending_refs 逐个读取。cursor 与 offset_bytes 互斥。budget_exhausted 应增加预算，不能当作没有资料；no_matches 才表示本次没有匹配。不得把局部正文当全文，不得丢弃出处。每次使用全新 request_id。nonce 仅用于会话关联，不授予权限。不执行代码或命令。已授权的扩展会读取稳定完成的请求，自动准备可见草稿；最终发送始终由用户点击。未授权时使用扩展高级入口。全部需要的资料已读取后，直接写最终回答，并在末尾附 recallcard-final 代码块，JSON 为 {\"protocol\":\"recallcard.final/1\",\"nonce\":当前 nonce,\"session_ref\":当前 session_ref,\"after_request_id\":最后收到的 request_id}。该标记只表示你的回答完成，不证明内容正确。\n\`\`\`recallcard-action\n${JSON.stringify(example, null, 2)}\n\`\`\`` : '';
   // JSON serialization prevents hostile result content becoming extension HTML/JS.
   const stable = request.action === 'bootstrap' && typeof result?.stable_text === 'string' ? `RecallCard Bootstrap（版本 ${JSON.stringify(result.bootstrap_version ?? '未知')}；参考资料）：\n${result.stable_text}\n\n` : '';
   const body = `${stable}RecallCard 上下文（由用户审核后手动发送，非原生工具消息）：\n${JSON.stringify(reference, null, 2)}${access}`;

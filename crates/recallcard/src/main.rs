@@ -149,6 +149,9 @@ enum Command {
         parent_window: Option<u64>,
         #[arg(long)]
         ipc_endpoint: Option<PathBuf>,
+        /// 显式复用现有离线向量配置；不接受 cloud_query 外发批准
+        #[arg(long, conflicts_with = "ipc_endpoint")]
+        semantic_config: Option<PathBuf>,
     },
     /// 生成待人工检查/注册的 Native Messaging 文件
     #[command(hide = true)]
@@ -164,6 +167,9 @@ enum Command {
         output_dir: PathBuf,
         #[arg(long)]
         ipc_endpoint: Option<PathBuf>,
+        /// 显式复用现有离线向量配置；不接受 cloud_query 外发批准
+        #[arg(long, conflicts_with = "ipc_endpoint")]
+        semantic_config: Option<PathBuf>,
     },
     /// 人工管理长期记忆
     Memory {
@@ -564,13 +570,17 @@ fn run(cli: Cli) -> Result<Value> {
             extension_id,
             output_dir,
             ipc_endpoint,
-        } => recallcard::native::prepare_install_from_binary(
+            semantic_config,
+        } => recallcard::native::prepare_install_configured_from_binary(
             &vault,
             scope,
             &extension_id,
             &output_dir,
-            ipc_endpoint,
-            capture_scope,
+            recallcard::native::NativeInstallOptions {
+                ipc_endpoint,
+                capture_scope,
+                semantic_config,
+            },
             &std::env::current_exe().map_err(|e| e.to_string())?,
         ),
         Command::NativeHost { .. } => Err("Native host 必须使用 framed stdio 模式".into()),
@@ -850,6 +860,7 @@ fn main() {
         allowed_extension,
         origin,
         ipc_endpoint,
+        semantic_config,
         ..
     } = &cli.command
     {
@@ -868,6 +879,17 @@ fn main() {
                     allowed_extension,
                     origin,
                     |name, args| client.invoke(name, args),
+                    std::io::stdin().lock(),
+                    std::io::stdout().lock(),
+                );
+            }
+            if let Some(path) = semantic_config {
+                return recallcard::native::serve_native_semantic_io(
+                    &vault,
+                    access,
+                    path,
+                    allowed_extension,
+                    origin,
                     std::io::stdin().lock(),
                     std::io::stdout().lock(),
                 );

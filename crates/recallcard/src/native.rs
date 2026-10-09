@@ -32,6 +32,8 @@ pub struct LauncherConfig {
     ipc_endpoint: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     capture_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    semantic_config: Option<PathBuf>,
 }
 
 /// 纯配置校验，不读取 Vault，不注册浏览器，也不修改文件。
@@ -64,6 +66,12 @@ pub fn parse_launcher_config(bytes: &[u8]) -> Result<LauncherConfig> {
     if let Some(scope) = &config.capture_scope {
         if !access.permits(scope) {
             return Err("浏览器保存范围必须属于已配置的资料范围".into());
+        }
+    }
+    if let Some(path) = &config.semantic_config {
+        validate_semantic_path(path)?;
+        if config.ipc_endpoint.is_some() {
+            return Err("Native 离线语义配置与 IPC 不能同时指定".into());
         }
     }
     Ok(config)
@@ -125,6 +133,15 @@ fn run_launcher(executable: &Path, arguments: Vec<OsString>) -> Result<()> {
     reject_links(&config.vault)?;
     let vault = Vault::open(&config.vault)?;
     let access = Access::new(config.scopes)?;
+    let semantic = config
+        .semantic_config
+        .as_deref()
+        .map(load_native_semantic)
+        .transpose()?;
+    let services = NativeServices {
+        capture_scope: config.capture_scope.as_deref(),
+        semantic: semantic.as_ref(),
+    };
     if let Some(endpoint) = config.ipc_endpoint {
         let client =
             crate::ipc::Client::new(&vault, &access, endpoint, std::time::Duration::from_secs(5))?;
@@ -133,7 +150,7 @@ fn run_launcher(executable: &Path, arguments: Vec<OsString>) -> Result<()> {
                 browser_operation(
                     &vault,
                     &access,
-                    config.capture_scope.as_deref(),
+                    &services,
                     &config.extension_id,
                     (session, installation),
                     name,
@@ -150,10 +167,10 @@ fn run_launcher(executable: &Path, arguments: Vec<OsString>) -> Result<()> {
             std::io::stdout().lock(),
         );
     }
-    serve_native_capture_io(
+    serve_native_configured_io(
         &vault,
         access,
-        config.capture_scope.as_deref(),
+        &services,
         &config.extension_id,
         origin,
         std::io::stdin().lock(),
@@ -291,6 +308,63 @@ pub fn serve_native_io<R: Read, W: Write>(
     serve_native_capture_io(vault, access, None, extension, origin, reader, writer)
 }
 
+#[derive(Default)]
+struct NativeServices<'a> {
+    capture_scope: Option<&'a str>,
+    semantic: Option<&'a crate::semantic::SemanticSearch>,
+}
+impl NativeServices<'_> {
+    fn read(&self, vault: &Vault, access: Access, name: &str, args: Value) -> Result<Value> {
+        let context = match self.semantic {
+            Some(semantic) => Context::with_semantic(vault, access, semantic),
+            None => Context::new(vault, access),
+        };
+        invoke(&context, name, args)
+    }
+}
+fn validate_semantic_path(path: &Path) -> Result<()> {
+    if !path.is_absolute()
+        || path.as_os_str().to_string_lossy().contains('\0')
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err("Native 语义配置必须为固定的绝对路径，不能包含相对跳转".into());
+    }
+    Ok(())
+}
+fn load_native_semantic(path: &Path) -> Result<crate::semantic::SemanticSearch> {
+    validate_semantic_path(path)?;
+    reject_links(path)?;
+    reject_shared_writes(path)?;
+    crate::semantic::SemanticSearch::from_offline_config_file(path)
+}
+
+/// 仅用于可信本机启动；每条浏览器消息仍重新核对连接授权与当前资料。
+pub fn serve_native_semantic_io<R: Read, W: Write>(
+    vault: &Vault,
+    access: Access,
+    semantic_config: &Path,
+    extension: &str,
+    origin: &str,
+    reader: R,
+    writer: W,
+) -> Result<()> {
+    let semantic = load_native_semantic(semantic_config)?;
+    serve_native_configured_io(
+        vault,
+        access,
+        &NativeServices {
+            capture_scope: None,
+            semantic: Some(&semantic),
+        },
+        extension,
+        origin,
+        reader,
+        writer,
+    )
+}
+
 /// capture_scope 只能来自安装者的本机配置，网页和模型不能通过请求启用。
 pub fn serve_native_capture_io<R: Read, W: Write>(
     vault: &Vault,
@@ -301,22 +375,47 @@ pub fn serve_native_capture_io<R: Read, W: Write>(
     reader: R,
     writer: W,
 ) -> Result<()> {
-    if capture_scope.is_some_and(|scope| !access.permits(scope)) {
+    serve_native_configured_io(
+        vault,
+        access,
+        &NativeServices {
+            capture_scope,
+            semantic: None,
+        },
+        extension,
+        origin,
+        reader,
+        writer,
+    )
+}
+
+fn serve_native_configured_io<R: Read, W: Write>(
+    vault: &Vault,
+    access: Access,
+    services: &NativeServices<'_>,
+    extension: &str,
+    origin: &str,
+    reader: R,
+    writer: W,
+) -> Result<()> {
+    if services
+        .capture_scope
+        .is_some_and(|scope| !access.permits(scope))
+    {
         return Err("浏览器保存范围不在本机允许名单中".into());
     }
-    let context = Context::new(vault, access.clone());
     serve_native_bound_service_io(
         |name, args, session, installation| {
             browser_operation(
                 vault,
                 &access,
-                capture_scope,
+                services,
                 extension,
                 (session, installation),
                 name,
                 &args,
             )
-            .unwrap_or_else(|| invoke(&context, name, args))
+            .unwrap_or_else(|| services.read(vault, access.clone(), name, args))
         },
         |session, installation| connection_revision(vault, extension, session, installation),
         extension,
@@ -348,7 +447,7 @@ fn connection_revision(
 fn browser_operation(
     vault: &Vault,
     access: &Access,
-    capture_scope: Option<&str>,
+    services: &NativeServices<'_>,
     extension: &str,
     binding: (&str, Option<&str>),
     name: &str,
@@ -356,6 +455,7 @@ fn browser_operation(
 ) -> Option<Result<Value>> {
     use crate::application::connections;
     let (session, installation) = binding;
+    let capture_scope = services.capture_scope;
     let reading = matches!(name, "bootstrap" | "search" | "read" | "sources");
     // Preserve explicitly installed legacy IPC routing only when no managed
     // browser grant exists. Managed installations never fall back to broad scopes.
@@ -443,11 +543,7 @@ fn browser_operation(
                     .into_iter()
                     .filter(|scope| access.permits(scope))
                     .collect();
-                let result = invoke(
-                    &Context::new(vault, Access::new(scopes)?),
-                    name,
-                    args.clone(),
-                )?;
+                let result = services.read(vault, Access::new(scopes)?, name, args.clone())?;
                 drop(authorization);
                 connections::observe(
                     vault,
@@ -462,7 +558,7 @@ fn browser_operation(
                 .map_err(|e| e.to_string())?;
                 return Ok(result);
             }
-            return invoke(&Context::new(vault, access.clone()), name, args.clone());
+            return services.read(vault, access.clone(), name, args.clone());
         }
         let object = args.as_object().ok_or("会话请求必须为对象")?;
         if name == "automatic_capture" || name == "authorized_read" {
@@ -497,8 +593,9 @@ fn browser_operation(
                     .cloned()
                     .collect();
                 (
-                    invoke(
-                        &Context::new(vault, Access::new(scopes)?),
+                    services.read(
+                        vault,
+                        Access::new(scopes)?,
                         action,
                         object["arguments"].clone(),
                     )?,
@@ -671,11 +768,39 @@ fn serve_native_bound_service_io<R: Read, W: Write>(
                     let hash = crate::hash(&bytes);
                     let revision =
                         freshness(&request.session_ref, request.installation_id.as_deref())?;
-                    if let Some((previous, saved_revision, response)) = cache.get(&key) {
+                    if let Some((previous, saved_revision, response)) = cache.get_mut(&key) {
                         if *saved_revision != revision {
-                            json!({"ok":false,"error":"授权已变化，不能重放旧结果"})
-                        } else if *previous == hash {
+                            // 原结果立即释放，仅保留拒绝重放的占位；恢复授权也不复活旧请求。
+                            *response = json!({"ok":false,"error":"授权已变化，不能重放旧结果"});
                             response.clone()
+                        } else if *previous == hash {
+                            if response["ok"] != true {
+                                response.clone()
+                            } else if matches!(
+                                request.action.as_str(),
+                                "bootstrap" | "search" | "read" | "sources" | "authorized_read"
+                            ) {
+                                // 只读重试仍重新检查事实、抑制与权限；不能借 request_id 重放已撤回正文。
+                                match service(
+                                    &request.action,
+                                    request.arguments.clone().unwrap_or_else(|| json!({})),
+                                    &request.session_ref,
+                                    request.installation_id.as_deref(),
+                                ) {
+                                    Ok(current)
+                                        if response.get("result") == Some(&current)
+                                            && response["ok"] == true =>
+                                    {
+                                        response.clone()
+                                    }
+                                    _ => {
+                                        *response = json!({"ok":false,"error":"资料或授权已变化，请使用新的 request_id 重新读取"});
+                                        response.clone()
+                                    }
+                                }
+                            } else {
+                                response.clone()
+                            }
                         } else {
                             json!({"ok":false,"error":"同一 request_id 对应不同请求"})
                         }
@@ -749,6 +874,47 @@ pub fn prepare_install_from_binary(
     capture_scope: Option<String>,
     source: &Path,
 ) -> Result<Value> {
+    prepare_install_configured_from_binary(
+        vault,
+        scopes,
+        extension,
+        output,
+        NativeInstallOptions {
+            ipc_endpoint,
+            capture_scope,
+            semantic_config: None,
+        },
+        source,
+    )
+}
+
+/// 可信安装入口的固定配置；不会写入浏览器注册或扩展授权。
+#[derive(Default)]
+pub struct NativeInstallOptions {
+    pub ipc_endpoint: Option<PathBuf>,
+    pub capture_scope: Option<String>,
+    pub semantic_config: Option<PathBuf>,
+}
+
+pub fn prepare_install_configured_from_binary(
+    vault: &Vault,
+    scopes: Vec<String>,
+    extension: &str,
+    output: &Path,
+    options: NativeInstallOptions,
+    source: &Path,
+) -> Result<Value> {
+    let NativeInstallOptions {
+        ipc_endpoint,
+        capture_scope,
+        semantic_config,
+    } = options;
+    if let Some(path) = &semantic_config {
+        if ipc_endpoint.is_some() {
+            return Err("Native 离线语义配置与 IPC 不能同时指定".into());
+        }
+        load_native_semantic(path)?;
+    }
     let origin = extension_origin(extension)?;
     let access = Access::new(scopes)?;
     if let Some(endpoint) = &ipc_endpoint {
@@ -799,6 +965,7 @@ pub fn prepare_install_from_binary(
         extension_id: extension.into(),
         ipc_endpoint,
         capture_scope,
+        semantic_config,
     };
     let config_bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
     parse_launcher_config(&config_bytes)?;
@@ -855,7 +1022,7 @@ pub fn serve_native_read_service_io<R: Read, W: Write>(
             browser_operation(
                 vault,
                 &access,
-                None,
+                &NativeServices::default(),
                 extension,
                 (session, installation),
                 name,

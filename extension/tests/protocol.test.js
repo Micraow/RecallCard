@@ -50,3 +50,25 @@ test('上下文标记来源、人工发送状态；不把输出变成 HTML 或�
   assert.match(capsule.text, /synthetic/);
   assert.throws(() => makeCapsule(action(), {text:'私'.repeat(40000)}, fixture.session), /64 KiB/);
 });
+
+test('层级目录引用、导航检索与游标遵循核心边界，不开放路径或配置', () => {
+  const valid = ['view:nav/_root', 'view:nav/_unfiled', 'view:nav/topics/java/lab2', 'view:nav/labels/synthetic', 'view:nav/' + Array(5).fill('a'.repeat(48)).join('/')];
+  for (const ref of valid) {
+    const next = action({ action: 'read', arguments: { refs: [ref], cursor: 'n1:opaque:1', budget_bytes: 4096 } });
+    assert.deepEqual(validateAction(next, fixture.session), next);
+    assert.throws(() => validateAction(action({ action: 'sources', arguments: { refs: [ref] } }), fixture.session));
+    assert.throws(() => validateAction(action({ action: 'read', arguments: { refs: [ref], offset_bytes: 0 } }), fixture.session));
+  }
+  for (const ref of ['view:nav/', 'view:nav/../secret', 'view:nav/topics//java', 'view:nav/%2e%2e', 'view:nav/topics\\java', 'view:nav/UPPER', 'view:nav/_root/child', 'view:nav/' + 'a'.repeat(49), 'view:nav/a/b/c/d/e/f/g', 'view:nav/' + Array(6).fill('a'.repeat(48)).join('/')]) assert.throws(() => validateAction(action({ action: 'read', arguments: { refs: [ref] } }), fixture.session));
+  assert.throws(() => validateAction(action({ action: 'read', arguments: { refs: ['view:nav/_root', 'event:evt_synthetic'] } }), fixture.session));
+  for (const target of ['views', 'all']) validateAction(action({ arguments: { query: '合成目录', target, include_navigation: true } }), fixture.session);
+  for (const arguments_ of [{ query: '合成', target: 'memories', include_navigation: true }, { query: '合成', include_navigation: 'true' }, { query: '合成', semantic_config: '/private/config.json' }, { query: '合成', scope: 'secret' }]) assert.throws(() => validateAction(action({ arguments: arguments_ }), fixture.session));
+});
+
+test('bootstrap示例直接读取当前暴露目录，并如实说明语义不可用与手动发送', () => {
+  const capsule = makeCapsule(action({ action: 'bootstrap', arguments: {} }), { navigation_root: 'view:nav/_root', coverage: { semantic_search: 'unavailable' } }, fixture.session);
+  const requestText = capsule.text.slice(capsule.text.indexOf('```recallcard-action'));
+  const next = parseAction(requestText, fixture.session);
+  assert.equal(next.action, 'read'); assert.deepEqual(next.arguments.refs, ['view:nav/_root']);
+  assert.match(capsule.text, /实际暴露的引用/); assert.match(capsule.text, /unavailable/); assert.match(capsule.text, /最终发送始终由用户点击/);
+});

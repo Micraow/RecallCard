@@ -785,3 +785,392 @@ fn memory_semantics_routes_only_current_authorized_navigation() {
     assert!(!contains(&hidden, "view:nav/_unfiled"));
     assert_eq!(hidden["coverage"]["semantic_search"], "unavailable");
 }
+
+const NATIVE_EXT: &str = "abcdefghijklmnopabcdefghijklmnop";
+const NATIVE_INSTALLATION: &str = "11111111-1111-4111-8111-111111111111";
+
+// 测试使用真实安装副本、分帧 stdio 和生产 Python worker；向量与事实是合成 fixture。
+struct NativeProcess {
+    child: std::process::Child,
+}
+impl NativeProcess {
+    fn start(program: &Path, arguments: &[&str]) -> Self {
+        let child = std::process::Command::new(program)
+            .args(arguments)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        Self { child }
+    }
+    fn request(&mut self, id: &str, action: &str, arguments: Value) -> Value {
+        use std::io::{Read, Write};
+        let body = serde_json::to_vec(&json!({"protocol":"recallcard.action/1","request_id":id,"nonce":"synthetic-native-nonce","session_ref":"chatgpt:semantic-fixture","installation_id":NATIVE_INSTALLATION,"action":action,"arguments":arguments})).unwrap();
+        let input = self.child.stdin.as_mut().unwrap();
+        input.write_all(&(body.len() as u32).to_ne_bytes()).unwrap();
+        input.write_all(&body).unwrap();
+        input.flush().unwrap();
+        let output = self.child.stdout.as_mut().unwrap();
+        let mut prefix = [0; 4];
+        output.read_exact(&mut prefix).unwrap();
+        let mut body = vec![0; u32::from_ne_bytes(prefix) as usize];
+        output.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+    fn read(&mut self, id: &str, action: &str, arguments: Value) -> Value {
+        self.request(
+            id,
+            "authorized_read",
+            json!({"action":action,"arguments":arguments,"permission_revision":1}),
+        )
+    }
+}
+impl Drop for NativeProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn native_grant(fixture: &Fixture) -> recallcard::application::connections::ConnectionEntry {
+    use recallcard::application::connections::{self, ConnectionGrant};
+    connections::configure(
+        &fixture.vault,
+        ConnectionGrant {
+            client_kind: "browser".into(),
+            host_identity: NATIVE_EXT.into(),
+            installation_id: Some(NATIVE_INSTALLATION.into()),
+            platform: "chatgpt".into(),
+            recall_scopes: vec!["personal".into()],
+            capture_scopes: vec!["personal".into()],
+            provider_disclosure: true,
+            auto_capture: true,
+            auto_recall: true,
+        },
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn native_installed_offline_semantics_preserves_live_scope_sources_and_revocation() {
+    let _fixture_guard = fixture_process_guard();
+    let fixture = Fixture::new();
+    let query = "synthetic_nonlexical_native";
+    let config = fixture.config(query);
+    let config_path = fixture.path("semantic.json");
+    write_json(&config_path, &serde_json::to_value(&config).unwrap());
+    let config_path = config_path.canonicalize().unwrap();
+    let entry = native_grant(&fixture);
+    let secret: EventInput = serde_json::from_value(json!({"role":"user","origin":"native","scope":"project:secret","content":"合成私有范围不得泄露","source":{"platform":"manual-web","conversation_id":"secret","message_id":"first"}})).unwrap();
+    let secret_id = fixture.vault.capture(secret).unwrap().id;
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_recallcard"))
+        .arg("--vault")
+        .arg(fixture.vault.root())
+        .args([
+            "native-install",
+            "--extension-id",
+            NATIVE_EXT,
+            "--scope",
+            "personal",
+            "--scope",
+            "project:secret",
+            "--capture-scope",
+            "personal",
+            "--semantic-config",
+        ])
+        .arg(&config_path)
+        .arg("--output-dir")
+        .arg(fixture.path("installed"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let installed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(installed["registered"], false);
+    let launcher_config: Value =
+        serde_json::from_slice(&fs::read(installed["config"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(launcher_config["semantic_config"], json!(config_path));
+    let origin = recallcard::native::extension_origin(NATIVE_EXT).unwrap();
+    let mut host = NativeProcess::start(
+        Path::new(installed["launcher"].as_str().unwrap()),
+        &[&origin],
+    );
+    let boot = host.read("boot", "bootstrap", json!({"budget_bytes":512}));
+    assert_eq!(boot["ok"], true, "{boot}");
+    assert_eq!(boot["result"]["coverage"]["semantic_search"], "configured");
+    assert!(serde_json::to_vec(&boot["result"]).unwrap().len() <= 512);
+    let root = boot["result"]["navigation_root"].as_str().unwrap();
+    let directory = host.read("root", "read", json!({"refs":[root],"budget_bytes":8192}));
+    assert_eq!(directory["ok"], true, "{directory}");
+    let reference = directory["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "view")
+        .unwrap()["ref"]
+        .as_str()
+        .unwrap();
+    let search = host.read(
+        "search",
+        "search",
+        json!({"query":query,"target":"views","budget_bytes":8192}),
+    );
+    assert_eq!(
+        search["result"]["coverage"]["semantic_search"], "available",
+        "{search}"
+    );
+    assert!(contains(&search["result"], reference));
+    let direct = host.request(
+        "direct",
+        "search",
+        json!({"query":query,"target":"views","budget_bytes":8192}),
+    );
+    assert_eq!(
+        direct["result"]["coverage"]["semantic_search"], "available",
+        "{direct}"
+    );
+    let directory = host.read(
+        "leaf",
+        "read",
+        json!({"refs":[reference],"budget_bytes":8192}),
+    );
+    let memory = directory["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "memory")
+        .unwrap()["ref"]
+        .as_str()
+        .unwrap();
+    assert_eq!(memory, fixture.memory_ref);
+    let sources = host.read(
+        "sources",
+        "sources",
+        json!({"refs":[memory],"budget_bytes":8192}),
+    );
+    assert_eq!(sources["ok"], true, "{sources}");
+    assert_eq!(
+        sources["result"]["results"][0]["events"][0]["id"],
+        fixture.source_id
+    );
+    assert_eq!(
+        host.read(
+            "sources",
+            "sources",
+            json!({"refs":[memory],"budget_bytes":8192})
+        ),
+        sources,
+        "未变化的合法同请求重试应返回同一结果"
+    );
+    assert_eq!(
+        host.read(
+            "secret",
+            "read",
+            json!({"refs":[format!("event:{secret_id}")]})
+        )["ok"],
+        false
+    );
+    assert_eq!(
+        host.read(
+            "inject",
+            "search",
+            json!({"query":query,"semantic_config":"/private/forged.json"})
+        )["ok"],
+        false
+    );
+    assert_eq!(
+        host.read("path", "read", json!({"refs":["view:nav/../secret"]}))["ok"],
+        false
+    );
+    let missing = host.read(
+        "uncached",
+        "search",
+        json!({"query":"synthetic_uncached","target":"views"}),
+    );
+    fallback(&missing["result"], "query_not_cached");
+    fixture
+        .vault
+        .suppress(&fixture.source_id, "合成来源撤回".into())
+        .unwrap();
+    assert_eq!(
+        host.read(
+            "sources",
+            "sources",
+            json!({"refs":[memory],"budget_bytes":8192})
+        )["ok"],
+        false,
+        "同一 request_id 也不能重放被抑制的来源"
+    );
+    let hidden = host.read(
+        "hidden",
+        "search",
+        json!({"query":query,"target":"views","budget_bytes":8192}),
+    );
+    assert_eq!(
+        hidden["result"]["coverage"]["semantic_search"],
+        "unavailable"
+    );
+    assert!(!contains(&hidden["result"], reference));
+    fixture.vault.restore(&fixture.source_id).unwrap();
+    assert_eq!(
+        host.read(
+            "sources",
+            "sources",
+            json!({"refs":[memory],"budget_bytes":8192})
+        )["ok"],
+        false,
+        "失效缓存已经清理，恢复来源也不复活旧 request_id"
+    );
+    assert_eq!(
+        host.read(
+            "restored",
+            "sources",
+            json!({"refs":[memory],"budget_bytes":8192})
+        )["ok"],
+        true
+    );
+    recallcard::application::connections::revoke(&fixture.vault, &entry.id, 1).unwrap();
+    assert_eq!(
+        host.read("boot", "bootstrap", json!({"budget_bytes":512}))["ok"],
+        false
+    );
+    assert_eq!(
+        host.read("revoked", "read", json!({"refs":[root]}))["ok"],
+        false
+    );
+}
+
+#[test]
+fn native_semantic_startup_rejects_cloud_approval_and_ipc_combinations() {
+    let _fixture_guard = fixture_process_guard();
+    let fixture = Fixture::new();
+    let mut config = fixture.config("synthetic");
+    config.cloud_query = Some(CloudQueryApproval {
+        endpoint: "https://synthetic.invalid/v1/embeddings".into(),
+        scopes: vec!["personal".into()],
+        key_env: "SYNTHETIC_NOT_A_CREDENTIAL".into(),
+        max_network_calls: 1,
+        max_transmitted_bytes: 32,
+    });
+    let config_path = fixture.path("cloud.json");
+    write_json(&config_path, &serde_json::to_value(config).unwrap());
+    let config_path = config_path.canonicalize().unwrap();
+    assert!(SemanticSearch::from_offline_config_file(&config_path)
+        .err()
+        .unwrap()
+        .contains("cloud_query"));
+    let origin = recallcard::native::extension_origin(NATIVE_EXT).unwrap();
+    for command in ["native-host", "native-install"] {
+        let mut process = std::process::Command::new(env!("CARGO_BIN_EXE_recallcard"));
+        process
+            .arg("--vault")
+            .arg(fixture.vault.root())
+            .arg(command)
+            .args(["--scope", "personal", "--semantic-config"])
+            .arg(&config_path);
+        if command == "native-host" {
+            process.args(["--allowed-extension", NATIVE_EXT, &origin]);
+        } else {
+            process
+                .args(["--extension-id", NATIVE_EXT, "--output-dir"])
+                .arg(fixture.path("blocked-install"));
+        }
+        let output = process.output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cloud_query"));
+        assert!(output.stdout.is_empty());
+        assert!(!fixture.path("blocked-install").exists());
+        let output = process
+            .arg("--ipc-endpoint")
+            .arg(fixture.path("ipc.sock"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn native_host_cli_uses_offline_config_for_managed_reads() {
+    let _fixture_guard = fixture_process_guard();
+    let fixture = Fixture::new();
+    let query = "synthetic_cli_native";
+    let config_path = fixture.path("offline.json");
+    write_json(
+        &config_path,
+        &serde_json::to_value(fixture.config(query)).unwrap(),
+    );
+    let config_path = config_path.canonicalize().unwrap();
+    native_grant(&fixture);
+    let origin = recallcard::native::extension_origin(NATIVE_EXT).unwrap();
+    let mut host = NativeProcess::start(
+        Path::new(env!("CARGO_BIN_EXE_recallcard")),
+        &[
+            "--vault",
+            fixture.vault.root().to_str().unwrap(),
+            "native-host",
+            "--scope",
+            "personal",
+            "--allowed-extension",
+            NATIVE_EXT,
+            &origin,
+            "--semantic-config",
+            config_path.to_str().unwrap(),
+        ],
+    );
+    let result = host.read(
+        "search",
+        "search",
+        json!({"query":query,"target":"views","budget_bytes":8192}),
+    );
+    assert_eq!(
+        result["result"]["coverage"]["semantic_search"], "available",
+        "{result}"
+    );
+    assert!(contains(&result["result"], "view:nav/_unfiled"));
+}
+
+#[test]
+fn native_read_retry_revalidates_narrowed_scope_and_discards_old_payload() {
+    let _fixture_guard = fixture_process_guard();
+    let fixture = Fixture::new();
+    let entry = native_grant(&fixture);
+    let origin = recallcard::native::extension_origin(NATIVE_EXT).unwrap();
+    let mut host = NativeProcess::start(
+        Path::new(env!("CARGO_BIN_EXE_recallcard")),
+        &[
+            "--vault",
+            fixture.vault.root().to_str().unwrap(),
+            "native-host",
+            "--scope",
+            "personal",
+            "--scope",
+            "project:other",
+            "--allowed-extension",
+            NATIVE_EXT,
+            &origin,
+        ],
+    );
+    let arguments = json!({"refs":[fixture.memory_ref],"budget_bytes":8192});
+    let first = host.request("read", "read", arguments.clone());
+    assert_eq!(first["ok"], true);
+    assert_eq!(host.request("read", "read", arguments.clone()), first);
+    let mut narrowed = entry.grant.clone();
+    narrowed.recall_scopes = vec!["project:other".into()];
+    recallcard::application::connections::configure(&fixture.vault, narrowed, Some(1)).unwrap();
+    let denied = host.request("read", "read", arguments.clone());
+    assert_eq!(denied["ok"], false);
+    assert!(denied.get("result").is_none());
+    assert_eq!(
+        host.request("narrowed", "read", arguments.clone())["ok"],
+        false
+    );
+    recallcard::application::connections::configure(&fixture.vault, entry.grant, Some(2)).unwrap();
+    assert_eq!(host.request("read", "read", arguments.clone())["ok"], false);
+    assert_eq!(host.request("new-id", "read", arguments)["ok"], true);
+}

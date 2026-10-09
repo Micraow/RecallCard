@@ -779,3 +779,168 @@ fn revoke_waits_for_existing_shared_reader_and_does_not_lose_the_user_action() {
         true
     );
 }
+
+#[test]
+fn framed_browser_navigation_survives_import_capture_and_dream_writeback() {
+    use recallcard::{dream::DreamResult, import::import_text, Role};
+    let (_directory, v) = setup();
+    let archive = json!([{"id":"synthetic-import","current_node":"u1","mapping":{"u1":{"parent":null,"message":{"id":"u1","author":{"role":"user"},"content":{"content_type":"text","parts":["合成最初选择 Rust"]}}}}}]);
+    assert_eq!(
+        import_text(&v, "chatgpt-export", &archive.to_string(), "personal").unwrap()
+            ["events_added"],
+        1
+    );
+    let original = v.events().unwrap().remove(0);
+    let hints = json!([
+        {"path":"topics/plans","title":"合成计划"},
+        {"path":"workflows/plans"},{"path":"projects/plans"},
+        {"path":"constraints/plans"},{"path":"notes/plans"},{"path":"study/plans"}
+    ]);
+    let job = v
+        .dream_export(std::slice::from_ref(&original.id), &[], "personal")
+        .unwrap();
+    let result: DreamResult = serde_json::from_value(json!({"schema":"recallcard.dream-result/1","job_id":job.job_id,"input_hash":job.input_hash,"proposals":[{"operation":"add","scope":"personal","content":"合成最初选择 Rust","source_refs":[original.id],"evidence":"user_explicit","navigation":hints}]})).unwrap();
+    let review = v.dream_review(&result).unwrap();
+    let receipt = v.dream_apply(&result, &review.result_hash, false).unwrap();
+    let memory_id = receipt.changes[0].id.clone();
+    let entry = connections::configure(&v, grant(), None).unwrap();
+    let read = |name: &str, arguments: Value| {
+        call(
+            &v,
+            "authorized_read",
+            json!({"action":name,"arguments":arguments,"permission_revision":1}),
+        )
+    };
+    let boot = read("bootstrap", json!({"budget_bytes":4096}));
+    assert_eq!(boot["ok"], true);
+    assert_eq!(boot["result"]["coverage"]["semantic_search"], "unavailable");
+    let root = boot["result"]["navigation_root"].as_str().unwrap();
+    let first = read("read", json!({"refs":[root],"budget_bytes":1500}));
+    assert_eq!(first["ok"], true, "{first}");
+    let saved_cursor = first["result"]["next_cursor"].as_str().unwrap().to_owned();
+    let mut cursor = Some(saved_cursor.clone());
+    let mut children = first["result"]["entries"].as_array().unwrap().clone();
+    while let Some(next) = cursor {
+        let page = read(
+            "read",
+            json!({"refs":[root],"cursor":next,"budget_bytes":1500}),
+        );
+        assert_eq!(page["ok"], true, "{page}");
+        children.extend(page["result"]["entries"].as_array().unwrap().clone());
+        cursor = page["result"]["next_cursor"].as_str().map(str::to_owned);
+    }
+    assert_eq!(children.iter().filter(|x| x["kind"] == "view").count(), 6);
+    assert!(children.iter().any(|x| x["ref"] == "view:nav/topics"));
+    assert_eq!(
+        read("read", json!({"refs":[root],"cursor":"n1:forged:1"}))["ok"],
+        false
+    );
+    assert_eq!(
+        read("read", json!({"refs":["view:nav/../private"]}))["ok"],
+        false
+    );
+    assert_eq!(read("sources", json!({"refs":[root]}))["ok"], false);
+    assert_eq!(
+        read(
+            "search",
+            json!({"query":"计划","target":"views","include_navigation":true,"budget_bytes":8192})
+        )["ok"],
+        true
+    );
+    let mut current = conversation();
+    current["messages"][0]["text"] = "合成现在改用 Python".into();
+    assert_eq!(
+        call(
+            &v,
+            "automatic_capture",
+            json!({"conversation":current,"permission_revision":1})
+        )["result"]["events_added"],
+        2
+    );
+    let latest = v
+        .events()
+        .unwrap()
+        .into_iter()
+        .find(|e| e.data.role == Role::User && e.data.content == "合成现在改用 Python")
+        .unwrap();
+    let old_ref = format!("memory:{memory_id}@1");
+    let job = v
+        .dream_export(
+            &[original.id.clone(), latest.id.clone()],
+            std::slice::from_ref(&old_ref),
+            "personal",
+        )
+        .unwrap();
+    let update: DreamResult = serde_json::from_value(json!({"schema":"recallcard.dream-result/1","job_id":job.job_id,"input_hash":job.input_hash,"proposals":[{"operation":"update","target_ref":old_ref,"expected_revision":1,"scope":"personal","content":"合成最初选择 Rust，后来明确改用 Python","source_refs":[original.id,latest.id],"evidence":"user_explicit","navigation":hints}]})).unwrap();
+    let review = v.dream_review(&update).unwrap();
+    v.dream_apply(&update, &review.result_hash, false).unwrap();
+    assert_eq!(
+        read(
+            "read",
+            json!({"refs":[root],"cursor":saved_cursor,"budget_bytes":1500})
+        )["ok"],
+        false
+    );
+    assert_eq!(
+        read("read", json!({"refs":[old_ref],"budget_bytes":8192}))["ok"],
+        false
+    );
+    let topic = read(
+        "read",
+        json!({"refs":["view:nav/topics"],"budget_bytes":8192}),
+    );
+    let leaf = topic["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["kind"] == "view")
+        .unwrap()["ref"]
+        .as_str()
+        .unwrap();
+    let page = read("read", json!({"refs":[leaf],"budget_bytes":8192}));
+    let reference = page["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["kind"] == "memory")
+        .unwrap()["ref"]
+        .as_str()
+        .unwrap();
+    assert_eq!(reference, format!("memory:{memory_id}@2"));
+    let memory = read("read", json!({"refs":[reference],"budget_bytes":8192}));
+    assert_eq!(
+        memory["result"]["results"][0]["record"]["content"],
+        "合成最初选择 Rust，后来明确改用 Python"
+    );
+    let sources = read("sources", json!({"refs":[reference],"budget_bytes":8192}));
+    assert_eq!(
+        sources["result"]["results"][0]["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(sources["result"]["results"][0]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["role"] == "user"));
+    let hidden = import_text(&v, "chatgpt-export", &archive.to_string(), "project:secret").unwrap();
+    assert_eq!(hidden["events_added"], 1);
+    let secret = v
+        .events()
+        .unwrap()
+        .into_iter()
+        .find(|e| e.data.scope == "project:secret")
+        .unwrap();
+    assert_eq!(
+        read("read", json!({"refs":[format!("event:{}",secret.id)]}))["ok"],
+        false
+    );
+    assert_eq!(
+        read("read", json!({"refs":[root],"scope":"project:secret"}))["ok"],
+        false
+    );
+    connections::revoke(&v, &entry.id, 1).unwrap();
+    assert_eq!(read("read", json!({"refs":[reference]}))["ok"], false);
+}

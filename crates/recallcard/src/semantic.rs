@@ -364,6 +364,15 @@ impl SemanticSearch {
             .map_err(|_| "无法读取语义检索启动配置；需使用可信本机普通文件".to_owned())?;
         Self::new(config)
     }
+    /// 浏览器宿主不继承 CLI 的 query 外发批准；即使查询已缓存也拒绝云配置。
+    pub fn from_offline_config_file(path: &Path) -> Result<Self> {
+        let config: SemanticConfig = read_local(path)
+            .map_err(|_| "无法读取离线语义检索启动配置；需使用可信本机普通文件".to_owned())?;
+        if config.cloud_query.is_some() {
+            return Err("Native 语义检索仅接受离线配置，不能继承 cloud_query 外发批准".into());
+        }
+        Self::new(config)
+    }
     pub fn new(config: SemanticConfig) -> Result<Self> {
         if config.python.as_os_str().is_empty()
             || !config.python_path.is_absolute()

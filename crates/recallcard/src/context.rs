@@ -385,7 +385,14 @@ impl<'a> Context<'a> {
         self.memory_documents_locked(&guard)
     }
     pub fn bootstrap(&self, args: BootstrapArgs) -> Result<Value> {
-        bootstrap_projection(&self.documents()?, &self.access.scopes(), args, Utc::now())
+        let mut response =
+            bootstrap_projection(&self.documents()?, &self.access.scopes(), args, Utc::now())?;
+        if self.semantic.is_some() {
+            // configured 比 unavailable 更短，不扩大已验证的序列化预算。
+            // 仅代表启动配置已加载；当前索引和查询缓存仍在 search 时核验。
+            response["coverage"]["semantic_search"] = json!("configured");
+        }
+        Ok(response)
     }
     pub fn search(&self, args: SearchArgs) -> Result<Value> {
         check_budget(args.budget_tokens)?;

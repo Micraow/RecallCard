@@ -255,6 +255,14 @@ fn launcher_config_is_strict_bounded_and_pure() {
         ),
         ("extension_id", json!("https://chatgpt.com/")),
         ("extension_id", json!("ABCDEFGHIJKLMNOPABCDEFGHIJKLMNOP")),
+        ("semantic_config", json!("relative.json")),
+        (
+            "semantic_config",
+            json!(format!(
+                "{}/../semantic.json",
+                std::env::temp_dir().display()
+            )),
+        ),
         ("command", json!("shell")),
         ("api_key", json!("not-a-real-key")),
     ] {

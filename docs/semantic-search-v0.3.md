@@ -46,6 +46,18 @@ recallcard --vault /用户本机/记忆库 daemon \
 
 MCP 的 `--semantic-config` 与 `--ipc-endpoint` 互斥。使用 IPC 时由 daemon 启动配置决定语义能力；客户端不能覆盖它。MCP 会话及 daemon 全生命周期复用同一个 backend，不为每个工具请求重启 Python。
 
+### 浏览器 Native 的离线接入
+
+`native-host` 和 `native-install` 也接受显式 `--semantic-config /用户私有目录/semantic.json`，与 `--ipc-endpoint` 互斥。安装只把这个固定绝对路径记入相邻启动配置，不复制索引、不注册浏览器。路径不能含相对跳转或符号链接；Unix 配置文件不能被组或其他用户写入，父目录仍由本机维护者保护。
+
+Native 只允许现有离线配置：含非空 `cloud_query` 的配置在安装和启动时均拒绝，不能从 CLI 配置继承外发批准。它复用上述受监督 Python worker，查询未缓存时返回 `query_not_cached`，不联网编码、不上传语料。已管理连接的普通读取及 `authorized_read` 都以本机范围与当前 grant 的交集检索；不会因语义配置而扩大范围、跳过撤权或来源抑制。
+
+未配置的 bootstrap 继续返回 `coverage.semantic_search: unavailable`；配置已加载时为 `configured`，只表示启动能力，索引/查询仍待 search 验证。搜索实际融合才返回 `available`；缓存失效等情况返回 `unavailable` 和固定错误码。Bootstrap 的状态不代表全量 Event 已向量化。
+
+目录采用渐进式读取：先读实际返回的 `navigation_root`，从每页 entries 选择已暴露的目录与 Memory，再用 sources 核对原话；`read` 支持层级目录 next_cursor，目录不支持正文 offset 或 sources。`search target=views` 将当前 Memory 的 embedding 命中映射到当前授权目录，不把目录提示或相似度当事实。原始 Events 仍可词法检索。
+
+合成验收覆盖真实 Native 安装副本、二进制分帧、生产 Python 离线 worker、逐层目录/来源读取、未缓存降级、scope/配置注入拒绝、实时来源抑制与撤权。另一个分帧回归覆盖导入、自动捕获、Dream 写回、旧 Memory revision 和目录 cursor 失效。这些是本机协议验收，尚不等于真实浏览器安装、网站 UI、真实模型组织或回答质量验收。
+
 Rust 宿主 API：
 
 ```rust
