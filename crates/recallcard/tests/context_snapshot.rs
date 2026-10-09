@@ -175,3 +175,28 @@ fn source_lists_keep_declared_order_in_paged_and_multi_reference_reads() {
         }
     }
 }
+
+#[test]
+fn duplicate_canonical_id_fails_before_any_snapshot_can_collapse_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let (source, memory) = add(&vault, "duplicate");
+    let event = vault.event(&source).unwrap();
+    let job = vault
+        .dream_export(std::slice::from_ref(&source), &[], "personal")
+        .unwrap();
+    let result = serde_json::from_value(json!({
+        "schema":"recallcard.dream-result/1", "job_id":job.job_id, "input_hash":job.input_hash,
+        "proposals":[{"operation":"add","scope":"personal","content":"合成重复来源检查","source_refs":[source],"evidence":"user_explicit"}]
+    })).unwrap();
+    let mut duplicate = serde_json::to_vec(&event).unwrap();
+    duplicate.push(b'\n');
+    std::fs::write(vault.root().join("events/duplicate.jsonl"), duplicate).unwrap();
+    assert_eq!(vault.event(&source).unwrap_err(), "事件编号重复");
+    assert_eq!(search(&vault).unwrap_err(), "事件编号重复");
+    let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+    for result in reads(&context, &format!("memory:{memory}")) {
+        assert_eq!(result.unwrap_err(), "事件编号重复");
+    }
+    assert_eq!(vault.dream_review(&result).unwrap_err(), "事件编号重复");
+}
