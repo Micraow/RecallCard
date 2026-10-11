@@ -10,7 +10,7 @@ RecallCard 把聊天原文和记忆保存在你自己的本地资料库。导入
 
 当前工作分支是 **0.7 开发候选版**。主分支和旧交付包保留；本页描述此分支已经实现和验证的范围。
 
-2026-10-11 恢复分支已通过真实 Linux 桌面 8 步闭环：原生导入、原话回看、项目授权、同库 MCP、重启与撤权；628 项 Rust 回归通过。GUI 与 CLI 固定同一干净提交 `5b647111`。全部使用合成数据，未执行外部 Agent 或验证真实 ChatGPT 账号。[查看精确验收范围](docs/native-recovery-validation-20261011.md)。下方旧候选包不是这次恢复源码的新构建交付。
+2026-10-11 恢复分支已通过真实 Linux 桌面 8 步闭环：原生导入、原话回看、项目授权、同库 MCP、重启与撤权；628 项 Rust 回归通过。GUI 与 CLI 固定同一干净提交 `5b647111`。全部使用合成数据，未执行外部 Agent 或验证真实 ChatGPT 账号。[查看精确验收范围](docs/native-recovery-validation-20261011.md)。下方恢复候选包另经解压、逐文件校验与真实首屏启动验证。
 
 默认双阶段整理也已通过真实人工 HTTPS 网关验证：新建记忆、候选重导出、用户改口整合、人工审批、目录读回及处理中撤权。使用合成数据，不需要付费模型。[复现与验收边界](docs/manual-staged-gateway.md)。
 
@@ -39,7 +39,9 @@ RecallCard 把聊天原文和记忆保存在你自己的本地资料库。导入
 
 ## 下载与开始
 
-[下载 0.7 Linux 候选包](https://github.com/Micraow/RecallCard/actions/runs/37782757501/artifacts/11553530059)（GitHub 登录后下载外层 ZIP，里面是运行包及校验文件）。同一程序已经通过 [解压包隔离验收](https://github.com/Micraow/RecallCard/actions/runs/37782757501)。这是开发候选版，不是正式发布频道。
+[下载当前 Linux 恢复候选包](https://github.com/Micraow/RecallCard/actions/runs/38126585487/artifacts/11697917224)（GitHub 登录后下载外层 ZIP，再完整解压里面的运行 ZIP）。应用基线 `631d37e`，构建 `66e9b7f`，含本次双阶段修复。Ubuntu 22.04 / x86_64 已完成包内 CLI、运行库、逐文件校验及[实际首屏绘制复验](https://github.com/Micraow/RecallCard/actions/runs/38127468784)。这是开发候选版，未发布正式 release；此包的启动 smoke 与此前完整八步验收范围分别记录。
+
+运行 ZIP 的 SHA256：`d5a8ec940115cae49ffa322c02d7105148f644b55dc390c5b5f58e9663e733cc`。旧 `9603053` 包保留为历史版本，不含恢复修复。
 
 解压整个包后运行 `./运行桌面版.sh`；命令行使用 `./recallcard --help`。需要 Git、GLIBC 2.35+、GTK 3、WebKitGTK 4.1，可选模型工作器需要 Python 3.10+。
 

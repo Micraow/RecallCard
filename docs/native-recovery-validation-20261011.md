@@ -49,3 +49,11 @@ This validates a synthetic desktop/core/MCP workflow. It does not verify a live
 ChatGPT account, execute Codex or Claude Code, exercise a paid model, or establish
 complete recovery of every historical source file. Browser-extension integration
 and real model-backed desktop memory generation need separate acceptance.
+
+## Downloadable recovery candidate
+
+The [Linux candidate package](https://github.com/Micraow/RecallCard/actions/runs/38126585487/artifacts/11697917224) builds commit `66e9b7f08b2e179d062245cca90b99aeb0182e23`, with application code checked unchanged against `631d37e`. It includes the subsequent Python staged-protocol fixes. The package contains public resources and dependency licenses from both CLI and GUI dependency graphs.
+
+Build run 38126585487 passed checksum-safe extraction, packaged CLI, official runtime checks and first-use DOM checks. Its initial screenshots preceded painting; this limitation is retained. [Run 38127468784](https://github.com/Micraow/RecallCard/actions/runs/38127468784) downloaded the identical package, checked its SHA256, waited for painting, asserted nonblank screenshots, and passed. The final screenshot was visually inspected. No second build or full eight-step journey was claimed.
+
+Inner ZIP SHA256: `d5a8ec940115cae49ffa322c02d7105148f644b55dc390c5b5f58e9663e733cc`. This is a Linux x86_64 development candidate, not a formal release or verification of other platforms/accounts.
