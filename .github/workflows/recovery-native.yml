@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   native:
-    if: ${{ !contains(github.event.head_commit.message, '[candidate package]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[candidate package]') && !contains(github.event.head_commit.message, '[package smoke]') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:

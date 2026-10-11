@@ -60,7 +60,15 @@ def main():
             smoke.driver = JourneyDriver(args.application)
             wait_for(lambda: smoke.content('导入聊天记录'), 'extracted package first-use UI')
             smoke.assert_clean()
-            smoke.capture('package-first-use')
+            painted = smoke.driver.observe("return Promise.race([document.fonts.ready.then(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))),new Promise(resolve=>setTimeout(()=>resolve(false),10000))])")
+            assert painted is True, 'first paint did not complete'
+            from PIL import Image
+            def captured_content():
+                smoke.capture('package-first-use')
+                with Image.open(args.artifacts / 'package-first-use-webview.png') as image:
+                    return image.convert('RGB').entropy() > 0.1
+            wait_for(captured_content, 'nonblank rendered package screenshot', timeout=20)
+            receipt['nonblank_rendered_screenshot'] = True
             # Recheck all extracted payload bytes after normal startup.
             assert all(hashlib.sha256((package / name).read_bytes()).hexdigest() == digest for name, digest in sums.items())
             receipt.update(success=True, extracted_checksums_verified=True, first_use_ui_visible=True)

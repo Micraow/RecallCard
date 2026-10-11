@@ -1,0 +1,42 @@
+name: Verify existing recovered package rendering
+on:
+  push:
+    branches: ["recovery/native-20261011"]
+    paths: [".github/workflows/recovery-package-smoke.yml"]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  smoke:
+    if: contains(github.event.head_commit.message, '[package smoke]')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: RecallCard-recovered-linux-x86_64-66e9b7f08b2e179d062245cca90b99aeb0182e23
+          run-id: 38126585487
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/candidate
+      - name: Confirm existing package bytes
+        run: echo 'd5a8ec940115cae49ffa322c02d7105148f644b55dc390c5b5f58e9663e733cc  RecallCard-Desktop-0.7.0-dev-linux-x86_64-66e9b7f.zip' | (cd "$RUNNER_TEMP/candidate" && sha256sum --check)
+      - name: Official runtime and screenshot dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi python3-pil
+      - name: Recheck same package actual rendered startup
+        env:
+          LANG: C.UTF-8
+          GDK_BACKEND: x11
+        run: |
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" /usr/bin/python3 desktop/tests/candidate_package_smoke.py --archive "$RUNNER_TEMP"/candidate/*.zip --artifacts "$RUNNER_TEMP/package-smoke" --commit 66e9b7f08b2e179d062245cca90b99aeb0182e23
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RecallCard-existing-package-render-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/package-smoke/summary.json
+            ${{ runner.temp }}/package-smoke/*.png
+          if-no-files-found: ignore
+          retention-days: 14

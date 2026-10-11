@@ -33,7 +33,7 @@ jobs:
       - name: Official native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi python3-pil
       - name: Build fixed application source
         run: |
           npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
