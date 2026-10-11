@@ -152,12 +152,14 @@ def main():
         gateway = ManualGateway(output / 'model-queue')
         measurements, answers, tool_measurements = [], [], []
         question_index = 0
+        previous_message_count = 0
         for turn in range(args.max_rounds):
             request = {'model': 'manual-operator', 'stream': False, 'messages': messages,
                        'tools': [{'type': 'function', 'function': {'name': name, 'description': tool.get('description', ''), 'parameters': tool['inputSchema']}} for name, tool in advertised.items()]}
             payload = canonical(request)
-            measurements.append({'round': turn + 1, 'question_index': question_index, 'request_bytes': len(payload), 'request_sha256': hashlib.sha256(payload).hexdigest(), 'tool_schema_bytes': len(canonical(request['tools'])), 'message_bytes_by_role': {role: sum(len(canonical(m)) for m in messages if m['role'] == role) for role in ['system', 'user', 'assistant', 'tool']}, 'utf8_bytes_div4_proxy': (len(payload) + 3) // 4, 'conservative_utf8_byte_units': len(payload)})
-            write(output / f'metering-{turn:02}.json', {'method': 'Exact canonical UTF-8 bytes and tool counts; bytes/4 is only a rough proxy, byte units are conservative. No model tokenizer or billed-token measurement. No prompt cache assumed.', 'requests': measurements, 'tools': tool_measurements})
+            measurements.append({'round': turn + 1, 'question_index': question_index, 'request_bytes': len(payload), 'request_sha256': hashlib.sha256(payload).hexdigest(), 'tool_schema_bytes': len(canonical(request['tools'])), 'tool_schema_sha256': hashlib.sha256(canonical(request['tools'])).hexdigest(), 'stable_components_sha256': hashlib.sha256(canonical({'tools': request['tools'], 'system_messages': [m for m in messages if m['role'] == 'system']})).hexdigest(), 'new_message_bytes': sum(len(canonical(m)) for m in messages[previous_message_count:]), 'replayed_message_bytes': sum(len(canonical(m)) for m in messages[:previous_message_count]), 'message_bytes_by_role': {role: sum(len(canonical(m)) for m in messages if m['role'] == role) for role in ['system', 'user', 'assistant', 'tool']}, 'utf8_bytes_div4_proxy': (len(payload) + 3) // 4, 'conservative_utf8_byte_units': len(payload)})
+            previous_message_count = len(messages)
+            write(output / f'metering-{turn:02}.json', {'method': 'Exact canonical UTF-8 bytes and tool counts; bytes/4 is only a rough proxy, byte units are conservative. No model tokenizer or billed-token measurement. Stable components are identified by hash, not evidence of provider prompt-cache hits. No prompt cache assumed.', 'requests': measurements, 'tools': tool_measurements})
             response = gateway(ENDPOINT, payload, SYNTHETIC_KEY, 900, 2 * 1024 * 1024)
             if not 200 <= response.status < 300:
                 raise RuntimeError('Manual provider returned failure status')
