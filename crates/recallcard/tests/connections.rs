@@ -779,3 +779,43 @@ fn revoke_waits_for_existing_shared_reader_and_does_not_lose_the_user_action() {
         true
     );
 }
+
+#[test]
+fn native_capability_receipt_reports_only_effective_grant_scopes() {
+    let (_d, v) = setup();
+    let mut g = grant();
+    g.capture_scopes.clear();
+    g.auto_capture = false;
+    connections::configure(&v, g.clone(), None).unwrap();
+    let probe = || {
+        let body = serde_json::to_vec(&json!({"protocol":"recallcard.action/1","request_id":"synthetic-capability","nonce":"synthetic-nonce-123456","session_ref":"chatgpt:synthetic","installation_id":"11111111-1111-4111-8111-111111111111","action":"connection","arguments":{}})).unwrap();
+        let mut input = (body.len() as u32).to_ne_bytes().to_vec();
+        input.extend(body);
+        let mut output = Vec::new();
+        native::serve_native_capture_io(
+            &v,
+            Access::new(vec!["personal".into(), "project".into()]).unwrap(),
+            Some("project"),
+            EXT,
+            &native::extension_origin(EXT).unwrap(),
+            input.as_slice(),
+            &mut output,
+        )
+        .unwrap();
+        serde_json::from_slice::<Value>(&output[4..]).unwrap()
+    };
+    let response = probe();
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["result"]["read_scopes"], json!(["personal"]));
+    assert_eq!(response["result"]["capture_enabled"], false);
+    assert!(response["result"]["capture_scope"].is_null());
+    g.provider_disclosure = false;
+    g.auto_recall = false;
+    let e = connections::configure(&v, g, Some(1)).unwrap();
+    assert_eq!(probe()["result"]["read_scopes"], json!([]));
+    connections::revoke(&v, &e.id, e.permission_revision).unwrap();
+    let revoked = probe();
+    assert_eq!(revoked["result"]["read_scopes"], json!([]));
+    assert!(revoked["result"]["capture_scope"].is_null());
+    assert_eq!(revoked["result"]["state"], "revoked");
+}

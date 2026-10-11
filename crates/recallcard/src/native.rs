@@ -573,10 +573,27 @@ fn browser_operation(
                 .ok(),
                 None => Some(access.clone()),
             };
+            // Report effective capabilities, never the launcher's broader scope cap.
+            let read_scopes = if disclose_configuration
+                && active.is_none_or(|entry| entry.grant.provider_disclosure)
+            {
+                semantic_access
+                    .as_ref()
+                    .map(Access::scopes)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let capture_enabled = disclose_configuration
+                && capture_scope.is_some()
+                && active.is_none_or(|entry| {
+                    capture_scope
+                        .is_some_and(|scope| entry.grant.capture_scopes.iter().any(|s| s == scope))
+                });
             return Ok(
                 json!({"connection_id":crate::conversation::connection_id(vault,capture_scope.unwrap_or("read-only"))?,
-                "capture_enabled":!setup_required && capture_scope.is_some() && entry.as_ref().is_none_or(|entry|!entry.revoked && capture_scope.is_some_and(|scope|entry.grant.capture_scopes.iter().any(|s|s==scope))),
-                "capture_scope":capture_scope.filter(|_|disclose_configuration),"read_scopes":if disclose_configuration {access.scopes()} else {Vec::<String>::new()},"vault_name":if disclose_configuration {vault.root().file_name().and_then(|s|s.to_str()).unwrap_or("RecallCard")} else {"RecallCard"},"protocol":"recallcard.conversation/1",
+                "capture_enabled":capture_enabled,
+                "capture_scope":capture_scope.filter(|_|capture_enabled),"read_scopes":read_scopes,"vault_name":if disclose_configuration {vault.root().file_name().and_then(|s|s.to_str()).unwrap_or("RecallCard")} else {"RecallCard"},"protocol":"recallcard.conversation/1",
                 "automation":active.map(|entry|json!({"grant_id":entry.id,"permission_revision":entry.permission_revision,"capture":entry.grant.auto_capture && capture_scope.is_some_and(|scope|entry.grant.capture_scopes.iter().any(|s|s==scope)),"recall":entry.grant.auto_recall && entry.grant.provider_disclosure && entry.grant.recall_scopes.iter().any(|scope|access.permits(scope)),"provider_disclosure":entry.grant.provider_disclosure,"platform":entry.grant.platform,"account_identity":"unverified"})),
                 "semantic":if disclose_configuration {semantic_access.as_ref().map(|scope|services.semantic_status(vault,scope))} else {None},
                 "installation_id":installation,"setup_required":setup_required,"state":entry.as_ref().map(|entry|if entry.revoked {"revoked"} else {"reachable"}).unwrap_or("reachable"),"account_identity":"unverified"}),
