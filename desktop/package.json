@@ -8,7 +8,7 @@
     "build": "tsc --noEmit -p frontend/tsconfig.json && vite build --config frontend/vite.config.ts",
     "typecheck": "tsc --noEmit -p frontend/tsconfig.json",
     "test:frontend": "playwright test --config frontend/playwright.config.ts",
-    "test:contracts": "node --experimental-strip-types --test frontend/tests/contracts.test.ts"
+    "test:contracts": "node --experimental-strip-types --test frontend/tests/*.test.ts"
   },
   "dependencies": {
     "react": "19.2.8",
