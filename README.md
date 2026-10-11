@@ -4,11 +4,13 @@
 
 [![版本](https://img.shields.io/badge/版本-0.7.0--dev-635bc2)](docs/desktop-quickstart-v0.7.md)
 [![平台](https://img.shields.io/badge/已验证平台-Linux_x86__64-336799)](docs/desktop-quickstart-v0.7.md#linux-依赖)
-[![原生验收](https://img.shields.io/badge/原生连接验收-通过-26834a)](https://github.com/Micraow/RecallCard/actions/runs/37779993247)
+[![原生验收](https://img.shields.io/badge/原生连接验收-通过-26834a)](https://github.com/Micraow/RecallCard/actions/runs/38123144625)
 
 RecallCard 把聊天原文和记忆保存在你自己的本地资料库。导入官方存档后，既可以查原话，也可以为一个 Agent 项目授权读取背景与出处。CLI、桌面界面和浏览器桥共用同一份正本。
 
 当前工作分支是 **0.7 开发候选版**。主分支和旧交付包保留；本页描述此分支已经实现和验证的范围。
+
+2026-10-11 恢复分支已通过真实 Linux 桌面 8 步闭环：原生导入、原话回看、项目授权、同库 MCP、重启与撤权；628 项 Rust 回归通过。GUI 与 CLI 固定同一干净提交 `5b647111`。全部使用合成数据，未执行外部 Agent 或验证真实 ChatGPT 账号。[查看精确验收范围](docs/native-recovery-validation-20261011.md)。下方旧候选包不是这次恢复源码的新构建交付。
 
 ## 从导入到继续工作
 
