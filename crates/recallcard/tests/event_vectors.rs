@@ -101,6 +101,27 @@ fn offline_vectors_retrieve_nonlexical_chunk_and_expand_actual_source_graph() {
     assert_eq!(result["results"][0]["ref"], anchor);
     assert_eq!(result["results"][0]["text_range"]["start_byte"], start);
     assert_eq!(result["coverage"]["event_vectors"]["status"], "available");
+    let candidate = search(
+        &v,
+        &index,
+        "unrelated-language-question",
+        "session_candidates",
+    );
+    assert_eq!(candidate["results"][0]["read_args"]["offset_bytes"], start);
+    let selected_read = transport::invoke(
+        &Context::new(&v, Access::new(vec!["personal".into()]).unwrap()),
+        "read",
+        candidate["results"][0]["read_args"].clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        selected_read["results"][0]["text_range"]["start_byte"],
+        start
+    );
+    assert!(selected_read["results"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("实质方案在这里"));
     let result = search(&v, &index, "unrelated-language-question", "session_context");
     assert_eq!(result["results"][0]["text_range"]["start_byte"], start);
     let refs: Vec<_> = result["results"]
@@ -687,4 +708,33 @@ fn ranking_policy_binds_cursors_even_when_uncached_query_uses_identical_lexical_
     let mut continuation = args;
     continuation["cursor"] = page["next_cursor"].clone();
     assert!(transport::invoke(&ctx, "search", continuation).is_err());
+}
+
+#[test]
+fn session_candidates_disclose_uncached_fallback_and_do_not_turn_cosine_into_confidence() {
+    let d = tempfile::tempdir().unwrap();
+    let v = Vault::init(&d.path().join("vault")).unwrap();
+    let cache = d.path().join("cache");
+    let text = "beacon original unrelated toy event";
+    let anchor = capture(&v, "a", None, "user", text, "personal");
+    vector(&cache, text, [1., 0., 0.]);
+    vector(&cache, "opposite toy query", [-1., 0., 0.]);
+    import(&v, d.path(), vec![chunk(&anchor, text, 0, text.len())]).unwrap();
+    let index = event_vectors::EventVectorIndex::open(&d.path().join("index.json"))
+        .unwrap()
+        .with_ranking("semantic_only")
+        .unwrap();
+    let page = search(&v, &index, "opposite toy query", "session_candidates");
+    assert_eq!(page["results"][0]["score"], -1.0);
+    assert_eq!(page["results"][0]["score_kind"], "cosine");
+    assert_eq!(page["results"][0]["relevance"], "unassessed");
+    assert_eq!(page["coverage"]["indexed_eligible_event_count"], 1);
+    let page = transport::invoke(&Context::new(&v, Access::new(vec!["personal".into()]).unwrap()).with_event_vectors(Some(&index)), "search", json!({"query":"uncached-missing-identifier","target":"events","detail":"session_candidates","budget_bytes":512})).unwrap();
+    assert_eq!(page["status"], "no_matches");
+    assert_eq!(
+        page["coverage"]["event_vectors"]["error"],
+        "event_query_not_cached_no_network_attempted"
+    );
+    assert_eq!(page["coverage"]["eligible_event_count"], 1);
+    assert!(serde_json::to_vec(&page).unwrap().len() <= 512);
 }

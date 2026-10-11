@@ -15,6 +15,54 @@ byte budget. The CLI supports the same `search --detail session_context` mode.
 `limit` limits session groups per page, not the number of original messages.
 The output is still one of the existing four read-only MCP tools.
 
+## Select a candidate before expanding
+
+For an ambiguous question, first use the explicit `detail: "session_candidates"`
+mode with `target: "events"`, for example:
+
+```json
+{"query":"beacon","target":"events","detail":"session_candidates","limit":3,"budget_bytes":8192}
+```
+
+This lists one original anchor excerpt per distinct scope/session/official-source
+identity before any graph expansion. Excerpts share the byte budget and are at
+most 512 UTF-8 bytes each; a giant first response cannot consume the whole page
+with its text tails. The default `limit` still applies to candidate groups per
+page. `next_cursor` lists further groups, never tails or neighboring messages.
+Exact text ranges, role/time, source identity and the original anchor snapshot
+remain available. A reused session label is not an identity boundary. Oversized
+source labels are explicitly marked truncated; an oversized `session_ref` is
+returned as null with a display-only `session_label`, never as a fabricated
+exact reference. The original `anchor_ref`/`read_args` remain usable, and the
+source-group hash keeps display-label collisions distinct.
+
+Every candidate is marked `relevance: "unassessed"`. `score_kind` describes the
+existing ordering signal (cosine, priority rank, RRF or existing ranking score);
+none is a calibrated probability that a session contains the answer. This mode
+adds no score threshold, gold-trained rule or automatic abstention classifier.
+Candidate availability does not establish relevance. If the short excerpts do
+not connect to the requested subject, stop deep reading and ask for a candidate
+selection or a discriminating detail rather than expanding the first result.
+
+After selecting a candidate, use its `read_args` with the existing `read` tool.
+That request preserves the original anchor, Event filters and `as_of`, and
+starts at the displayed excerpt's UTF-8 offset rather than a long message's
+unrelated prefix. The offset belongs to that Event only: remove it (and any
+text cursor) when following a different neighboring reference. Its 8192-byte
+budget is per call; callers must still enforce their total budget.
+Relevance can remain unresolved even after reading, and an empty filtered or
+lexical result does not prove that the user has no relevant history.
+
+`coverage.eligible_event_count` counts currently authorized Events surviving the
+explicit filters; `retrieved_event_candidates` counts candidates under the
+selected retrieval mode. `indexed_eligible_event_count` is available when the
+local vector scan completed. These counts do not include excluded scopes.
+The vector candidate cap is still disclosed by `coverage.event_vectors`; the
+candidate list is not exhaustive conversation discovery. Missing query vectors
+remain explicitly reported lexical fallback. `status: "complete"` only ends
+this ranked candidate list, not relevance assessment or full-source reading.
+`budget_exhausted` requires a larger same-request budget and a fresh cursor.
+
 ## What is selected
 
 - Rank candidates as before, then group by scope, session and official source

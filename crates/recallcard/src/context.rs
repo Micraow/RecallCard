@@ -8,6 +8,7 @@ mod adjacency;
 mod navigation;
 mod paging;
 mod search;
+mod session_candidates;
 mod session_context;
 pub use paging::ReadPageArgs;
 
@@ -449,13 +450,17 @@ impl<'a> Context<'a> {
             return Err("query/limit 超过上限（4096 字节/1–50条）".into());
         }
         if !["all", "memories", "events", "views"].contains(&args.target.as_str())
-            || !["brief", "context", "session_context"].contains(&args.detail.as_str())
+            || !["brief", "context", "session_context", "session_candidates"]
+                .contains(&args.detail.as_str())
         {
             return Err("未知 target/detail".into());
         }
-        if args.detail == "session_context" && (args.target != "events" || args.include_navigation)
+        if matches!(
+            args.detail.as_str(),
+            "session_context" | "session_candidates"
+        ) && (args.target != "events" || args.include_navigation)
         {
-            return Err("session_context 仅用于 target=events 且 include_navigation=false；Memory 请先 sources 再读取原文".into());
+            return Err("session_context/session_candidates 仅用于 target=events 且 include_navigation=false；Memory 请先 sources 再读取原文".into());
         }
         let event_ranking = self
             .event_vectors
@@ -711,6 +716,16 @@ impl<'a> Context<'a> {
             )
             .as_bytes(),
         );
+        if args.detail == "session_candidates" {
+            return self.session_candidates_response(
+                &ranked,
+                &docs,
+                &args,
+                &binding,
+                &_final_read_guard,
+                event_vector_coverage,
+            );
+        }
         if args.detail == "session_context" {
             return self.session_context_response(
                 &ranked,

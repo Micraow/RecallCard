@@ -1,0 +1,48 @@
+{
+  "schema": "recallcard.public-engineering-validation/1",
+  "scope": "Original synthetic data only; no personal conversations, queries, embeddings or private evaluation results.",
+  "feature": "Explicit bounded candidate-session selection before constrained source reading through existing MCP tools.",
+  "focused_suites": [
+    "session_candidates",
+    "event_vectors",
+    "session_context",
+    "context_progressive"
+  ],
+  "focused_passed": 47,
+  "focused_failed": 0,
+  "new_toy_regressions": 10,
+  "covered_contracts": [
+    "One exact UTF-8 excerpt per distinct authorized source/session; long top-ranked text cannot exhaust the entire candidate screen.",
+    "Scores are ordering signals, never calibrated confidence; negative cosine remains explicitly unassessed.",
+    "Source account/platform/conversation/scope boundaries and Event filters/as_of apply before candidate counts and output.",
+    "Cursor pages groups without repetition and binds query, filters, source snapshots, ranking, access, mode, limit and byte budget.",
+    "Tiny budgets distinguish budget_exhausted from no_matches and retain vector-availability diagnostics.",
+    "Missing query vectors remain explicit lexical fallback without provider requests.",
+    "Oversized source/session labels are bounded and visibly marked without inventing exact references.",
+    "Selection read_args preserves anchor, filters, as_of and the exact lexical or semantic excerpt offset.",
+    "Real stdio MCP exposes bounded choices and reads an explicitly selected synthetic anchor."
+  ],
+  "limitations": [
+    "Candidate presence does not prove relevance or select the correct session.",
+    "No automatic relevance classifier, confidence threshold or gold-specific ranking change was added.",
+    "A candidate cursor does not read text tails or expand graph neighbors.",
+    "Per-call UTF-8 byte caps do not cap a full workflow; callers must limit total calls and cumulative output.",
+    "No tokenizer tokens, billing, model answer quality, desktop IPC or blind semantic accuracy were measured."
+  ],
+  "gates": {
+    "fmt": "passed",
+    "clippy_all_targets": "passed with -D warnings",
+    "full_suite": {
+      "passed": 672,
+      "failed": 14,
+      "existing_environment_blockers": {
+        "ipc": 11,
+        "ipc_bridges": 3
+      },
+      "reason": "Unix socket binding is denied by this environment: Operation not permitted. These failures existed before this feature."
+    },
+    "release_build": "passed offline, single-job, optimized without LTO",
+    "independent_review": "Source-label size and late-excerpt read-offset findings fixed with regressions; source-only recheck found no remaining concrete blocker."
+  },
+  "evaluated_binary_sha256": "783af2599fa01232ba23f6b6904833e454af107a300effbfc14babedf275108b"
+}

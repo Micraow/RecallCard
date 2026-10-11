@@ -7,7 +7,7 @@ const MAX_HOPS: usize = 3;
 const MAX_MESSAGES: usize = 12;
 const TEXT_SLICE_BYTES: usize = 1024;
 
-fn graph_key(event: &Event) -> String {
+pub(super) fn graph_key(event: &Event) -> String {
     json!([
         event.data.scope,
         event.data.session_key(),
