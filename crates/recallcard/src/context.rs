@@ -786,7 +786,7 @@ pub(crate) fn bootstrap_projection(
         }
     }
     let directory = if labels.is_empty() {
-        "暂无记忆分类；原文仍可用 search 检索".to_string()
+        "未设置旧标签分类；请先 read 层级目录，未整理原文可 search".to_string()
     } else {
         labels.into_iter().collect::<Vec<_>>().join("、")
     };

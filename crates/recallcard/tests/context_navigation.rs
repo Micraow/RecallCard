@@ -42,6 +42,10 @@ fn dream_to_generated_root_to_topic_to_memory_to_sources_is_complete_without_a_m
     assert!(v.root().join("generated/navigation.json").is_file());
     let bootstrap = context(&v).bootstrap(Default::default()).unwrap();
     assert_eq!(bootstrap["navigation_root"], "view:nav/_root");
+    assert!(!bootstrap["stable_text"]
+        .as_str()
+        .unwrap()
+        .contains("暂无记忆分类"));
     for (r, next) in [
         ("view:nav/_root", "view:nav/topics"),
         ("view:nav/topics", "view:nav/topics/networking"),
@@ -624,4 +628,41 @@ fn tentative_hint_provenance_survives_overview_detail_and_markdown() {
             && text.contains("AssistantSuggestion")
             && text.contains("derived_memory_navigation_hint")
     );
+}
+
+#[test]
+fn advertised_navigation_read_constraint_prevents_invalid_directory_batches() {
+    let definitions = recallcard::transport::tool_definitions();
+    let read = definitions
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "read")
+        .unwrap();
+    let description = read["description"].as_str().unwrap();
+    assert!(description.contains("view:nav/ 每次只允许一个引用"));
+    assert!(description.contains("多个独立 read 调用"));
+    assert!(description.contains("detail=compact 或 include_adjacent=true 时 refs 必须只有一个"));
+    let sources = definitions
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "sources")
+        .unwrap();
+    assert!(sources["description"]
+        .as_str()
+        .unwrap()
+        .contains("compact 始终返回来源引用，不含正文"));
+    let bootstrap = definitions
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "bootstrap")
+        .unwrap();
+    assert!(bootstrap["description"]
+        .as_str()
+        .unwrap()
+        .contains("目录不足、未整理或找不到时再 search"));
+    // Ordinary record batches remain legal in the shared schema.
+    assert_eq!(read["inputSchema"]["properties"]["refs"]["maxItems"], 32);
 }
