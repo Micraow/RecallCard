@@ -134,6 +134,51 @@ client context are additional bytes; clients needing a token ceiling must use
 their actual model tokenizer. Cursors must be replayed with the same search
 mode, filters, access scope, limit and budget.
 
+## Explicit event ranking policies
+
+`--event-vector-ranking hybrid|semantic_only|semantic_first` is fixed by the
+operator at CLI/MCP startup, not supplied by an untrusted MCP caller. The default
+remains `hybrid` so existing configurations do not silently change ranking.
+Both other policies require each search to specify `target: "events"`; they do
+not reinterpret the separate Memory/navigation search channels.
+
+- `hybrid`: existing equal-weight lexical/vector RRF with `k=60`.
+- `semantic_only`: rank the up-to-256 eligible vector candidates by cosine
+  similarity. No lexical-only extras are appended. This is a clear diagnostic
+  comparison, not a claim that vector similarity proves relevance or truth.
+- `semantic_first`: retain the same vector order, then append lexical-only
+  candidates. Lexical overlap cannot add a vote that overtakes a vector hit.
+  Returned scores are priority ranks, not cosine values or comparable BM25 units.
+
+For example, start the explicit semantic-primary reading path with:
+
+```sh
+recallcard --vault /absolute/private/vault mcp --scope personal \
+  --event-vector-index /absolute/private/event-vector-index.json \
+  --event-vector-ranking semantic_first
+```
+
+An operator can compare `semantic_only` against `hybrid` without re-embedding or
+changing the source pack. `coverage.event_vectors.ranking_policy` and
+`score_kind` identify the selected contract. If vectors are missing/invalid,
+all policies retain visible existing lexical fallback rather than claiming
+semantic success; the reported score kind identifies fallback. Cursors bind the
+policy even when two policies happen to produce identical rankings.
+
+Rare identifiers may deserve literal priority. A caller must explicitly request
+the existing `lexical_match: "identifier_prefix"` override with `semantic_first`
+or `hybrid`: exact identifier hits then precede semantic candidates. Strict
+`semantic_only` rejects that contradictory override. No query topic, question ID,
+gold label or model-specific threshold changes the policy automatically.
+
+None of these policies detects negation, resolves conflicting speakers or
+validates an answer. Independent synthetic tests show that semantically similar
+opposite instructions can still rank highly: the original negation and role are
+preserved, and explicit role/scope filters must be respected. Known-question
+regressions can compare policies, but unseen sessions/questions are required for
+claims about generalization. Production MCP evidence coverage and generated
+answer correctness must be measured separately.
+
 ## New queries require new query vectors
 
 An imported source corpus does **not** provide arbitrary-query semantic search.

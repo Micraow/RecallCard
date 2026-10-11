@@ -238,6 +238,22 @@ fn permissions_role_filters_and_suppression_apply_before_loading_candidate_vecto
     )
     .unwrap();
     assert!(result["results"].as_array().unwrap().is_empty());
+    for policy in ["semantic_only", "semantic_first"] {
+        let index = event_vectors::EventVectorIndex::open(&d.path().join("index.json"))
+            .unwrap()
+            .with_ranking(policy)
+            .unwrap();
+        let denied = Context::new(&v, Access::new(vec!["project:other-user".into()]).unwrap())
+            .with_event_vectors(Some(&index));
+        let result = transport::invoke(
+            &denied,
+            "search",
+            json!({"query":"opaque-query","target":"events","budget_bytes":8192}),
+        )
+        .unwrap();
+        assert!(result["results"].as_array().unwrap().is_empty());
+        assert_eq!(result["coverage"]["event_vectors"]["eligible_events"], 0);
+    }
 }
 
 #[test]
@@ -486,4 +502,189 @@ fn pack_out_of_bounds_size_hash_and_corruption_fail_closed() {
             }
         }
     }
+}
+
+#[test]
+fn explicit_semantic_policies_preserve_paraphrase_rank_without_rrf_agreement_bonus() {
+    let d = tempfile::tempdir().unwrap();
+    let v = Vault::init(&d.path().join("vault")).unwrap();
+    let cache = d.path().join("cache");
+    let paraphrase = capture(&v, "a", None, "user", "coastal bearings", "personal");
+    let lexical = capture(&v, "b", None, "user", "telescope catalog", "personal");
+    let extra = capture(&v, "c", None, "user", "telescope backup", "personal");
+    vector(&cache, "coastal bearings", [1., 0., 0.]);
+    vector(&cache, "telescope catalog", [0.6, 0.8, 0.]);
+    vector(&cache, "telescope", [1., 0., 0.]);
+    import(
+        &v,
+        d.path(),
+        vec![
+            chunk(&paraphrase, "coastal bearings", 0, 16),
+            chunk(&lexical, "telescope catalog", 0, 17),
+        ],
+    )
+    .unwrap();
+    for policy in ["hybrid", "semantic_only", "semantic_first"] {
+        let index = event_vectors::EventVectorIndex::open(&d.path().join("index.json"))
+            .unwrap()
+            .with_ranking(policy)
+            .unwrap();
+        let page = search(&v, &index, "telescope", "context");
+        assert_eq!(page["coverage"]["event_vectors"]["ranking_policy"], policy);
+        if policy == "hybrid" {
+            assert_eq!(page["results"][0]["ref"], lexical);
+        } else {
+            assert_eq!(page["results"][0]["ref"], paraphrase);
+            assert_eq!(page["results"][0]["score"], 1.0);
+        }
+        let extras = page["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["ref"] == extra);
+        assert_eq!(extras, policy != "semantic_only");
+    }
+}
+
+#[test]
+fn rare_identifier_priority_requires_explicit_override_with_semantic_first() {
+    let d = tempfile::tempdir().unwrap();
+    let v = Vault::init(&d.path().join("vault")).unwrap();
+    let cache = d.path().join("cache");
+    let semantic = capture(&v, "a", None, "user", "museum index", "personal");
+    let literal = capture(
+        &v,
+        "b",
+        None,
+        "user",
+        "ZXQ-714 maintenance receipt",
+        "personal",
+    );
+    vector(&cache, "museum index", [1., 0., 0.]);
+    vector(&cache, "ZXQ-714", [1., 0., 0.]);
+    import(&v, d.path(), vec![chunk(&semantic, "museum index", 0, 12)]).unwrap();
+    let index = event_vectors::EventVectorIndex::open(&d.path().join("index.json"))
+        .unwrap()
+        .with_ranking("semantic_first")
+        .unwrap();
+    assert_eq!(
+        search(&v, &index, "ZXQ-714", "context")["results"][0]["ref"],
+        semantic
+    );
+    let ctx = Context::new(&v, Access::new(vec!["personal".into()]).unwrap())
+        .with_event_vectors(Some(&index));
+    let page = transport::invoke(&ctx, "search", json!({"query":"ZXQ-714","target":"events","lexical_match":"identifier_prefix","budget_bytes":8192})).unwrap();
+    assert_eq!(page["results"][0]["ref"], literal);
+    assert_eq!(
+        page["coverage"]["event_vectors"]["lexical_identifier_override"],
+        true
+    );
+    let index = index.with_ranking("semantic_only").unwrap();
+    let ctx = Context::new(&v, Access::new(vec!["personal".into()]).unwrap())
+        .with_event_vectors(Some(&index));
+    assert!(transport::invoke(
+        &ctx,
+        "search",
+        json!({"query":"ZXQ-714","target":"events","lexical_match":"identifier_prefix"})
+    )
+    .is_err());
+    assert!(transport::invoke(&ctx, "search", json!({"query":"ZXQ-714","target":"all"})).is_err());
+}
+
+#[test]
+fn semantic_policy_preserves_negation_and_explicit_user_role_without_claiming_entailment() {
+    let d = tempfile::tempdir().unwrap();
+    let v = Vault::init(&d.path().join("vault")).unwrap();
+    let cache = d.path().join("cache");
+    let user = capture(
+        &v,
+        "a",
+        None,
+        "user",
+        "Do not publish the draft.",
+        "personal",
+    );
+    let assistant = capture(
+        &v,
+        "b",
+        Some("a"),
+        "assistant",
+        "Publish the draft.",
+        "personal",
+    );
+    vector(&cache, "Do not publish the draft.", [0.8, 0.6, 0.]);
+    vector(&cache, "Publish the draft.", [1., 0., 0.]);
+    vector(&cache, "deployment permission", [1., 0., 0.]);
+    import(
+        &v,
+        d.path(),
+        vec![
+            chunk(&user, "Do not publish the draft.", 0, 25),
+            chunk(&assistant, "Publish the draft.", 0, 18),
+        ],
+    )
+    .unwrap();
+    for policy in ["semantic_only", "semantic_first"] {
+        let index = event_vectors::EventVectorIndex::open(&d.path().join("index.json"))
+            .unwrap()
+            .with_ranking(policy)
+            .unwrap();
+        assert_eq!(
+            search(&v, &index, "deployment permission", "context")["results"][0]["ref"],
+            assistant
+        );
+        let ctx = Context::new(&v, Access::new(vec!["personal".into()]).unwrap())
+            .with_event_vectors(Some(&index));
+        let page=transport::invoke(&ctx,"search",json!({"query":"deployment permission","target":"events","detail":"session_context","event_filter":{"role":"user"},"budget_bytes":8192})).unwrap();
+        assert_eq!(page["results"][0]["ref"], user);
+        assert_eq!(page["results"][0]["role"], "user");
+        assert_eq!(page["results"][0]["text"], "Do not publish the draft.");
+        assert_eq!(page["coverage"]["event_vectors"]["eligible_events"], 1);
+    }
+}
+
+#[test]
+fn ranking_policy_binds_cursors_even_when_uncached_query_uses_identical_lexical_fallback() {
+    let d = tempfile::tempdir().unwrap();
+    let v = Vault::init(&d.path().join("vault")).unwrap();
+    let cache = d.path().join("cache");
+    let first = capture(&v, "a", None, "user", "metal bronze", "personal");
+    let second = capture(&v, "b", None, "user", "metal tin", "personal");
+    vector(&cache, "metal bronze", [1., 0., 0.]);
+    vector(&cache, "metal tin", [0., 1., 0.]);
+    import(
+        &v,
+        d.path(),
+        vec![
+            chunk(&first, "metal bronze", 0, 12),
+            chunk(&second, "metal tin", 0, 9),
+        ],
+    )
+    .unwrap();
+    let index = event_vectors::EventVectorIndex::open(&d.path().join("index.json")).unwrap();
+    let args = json!({"query":"metal","target":"events","limit":1,"budget_bytes":4096});
+    let page = transport::invoke(
+        &Context::new(&v, Access::new(vec!["personal".into()]).unwrap())
+            .with_event_vectors(Some(&index)),
+        "search",
+        args.clone(),
+    )
+    .unwrap();
+    assert!(page["next_cursor"].is_string());
+    let index = index.with_ranking("semantic_only").unwrap();
+    let ctx = Context::new(&v, Access::new(vec!["personal".into()]).unwrap())
+        .with_event_vectors(Some(&index));
+    let next = transport::invoke(&ctx, "search", args.clone()).unwrap();
+    assert_eq!(page["results"], next["results"]);
+    assert_eq!(
+        next["coverage"]["event_vectors"]["ranking_policy"],
+        "semantic_only"
+    );
+    assert_eq!(
+        next["coverage"]["event_vectors"]["error"],
+        "event_query_not_cached_no_network_attempted"
+    );
+    let mut continuation = args;
+    continuation["cursor"] = page["next_cursor"].clone();
+    assert!(transport::invoke(&ctx, "search", continuation).is_err());
 }

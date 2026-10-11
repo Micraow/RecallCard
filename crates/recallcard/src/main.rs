@@ -295,6 +295,9 @@ enum Command {
         /// 独立的已导入query向量缓存；仅本地读取，不改原语料缓存
         #[arg(long, requires = "event_vector_index")]
         event_query_cache: Option<PathBuf>,
+        /// 显式Event排序策略；非hybrid策略要求search target=events
+        #[arg(long, requires = "event_vector_index", value_parser = ["hybrid", "semantic_only", "semantic_first"])]
+        event_vector_ranking: Option<String>,
         /// 由本机维护者固定的可选语义 worker 配置；默认不启用
         #[arg(long)]
         semantic_config: Option<PathBuf>,
@@ -335,6 +338,9 @@ enum Command {
         /// 独立的已导入query向量缓存；仅本地读取，不改原语料缓存
         #[arg(long, requires = "event_vector_index")]
         event_query_cache: Option<PathBuf>,
+        /// 显式Event排序策略；非hybrid策略要求search target=events
+        #[arg(long, requires = "event_vector_index", value_parser = ["hybrid", "semantic_only", "semantic_first"])]
+        event_vector_ranking: Option<String>,
     },
     /// 启动固定资料库和范围的只读本机 IPC 服务
     #[command(hide = true)]
@@ -804,6 +810,7 @@ fn run(cli: Cli) -> Result<Value> {
             semantic_config,
             event_vector_index,
             event_query_cache,
+            event_vector_ranking,
         } => {
             let semantic = semantic_config
                 .as_ref()
@@ -818,7 +825,8 @@ fn run(cli: Cli) -> Result<Value> {
                 .as_deref()
                 .map(|path| {
                     recallcard::event_vectors::EventVectorIndex::open(path)?
-                        .with_query_cache(event_query_cache.as_deref())
+                        .with_query_cache(event_query_cache.as_deref())?
+                        .with_ranking(event_vector_ranking.as_deref().unwrap_or("hybrid"))
                 })
                 .transpose()?;
             context
@@ -992,6 +1000,7 @@ fn main() {
         semantic_config,
         event_vector_index,
         event_query_cache,
+        event_vector_ranking,
         connection_id,
     } = &cli.command
     {
@@ -1001,7 +1010,8 @@ fn main() {
                 .as_deref()
                 .map(|path| {
                     recallcard::event_vectors::EventVectorIndex::open(path)?
-                        .with_query_cache(event_query_cache.as_deref())
+                        .with_query_cache(event_query_cache.as_deref())?
+                        .with_ranking(event_vector_ranking.as_deref().unwrap_or("hybrid"))
                 })
                 .transpose()?;
             if let Some(id) = connection_id {

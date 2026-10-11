@@ -242,7 +242,7 @@ fn compact_status(value: &mut Value) {
     let coverage = &value["coverage"];
     let mut compact = json!({"event_search":coverage["event_search"],"semantic_search":coverage["semantic_search"],"scope_filtered":true});
     if let Some(vectors) = coverage.get("event_vectors") {
-        compact["event_vectors"] = json!({"status":vectors["status"],"error":vectors["error"],"query_encoding":"existing_cache_only","network_requests":0});
+        compact["event_vectors"] = json!({"status":vectors["status"],"error":vectors["error"],"ranking_policy":vectors["ranking_policy"],"query_encoding":"existing_cache_only","network_requests":0});
     }
     if let Some(filter) = coverage.get("event_filter") {
         compact["event_filter"] = filter.clone();

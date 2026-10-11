@@ -1,0 +1,41 @@
+{
+  "schema": "recallcard.validation/1",
+  "feature": "explicit-event-vector-ranking-policies",
+  "base_public_commit": "4672f2e0e7c0eaa3fa11d31ad78d7bac7504f537",
+  "public_data": "Independent toy text and hand-constructed 3-D vectors only. No real corpus, questions, vectors or personal evaluation outputs.",
+  "contract": {
+    "default": "hybrid (unchanged equal-weight RRF k=60)",
+    "semantic_only": "Explicit startup policy; target=events only; up to256 vector candidates sorted by cosine, no lexical-only extras.",
+    "semantic_first": "Explicit startup policy; target=events only; semantic order first, lexical-only extras afterward; priority-rank scores, not cosine.",
+    "identifier_override": "Explicit existing identifier_prefix override can prioritize exact identifier matches in hybrid/semantic_first; semantic_only rejects the contradictory override.",
+    "fallback": "Unavailable vectors preserve visible existing fallback ranking; score_kind does not falsely claim cosine.",
+    "cursor": "Binds policy even when fallback rankings coincide.",
+    "scope": "No per-query policy override, new provider request, learned threshold, question-specific tuning, Memory/navigation mode change or permission expansion."
+  },
+  "checks": {
+    "vector_integration_tests_passed": 15,
+    "session_context_tests_passed": 13,
+    "full_rust_passed": 653,
+    "full_rust_failed": 14,
+    "full_rust_failure_reason": "Pre-existing Unix-socket bind Operation not permitted in ipc/ipc_bridges within this execution environment.",
+    "clippy_all_targets_deny_warnings": "passed",
+    "cargo_fmt_check": "passed",
+    "release_build": "passed; opt3 with no LTO/debug info",
+    "remote_ci": "intentionally skipped; not a CI pass"
+  },
+  "new_synthetic_cases": [
+    "Semantic paraphrase winner loses under equal-weight RRF but stays first under both explicit semantic policies.",
+    "Lexical-only extras appear after vector candidates under semantic_first and are absent under semantic_only.",
+    "Rare identifier gets literal priority only with explicit identifier override.",
+    "Opposite/negated instructions retain exact text and speaker roles; explicit user-role filter excludes assistant evidence. Similarity alone is not entailment.",
+    "Foreign access scopes still yield no event candidates under both new policies.",
+    "Cursors cannot cross policies even when an uncached query falls back to identical lexical results."
+  ],
+  "limits": [
+    "Known-question regression is not blind validation or answer-quality measurement.",
+    "No unseen-session generalization claim; independent unseen questions and matching query vectors remain necessary.",
+    "Default remains hybrid for compatibility; explicit semantic_first is a scoped operator choice, not an inferred query-topic heuristic.",
+    "Queries absent from supplied caches still lack semantic vectors; no automatic provider integration.",
+    "UTF-8 result bytes and MCP framing bytes must not be labeled model tokens."
+  ]
+}

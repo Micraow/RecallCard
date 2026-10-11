@@ -448,6 +448,16 @@ impl<'a> Context<'a> {
         {
             return Err("session_context 仅用于 target=events 且 include_navigation=false；Memory 请先 sources 再读取原文".into());
         }
+        let event_ranking = self
+            .event_vectors
+            .map(|index| index.ranking())
+            .unwrap_or("hybrid");
+        if event_ranking != "hybrid" && args.target != "events" {
+            return Err("event_vector_ranking_requires_target_events".into());
+        }
+        if event_ranking == "semantic_only" && args.lexical_match != "exact" {
+            return Err("semantic_only_disallows_identifier_override_use_semantic_first".into());
+        }
         // worker 等待期间不持有 Vault 锁，遗忘/撤权写入可立即生效。
         let candidate_result = if let Some(semantic) = self.semantic {
             let snapshot = if matches!(args.target.as_str(), "memories" | "views") {
@@ -563,7 +573,40 @@ impl<'a> Context<'a> {
         let (event_hits, mut event_vector_coverage) = match event_candidates {
             Some(Ok(hits)) => match hits.revalidate(&docs) {
                 Ok(()) => {
-                    ranked = fuse(&docs, &ranked, &hits.references);
+                    ranked = match event_ranking {
+                        "semantic_only" => docs
+                            .iter()
+                            .filter_map(|doc| {
+                                hits.scores.get(&doc.reference).map(|score| (*score, doc))
+                            })
+                            .collect(),
+                        "semantic_first" => {
+                            let by_ref: BTreeMap<_, _> = docs
+                                .iter()
+                                .map(|doc| (doc.reference.as_str(), doc))
+                                .collect();
+                            let mut ordered: Vec<_> = hits
+                                .references
+                                .iter()
+                                .filter_map(|r| by_ref.get(r.as_str()).copied())
+                                .collect();
+                            ordered.extend(
+                                ranked
+                                    .iter()
+                                    .filter(|(_, doc)| !hits.scores.contains_key(&doc.reference))
+                                    .map(|(_, doc)| *doc),
+                            );
+                            // Priority ranks, not mixed cosine/BM25 units. Every semantic
+                            // candidate precedes lexical-only extras unless the caller
+                            // explicitly requests the identifier override below.
+                            ordered
+                                .into_iter()
+                                .enumerate()
+                                .map(|(rank, doc)| (1.0 / (rank + 1) as f64, doc))
+                                .collect()
+                        }
+                        _ => fuse(&docs, &ranked, &hits.references),
+                    };
                     let coverage = hits.coverage.clone();
                     (Some(hits), coverage)
                 }
@@ -581,6 +624,21 @@ impl<'a> Context<'a> {
                 json!({"status":"not_configured","network_requests":0}),
             ),
         };
+        if self.event_vectors.is_some() {
+            event_vector_coverage["ranking_policy"] = json!(event_ranking);
+            event_vector_coverage["score_kind"] =
+                json!(if event_vector_coverage["status"] != "available" {
+                    "existing_fallback_ranking"
+                } else {
+                    match event_ranking {
+                        "semantic_only" => "cosine",
+                        "semantic_first" => "priority_rank",
+                        _ => "rrf_k60",
+                    }
+                });
+            event_vector_coverage["lexical_identifier_override"] =
+                json!(args.lexical_match == "identifier_prefix");
+        }
         if event_vector_coverage["status"] == "available" {
             event_vector_coverage["timing_ms"]["vault_snapshot"] = json!(event_snapshot_ms);
             event_vector_coverage["timing_ms"]["final_read_and_ranking"] =
@@ -623,7 +681,7 @@ impl<'a> Context<'a> {
         );
         let binding = hash(
             format!(
-                "{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}:{:?}{}",
+                "{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}:{:?}{}{}",
                 generation,
                 ranking_signature,
                 args.query,
@@ -637,7 +695,10 @@ impl<'a> Context<'a> {
                     ""
                 } else {
                     ":identifier_prefix"
-                }
+                },
+                self.event_vectors
+                    .map(|index| format!(":event_ranking:{}", index.ranking()))
+                    .unwrap_or_default()
             )
             .as_bytes(),
         );

@@ -141,6 +141,7 @@ pub struct EventVectorIndex {
     fingerprint: String,
     index: Index,
     query_cache: Option<PathBuf>,
+    ranking: String,
 }
 
 /// Explicit query-vector import into the selected local cache; no provider calls.
@@ -221,6 +222,7 @@ pub fn import_query(query_file: &Path, vector_file: &Path, cache_dir: &Path) -> 
 pub(crate) struct Hits {
     pub references: Vec<String>,
     pub ranges: BTreeMap<String, (usize, usize)>,
+    pub scores: BTreeMap<String, f64>,
     chunks: Vec<Chunk>,
     pub coverage: Value,
 }
@@ -478,7 +480,19 @@ impl EventVectorIndex {
             fingerprint: hash(&bytes),
             index,
             query_cache: None,
+            ranking: "hybrid".into(),
         })
+    }
+    /// Explicit operator policy. Non-hybrid policies are limited to target=events.
+    pub fn with_ranking(mut self, ranking: &str) -> Result<Self> {
+        if !matches!(ranking, "hybrid" | "semantic_only" | "semantic_first") {
+            return Err("event_vector_ranking_invalid".into());
+        }
+        self.ranking = ranking.into();
+        Ok(self)
+    }
+    pub(crate) fn ranking(&self) -> &str {
+        &self.ranking
     }
     pub fn with_query_cache(mut self, cache: Option<&Path>) -> Result<Self> {
         if let Some(cache) = cache {
@@ -587,10 +601,15 @@ impl EventVectorIndex {
             .iter()
             .map(|(reference, (_, chunk))| (reference.clone(), (chunk.start_byte, chunk.end_byte)))
             .collect();
+        let scores = ranked
+            .iter()
+            .map(|(reference, (score, _))| (reference.clone(), *score))
+            .collect();
         let chunks = ranked.into_iter().map(|(_, (_, chunk))| chunk).collect();
         Ok(Hits {
             references,
             ranges,
+            scores,
             chunks,
             coverage: json!({"status":"available","model":self.index.space.model,"dimensions":self.index.space.dimensions,
             "query_encoding":"existing_cache_only","network_requests":0,"eligible_chunks":eligible_chunks,"eligible_events":total_events,

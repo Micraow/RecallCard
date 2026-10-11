@@ -457,7 +457,7 @@ fn page_or_empty(
 ) -> Result<Value> {
     if total == 0 {
         return Ok(
-            json!({"results":[],"sessions":[],"status":"no_matches","truncated":false,"next_cursor":null,"budget_unit":"utf8_bytes","session_count":0,"selected_slice_count":0,"coverage":{"event_vectors":{"status":coverage["event_vectors"]["status"],"error":coverage["event_vectors"]["error"],"query_encoding":"existing_cache_only","network_requests":0}}}),
+            json!({"results":[],"sessions":[],"status":"no_matches","truncated":false,"next_cursor":null,"budget_unit":"utf8_bytes","session_count":0,"selected_slice_count":0,"coverage":{"event_vectors":{"status":coverage["event_vectors"]["status"],"error":coverage["event_vectors"]["error"],"ranking_policy":coverage["event_vectors"]["ranking_policy"],"query_encoding":"existing_cache_only","network_requests":0}}}),
         );
     }
     if items.is_empty() && position < total {
