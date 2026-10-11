@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Human-driven, synthetic-only Chat Completions queue; never opens a network socket.
+"""Human-driven, explicitly scoped local Chat Completions queue; never opens a network socket.
 
 Uses the production DreamClient request builder, parser and result validator.
 The operator reads requests and supplies replies; no successful reply is generated.
@@ -37,7 +37,7 @@ def write(path, value):
 
 
 class ManualGateway:
-    def __init__(self, root, *, create=True):
+    def __init__(self, root, *, create=True, private_local_only=False):
         self.root = Path(root).absolute()
         if any(part.is_symlink() for part in (self.root, *self.root.parents)):
             raise ValueError('Symlink queue paths are not allowed')
@@ -48,26 +48,30 @@ class ManualGateway:
             (self.root / part).mkdir(exist_ok=True)
         control = self.root / 'control.json'
         if not control.exists():
-            write(control, {'enabled': True, 'revision': 1, 'synthetic_only': True})
+            write(control, {'enabled': True, 'revision': 1, 'synthetic_only': not private_local_only, 'private_local_only': private_local_only})
+        self.private_local_only = read(control).get('private_local_only', False)
+        if create and read(control).get('private_local_only', False) != private_local_only:
+            raise PermissionError('Queue data mode cannot change')
 
     def control(self):
         value = read(self.root / 'control.json')
-        if value.get('enabled') is not True or value.get('synthetic_only') is not True:
-            raise PermissionError('Manual synthetic test permission revoked')
+        modes = (value.get('synthetic_only') is True, value.get('private_local_only') is True)
+        if value.get('enabled') is not True or sum(modes) != 1 or modes[1] != self.private_local_only:
+            raise PermissionError('Manual local test permission revoked')
         if type(value.get('revision')) is not int or value['revision'] < 1:
             raise ValueError('Invalid permission revision')
         return value
 
     def __call__(self, endpoint, payload, key, timeout, response_limit):
         if endpoint != ENDPOINT or key != SYNTHETIC_KEY:
-            raise PermissionError('Only the synthetic local queue destination is allowed')
+            raise PermissionError('Only the fixed local queue destination is allowed')
         revision = self.control()['revision']
         body = load_json(payload, MAX_BYTES)
         ident = uuid.uuid4().hex
         digest = hashlib.sha256(payload).hexdigest()
         request = {'schema': 'recallcard.manual-model-request/1', 'id': ident,
                    'request_sha256': digest, 'permission_revision': revision,
-                   'transport': 'file-queue-no-network', 'body': body}
+                   'transport': 'file-queue-no-network', 'data_mode': ('private_local_only' if self.control().get('private_local_only') else 'synthetic_only'), 'body': body}
         write(self.root / 'requests' / (ident + '.json'), request)
         print(json.dumps({'waiting_for_operator': ident, 'request': str(self.root / 'requests' / (ident + '.json'))}), flush=True)
         started = time.monotonic()
@@ -121,7 +125,9 @@ def main():
     dream.add_argument('--job', required=True)
     dream.add_argument('--output', required=True)
     dream.add_argument('--timeout', type=float, default=900)
-    dream.add_argument('--synthetic-only', action='store_true', required=True)
+    mode = dream.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--synthetic-only', action='store_true')
+    mode.add_argument('--private-local-only', action='store_true', help='Explicitly authorized, sanitized private material; file queue only, never upload queue files')
     response = sub.add_parser('reply')
     response.add_argument('--queue', required=True)
     response.add_argument('--id', required=True)
@@ -133,7 +139,7 @@ def main():
         return 0
     job = read(args.job)
     os.environ['RECALLCARD_DREAM_API_KEY'] = SYNTHETIC_KEY
-    queue = ManualGateway(args.queue)
+    queue = ManualGateway(args.queue, private_local_only=args.private_local_only)
     client = DreamClient(ENDPOINT, 'manual-operator', NetworkApproval(True, ENDPOINT, (job['allowed_scope'],), True), transport=queue, timeout=args.timeout)
     try:
         result = client.execute(job)

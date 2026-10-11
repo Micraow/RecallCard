@@ -20,13 +20,13 @@ class MeteringTests(unittest.TestCase):
 
     def test_followup_keeps_immutable_per_round_metering(self):
         class Server:
-            def __init__(self, *_): pass
+            def __init__(self, *_, **kwargs): pass
             def call(self, method, params):
                 return {'tools': []} if method == 'tools/list' else {}
             def send(self, *_): pass
             def close(self): pass
         class Gateway:
-            def __init__(self, *_): pass
+            def __init__(self, *_, **kwargs): pass
             def __call__(self, *args):
                 return SimpleNamespace(status=200, body=json.dumps({'choices':[{'index':0,'message':{'role':'assistant','content':'synthetic answer'},'finish_reason':'stop'}]}).encode())
         with tempfile.TemporaryDirectory() as t:
@@ -50,5 +50,30 @@ class MeteringTests(unittest.TestCase):
             self.assertEqual(len(result['answers']),2)
             self.assertEqual(result['tool_calls'],0)
 
+
+    def test_tool_budget_stops_before_excess_calls(self):
+        executed=[]
+        class Server:
+            def __init__(self,*_,**kwargs): pass
+            def call(self,method,params):
+                if method=='tools/list':return {'tools':[{'name':'read','inputSchema':{'type':'object'}}]}
+                if method=='tools/call':executed.append(params)
+                return {}
+            def send(self,*_):pass
+            def close(self):pass
+        class Gateway:
+            def __init__(self,*_,**kwargs):pass
+            def __call__(self,*args):
+                calls=[{'id':str(i),'type':'function','function':{'name':'read','arguments':'{}'}} for i in range(5)]
+                return SimpleNamespace(status=200,body=json.dumps({'choices':[{'index':0,'message':{'role':'assistant','tool_calls':calls},'finish_reason':'tool_calls'}]}).encode())
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);binary=root/'binary';binary.write_bytes(b'test')
+            config=root/'runtime.json';config.write_text(json.dumps({'binary':str(binary),'vault':str(root/'vault'),'environment':{},'source_commit':'test'}))
+            output=root/'output'
+            argv=['manual_mcp_agent.py','--runtime',str(config),'--connection-id','test','--scope','personal','--question','test','--output',str(output),'--private-local-only','--max-tool-calls','4']
+            with patch.object(sys,'argv',argv),patch.object(agent,'MCP',Server),patch.object(agent,'ManualGateway',Gateway):
+                with self.assertRaisesRegex(RuntimeError,'tool limit'):agent.main()
+            self.assertEqual(executed,[])
+            self.assertEqual(json.loads((output/'result.json').read_text())['status'],'tool_budget_exhausted')
 
 if __name__=='__main__':unittest.main()
