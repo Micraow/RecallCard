@@ -21,9 +21,18 @@ def validate_extraction_context(context, consolidation_job):
     result = validate_result(context["result"], extraction_job)
     if extraction_job["memory_read_set"]:
         fail("invalid_fields", "Extraction 必须只读取本次 Event，不能预选旧记忆")
-    if (extraction_job["allowed_scope"] != consolidation_job["allowed_scope"]
-            or canonical(extraction_job["source_refs"]) != canonical(consolidation_job["source_refs"])):
-        fail("job_mismatch", "提取与整合的完整来源、范围或版本不一致；请重新提取")
+    if extraction_job["allowed_scope"] != consolidation_job["allowed_scope"]:
+        fail("job_mismatch", "提取与整合的范围不一致；请重新提取")
+    original = {source["ref"]: source for source in extraction_job["source_refs"]}
+    current = {source["ref"]: source for source in consolidation_job["source_refs"]}
+    if any(reference not in current or canonical(source) != canonical(current[reference])
+           for reference, source in original.items()):
+        fail("job_mismatch", "提取来源缺失或版本改变；请重新提取")
+    inherited = {reference for item in consolidation_job["memory_read_set"]
+                 for reference in item["memory"]["source_refs"]}
+    if any(reference not in original and source["event"]["id"] not in inherited
+           for reference, source in current.items()):
+        fail("job_mismatch", "整合新增来源必须属于当前已授权候选的原有证据")
     # An empty read set already forbids modifications; keep an explicit stage contract.
     if any(p["operation"] not in {"add", "noop", "conflict"} for p in result["proposals"]):
         fail("invalid_fields", "Extraction 只允许新增假设、无需变更或冲突")
