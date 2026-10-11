@@ -12,6 +12,8 @@ RecallCard 把聊天原文和记忆保存在你自己的本地资料库。导入
 
 2026-10-11 恢复分支已通过真实 Linux 桌面 8 步闭环：原生导入、原话回看、项目授权、同库 MCP、重启与撤权；628 项 Rust 回归通过。GUI 与 CLI 固定同一干净提交 `5b647111`。全部使用合成数据，未执行外部 Agent 或验证真实 ChatGPT 账号。[查看精确验收范围](docs/native-recovery-validation-20261011.md)。下方旧候选包不是这次恢复源码的新构建交付。
 
+默认双阶段整理也已通过真实人工 HTTPS 网关验证：新建记忆、候选重导出、用户改口整合、人工审批、目录读回及处理中撤权。使用合成数据，不需要付费模型。[复现与验收边界](docs/manual-staged-gateway.md)。
+
 ## 从导入到继续工作
 
 1. **导入旧聊天**：打开桌面版，选择 ChatGPT / DeepSeek 官方导出的 ZIP 或 JSON，立即查看原始资料。
@@ -53,6 +55,7 @@ Event 和 Memory 文件是事实源，索引与视图可重新生成。每个连
 - [网页悬浮接力](extension/RELAY.md)
 - [长文读取与续页](docs/read-pages-v0.6.md)
 - [后台整理运行时](docs/background-memory-v0.6.md)
+- [双阶段人工网关复验](docs/manual-staged-gateway.md)
 - [开发前检查](docs/preflight.md) · [产品方向](docs/product-reboot-v0.6.md)
 
 原生验收使用合成官方归档和临时项目，覆盖真实文件选择、配置写入、文件视图更新、同库 MCP、重启和撤权；没有把测试通过等同于所有 AI 宿主已经接通。
