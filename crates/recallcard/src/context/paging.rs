@@ -17,6 +17,14 @@ pub struct ReadPageArgs {
     pub offset_bytes: Option<usize>,
     #[serde(default)]
     pub include_adjacent: bool,
+    /// Explicit Event boundaries, preserved on every text page and graph step.
+    #[serde(default)]
+    pub event_filter: Option<EventFilter>,
+    #[serde(default)]
+    pub as_of: Option<DateTime<Utc>>,
+    /// Original search anchor; constrain all graph steps to one monotonic direction.
+    #[serde(default)]
+    pub context_anchor_ref: Option<String>,
     #[serde(default = "read_detail")]
     pub detail: String,
 }
@@ -136,6 +144,23 @@ impl Context<'_> {
         if (args.include_adjacent || args.detail == "compact") && args.refs.len() != 1 {
             return Err("紧凑读取或相邻来源导航只接受一个 Event/Memory 引用".into());
         }
+        let constrained = args.event_filter.is_some()
+            || args.as_of.is_some()
+            || args.context_anchor_ref.is_some();
+        if constrained && args.refs.len() != 1 {
+            return Err("Event 过滤或锚点导航只接受一个 Event 引用".into());
+        }
+        if args.context_anchor_ref.is_some() && !args.include_adjacent {
+            return Err("context_anchor_ref 需要 include_adjacent=true".into());
+        }
+        if args.event_filter.as_ref().is_some_and(|filter| {
+            filter
+                .occurred_from
+                .zip(filter.occurred_until)
+                .is_some_and(|(start, end)| start > end)
+        }) {
+            return Err("occurred_from 不能晚于 occurred_until".into());
+        }
         if args.refs.len() != 1 {
             if args.cursor.is_some() || args.offset_bytes.is_some() {
                 return Err("续读或定位只接受一个 ref".into());
@@ -150,6 +175,9 @@ impl Context<'_> {
         }
         let reference = &args.refs[0];
         let (kind, id, revision) = parse_ref(reference)?;
+        if constrained && kind != "event" {
+            return Err("event_filter、as_of 和 context_anchor_ref 只用于单个 Event 读取".into());
+        }
         if args.include_adjacent && kind != "event" {
             return Err("相邻来源导航只用于 Event；请先 sources(memory) 再读取来源".into());
         }
@@ -209,13 +237,15 @@ impl Context<'_> {
             if event.data.metadata["qwen"].is_object() {
                 metadata["qwen"] = json!({"on_current_path":event.data.metadata.pointer("/qwen/on_current_path").and_then(Value::as_bool)});
             }
-            if let Some((links, generation)) = if args.include_adjacent {
-                self.adjacent(&event, &mut events, &suppressed)?
+            if let Some((links, generation)) = if args.include_adjacent || constrained {
+                self.adjacent(&event, &mut events, &suppressed, &args)?
             } else {
                 None
             } {
-                metadata["adjacent"] = links.clone();
-                adjacency = Some(links);
+                if args.include_adjacent {
+                    metadata["adjacent"] = links.clone();
+                    adjacency = Some(links);
+                }
                 source_generation = Some(generation);
             }
             if args.include_adjacent {
@@ -259,6 +289,12 @@ impl Context<'_> {
                 true,
             )
         };
+        if constrained {
+            // A constrained read is a text projection, not a raw record containing
+            // unfiltered parent/child identifiers in its source metadata.
+            metadata.as_object_mut().unwrap().remove("reply_to");
+            metadata.as_object_mut().unwrap().remove("revision_of");
+        }
         let snapshot = hash(&serde_json::to_vec(&record).map_err(|e| e.to_string())?);
         let binding_snapshot = source_generation
             .as_ref()
@@ -275,12 +311,29 @@ impl Context<'_> {
         } else {
             mode.into()
         };
+        // Byte pagination must not silently widen a constrained graph read.
+        let mode = if constrained {
+            json!([
+                mode,
+                args.event_filter,
+                args.as_of,
+                args.context_anchor_ref,
+                args.budget_tokens
+            ])
+            .to_string()
+        } else {
+            mode
+        };
         let binding = page_binding(reference, &binding_snapshot, &self.access.scopes(), &mode);
         let offset = page_position(&args, &binding)?;
         if offset > text.len() || !text.is_char_boundary(offset) {
             return Err("offset_bytes 必须是正文范围内的 UTF-8 字符边界".into());
         }
-        if args.cursor.is_none() && args.offset_bytes.is_none() && args.detail == "full" {
+        if !constrained
+            && args.cursor.is_none()
+            && args.offset_bytes.is_none()
+            && args.detail == "full"
+        {
             let mut full = json!({"results":[{"ref":reference,"record":record,"content_retained":retained,"retention":if retained{"inline"}else{"content_not_retained"}}],"truncated":false,"pending_refs":[],"next_cursor":null,"status":"complete","budget_unit":"utf8_bytes"});
             if let Some(links) = &adjacency {
                 full["results"][0]["adjacent"] = links.clone();

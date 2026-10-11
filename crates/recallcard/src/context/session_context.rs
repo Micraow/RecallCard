@@ -232,12 +232,32 @@ impl Context<'_> {
                     queue.push_back((next, anchor, "next", distance + 1));
                 }
             }
+            let mut frontiers = BTreeMap::new();
+            if reasons.contains("hop_limit") || reasons.contains("message_limit") {
+                for message in &messages[before..] {
+                    let entry = frontiers
+                        .entry((message.anchor, message.relation))
+                        .or_insert(message);
+                    if message.distance > entry.distance {
+                        *entry = message;
+                    }
+                }
+            }
+            let continuation_candidates: Vec<_> = frontiers
+                .values()
+                .filter(|message| message.relation != "anchor")
+                .map(|message| {
+                    json!({"ref":message.document.reference,
+                    "context_anchor_ref":message.anchor,"direction_from_anchor":message.relation})
+                })
+                .collect();
             let anchor = allowed[group.anchors[0]];
             summaries.push(json!({
                 "group":index,"session_ref":anchor.session_ref,"scope":anchor.scope,
                 "anchor_refs":group.anchors,"matching_anchor_count":group.anchor_count,
                 "score":group.score,"selected_message_count":messages.len()-before,
-                "window_limited":!reasons.is_empty(),"limit_reasons":reasons
+                "window_limited":!reasons.is_empty(),"limit_reasons":reasons,
+                "continuation_candidates":continuation_candidates
             }));
         }
         // First give every selected message one real excerpt, then round-robin its tails.
@@ -293,7 +313,14 @@ impl Context<'_> {
             "scope_filtered":true,"event_filter":args.event_filter,"as_of":args.as_of,
             "context_window":{"max_anchors":MAX_ANCHORS,"max_hops_each_direction":MAX_HOPS,"max_messages_per_session":MAX_MESSAGES},
             "completeness":"bounded_visible_source_graph_only",
-            "visibility_note":"隐藏、修订或未授权节点不披露；没有返回邻居不证明没有其他消息。窗口之外用原始ref显式read并重新应用所需过滤。",
+            "visibility_note":"隐藏、修订或未授权节点不披露；没有返回邻居不证明没有其他消息。next_cursor只分页已选窗口，不能扩大它。",
+            "continuation":{"tool":"read","include_adjacent":true,"detail":"compact",
+                "event_filter":args.event_filter,"as_of":args.as_of,
+                "refs":"copy a returned boundary result.ref into a one-element array",
+                "context_anchor_ref":"copy that result.anchor_ref; keep it unchanged for every further read",
+                "budget_bytes":"set an explicit per-call UTF-8 byte budget; count all calls and response bytes",
+                "navigation":"follow returned previous_ref/next_refs monotonically; stop at branch/filter boundaries",
+                "cursor_scope":"selected_window_text_only"},
             "event_vectors":event_vector_coverage,
             "selected_message_count":messages.len(),"text_order":"one_excerpt_per_message_then_round_robin_remaining_ranges"
         });

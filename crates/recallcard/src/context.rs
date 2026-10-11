@@ -64,23 +64,32 @@ impl EventFilter {
             || self.on_current_path.is_some()
     }
     fn permits(&self, document: &Document) -> bool {
-        if !self.active() {
-            return true;
-        }
-        document.kind == "event"
-            && self
-                .role
-                .as_ref()
-                .is_none_or(|role| document.role.as_ref() == Some(role))
+        !self.active()
+            || document.kind == "event"
+                && self.permits_fields(
+                    document.role.as_ref(),
+                    document.occurred_at,
+                    document.on_current_path,
+                )
+    }
+    fn permits_fields(
+        &self,
+        role: Option<&Role>,
+        time: Option<DateTime<Utc>>,
+        path: Option<bool>,
+    ) -> bool {
+        self.role
+            .as_ref()
+            .is_none_or(|expected| role == Some(expected))
             && self
                 .occurred_from
-                .is_none_or(|start| document.occurred_at.is_some_and(|time| time >= start))
+                .is_none_or(|start| time.is_some_and(|time| time >= start))
             && self
                 .occurred_until
-                .is_none_or(|end| document.occurred_at.is_some_and(|time| time <= end))
+                .is_none_or(|end| time.is_some_and(|time| time <= end))
             && self
                 .on_current_path
-                .is_none_or(|path| document.on_current_path == Some(path))
+                .is_none_or(|expected| path == Some(expected))
     }
 }
 fn all() -> String {
@@ -836,6 +845,9 @@ impl<'a> Context<'a> {
                     cursor: None,
                     offset_bytes: None,
                     include_adjacent: false,
+                    event_filter: None,
+                    as_of: None,
+                    context_anchor_ref: None,
                     detail: "compact".into(),
                 },
                 sources,

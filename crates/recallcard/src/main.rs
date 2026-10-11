@@ -715,6 +715,9 @@ fn run(cli: Cli) -> Result<Value> {
                         offset_bytes,
                         cursor,
                         include_adjacent,
+                        event_filter: None,
+                        as_of: None,
+                        context_anchor_ref: None,
                         detail,
                     },
                 );
@@ -762,6 +765,9 @@ fn run(cli: Cli) -> Result<Value> {
                         offset_bytes,
                         cursor,
                         include_adjacent,
+                        event_filter: None,
+                        as_of: None,
+                        context_anchor_ref: None,
                         detail,
                     },
                 );

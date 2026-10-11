@@ -68,9 +68,46 @@ Check each session's `window_limited` and `limit_reasons`, and the global
 Limits explicitly include anchor/message/hop caps, request-filter boundaries,
 unknown parents, unavailable source graphs, ambiguous identities and branch
 choices. An absent neighbor is not proof that the full source had no neighbor.
-For evidence outside this window, use returned original references with an
-explicit `read`/adjacent request, applying the desired filters to that read's
-result. Such a read is a separate decision, not automatic widening.
+For evidence outside this window, use `sessions[].continuation_candidates`
+and `coverage.continuation` for explicit additional `read` calls. A search cursor
+only pages the already selected window; it never grows that window. A read
+cursor only pages the currently requested event's text.
+
+The MCP read/sources Event contract now accepts the same `event_filter` and
+`as_of`, plus `context_anchor_ref`. Copy the original result's `anchor_ref` into
+`context_anchor_ref`, keep it unchanged for every subsequent read, and copy the
+search filters. For example, with artificial references:
+
+```json
+{"refs":["event:toy-boundary"],"context_anchor_ref":"event:toy-anchor","include_adjacent":true,"detail":"compact","event_filter":{"on_current_path":true},"budget_bytes":8192}
+```
+
+Follow `metadata.adjacent.previous_ref` or its unique `next_refs` with a new read
+call, keeping those constraints. `constraints.direction_from_anchor` prevents
+a backward step from turning into a sibling branch; a forward step cannot
+turn backward. The original anchor and every intermediate node must still be
+current, authorized, unsuppressed and request-filter-compatible in the same
+source/account/scope/session graph. A filtered intermediary is a stop, including
+for `next_user_ref`; it is not skipped. Branch ambiguity is determined before
+request filtering, so hiding one branch does not make another branch unique.
+
+`constraints.stop_reasons` and `may_continue` distinguish an allowed next step
+from a filter, source-gap or branch boundary. An absent link is not proof of a
+complete original export. Unknown or parallel branches require a separate
+explicit choice; keeping the anchor never silently rebases onto that branch.
+These options accept one Event only, not Memory/view/batch reads. Constrained
+reads return exact text projections rather than a raw record carrying unfiltered
+relationship metadata. Their text cursor binds filters, anchor, scope, current
+source graph, detail and byte budget. Unconstrained legacy read behavior remains
+available; do not use it as a continuation of a constrained search.
+
+This is an explicit MCP navigation contract; the CLI's legacy `read` arguments
+are unchanged. Each graph step and each long-event text page is another tool
+call. Clients must cap total calls and cumulative response bytes, retain text
+ranges already read, and stop or ask before exceeding their total budget.
+A per-call 8192-byte limit is not an 8192-byte limit for the entire workflow.
+No tokenizer count is implied, and ranking errors cannot be repaired by merely
+reading more of a wrongly selected session.
 
 `budget_exhausted` is distinct from `no_matches`. Increase to at least the
 recommended budget and restart without a cursor. Cursors bind the source graph,

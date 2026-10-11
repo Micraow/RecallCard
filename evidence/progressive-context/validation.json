@@ -1,0 +1,49 @@
+{
+  "schema": "recallcard.public-engineering-validation/1",
+  "scope": "Original synthetic data only; no personal conversations, queries, embeddings or private evaluation results.",
+  "feature": "Constraint-preserving explicit Event graph continuation through existing read/sources MCP tools.",
+  "focused_suites": [
+    "context_progressive",
+    "context_adjacency",
+    "context_compact",
+    "session_context",
+    "event_vectors"
+  ],
+  "focused_passed": 52,
+  "focused_failed": 0,
+  "new_toy_regressions": 9,
+  "covered_contracts": [
+    "Original anchor keeps graph steps monotonic; previous then sibling is rejected.",
+    "Role/time/current-path/as_of boundaries are applied before output and at every intermediate node.",
+    "Filtered fork cannot become an apparently unique branch.",
+    "Source platform/account/conversation/scope, suppression and current revisions remain boundaries.",
+    "Duplicate provider-node identities produce stops, not advertised unusable endpoints.",
+    "Constrained cursor binds original anchor, filters, as_of, detail, current graph, access and byte budget.",
+    "Exact UTF-8 text reassembly; constrained full reads are marked projections rather than raw records.",
+    "Real stdio MCP walks an artificial 12-message chain beyond the fixed 3-hop search window.",
+    "Search continuation candidates and read schema explicitly distinguish graph steps from text pagination."
+  ],
+  "limitations": [
+    "Tool budgets measure result JSON UTF-8 bytes, not tokenizer or billing tokens.",
+    "Multi-call clients must enforce a cumulative budget; per-call caps do not cap a workflow.",
+    "Ranking and query-vector availability are unchanged.",
+    "Constrained filter/anchor options are MCP additions; legacy CLI read arguments are unchanged.",
+    "No claim of complete conversations, model answer quality, desktop IPC validation or general semantic accuracy."
+  ],
+  "gates": {
+    "fmt": "passed",
+    "clippy_all_targets": "passed with -D warnings",
+    "full_suite": {
+      "passed": 662,
+      "failed": 14,
+      "existing_environment_blockers": {
+        "ipc": 11,
+        "ipc_bridges": 3
+      },
+      "reason": "Unix socket binding is denied by this environment: Operation not permitted. These failures existed before this feature."
+    },
+    "release_build": "passed offline, single-job, optimized without LTO",
+    "independent_review": "One duplicate-node continuation issue reproduced and fixed; source-only recheck found no remaining concrete issue."
+  },
+  "evaluated_binary_sha256": "ed15ecaf8f8f6b20a2f4317863d684aa664abb9e73e4f7cbcabd5ae4a17e0cf2"
+}
