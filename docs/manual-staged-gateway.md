@@ -74,3 +74,31 @@ Production fixes: public commit `f4fad613792f7046cb0f99642f409dd268223629`.
 Python regression: 169 passed, one skipped. Rust all-target Clippy and formatting
 passed; 14 manual-gateway unit tests passed. The earlier complete desktop/core CI
 counts and scope remain documented separately in the native validation report.
+
+## Normal desktop setup and autonomous packaged service
+
+A second verified path uses `manual_service_runtime` and gateway `--service-mode`.
+Build the example, then place that test executable beside the actual candidate package
+CLI and its Python resources. The example calls the same `DesktopSession` model operation
+as Tauri settings, with a synthetic session-only credential. It does not call `tick`.
+After the independent service publishes its program identity, the example captures a
+new synthetic Event; the service discovers it and sends both actual HTTPS requests.
+The operator reads and answers them through the same queue commands above.
+
+The gateway supplies a child-only Python launcher for its temporary CA through the
+process PATH. The production CLI and Python modules are unchanged, certificate
+verification stays enabled, and no trust or credentials are installed system-wide.
+Do not use this harness with personal data or real credentials.
+
+Verified with candidate `66e9b7f`: zero Memories before review; normal stop clears
+session credentials and preserves the review; approving while paused is rejected;
+normal setup can resume the service, and explicit approval of the same reviewed hash
+publishes once. A duplicate approval and later service polls leave one completed job,
+one Memory and two reserved model calls. Directory and original-source reads succeed.
+The gateway has already closed during cached-result approval, so no fresh model answer
+is required. The service is explicitly stopped at the end.
+
+Harness actions are `start`, `resume`, `approve`, and `stop`. Resume requires explicitly
+providing the synthetic session credential again. Use the same absolute root and
+RECALLCARD_STATE_DIR for all actions. This acceptance covers real shared settings/service
+APIs and the shipped CLI, not mouse interaction with the model settings/review widgets.

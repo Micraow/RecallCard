@@ -20,7 +20,7 @@ import threading
 from manual_model_gateway import ManualGateway, ENDPOINT, SYNTHETIC_KEY, MAX_BYTES, read, write
 
 
-def run(binary, queue_path, output_path, timeout=1800, *, runtime_root=None, state_dir=None):
+def run(binary, queue_path, output_path, timeout=1800, *, runtime_root=None, state_dir=None, service_mode=False):
     # All inputs are synthetic; the Rust harness rejects existing vaults.
     if bool(runtime_root) != bool(state_dir):
         raise ValueError('Existing runtime and state directories must be selected together')
@@ -83,9 +83,16 @@ def run(binary, queue_path, output_path, timeout=1800, *, runtime_root=None, sta
         launcher.write_text('#!/bin/sh\nexport SSL_CERT_FILE=' + shlex.quote(str(cert))
                             + '\nexec ' + shlex.quote(os.sys.executable) + ' "$@"\n')
         launcher.chmod(0o700)
+        if service_mode:
+            service_python = temporary / 'python3'
+            service_python.write_bytes(launcher.read_bytes())
+            service_python.chmod(0o700)
         root = Path(runtime_root).resolve() if runtime_root else output.parent / 'runtime'
         environment = dict(os.environ, RECALLCARD_DREAM_API_KEY=SYNTHETIC_KEY,
                            RECALLCARD_STATE_DIR=str(Path(state_dir).resolve() if state_dir else output.parent / 'state'))
+        if service_mode:
+            environment.pop('RECALLCARD_DREAM_API_KEY', None)
+            environment['PATH'] = str(temporary) + os.pathsep + environment.get('PATH', '')
         command = [str(Path(binary).resolve()), 'continue' if runtime_root else 'start', str(root), endpoint, str(launcher),
                    str(Path(__file__).resolve().parents[1] / 'python'), str(output.parent / 'runtime-evidence')]
         try:
@@ -93,7 +100,7 @@ def run(binary, queue_path, output_path, timeout=1800, *, runtime_root=None, sta
             output.with_suffix('.stdout').write_bytes(process.stdout)
             output.with_suffix('.stderr').write_bytes(process.stderr)
             receipt = {'schema': 'recallcard.manual-staged-https/1', 'synthetic_only': True,
-                       'production_core': 'MemoryRuntime::tick + PythonMemoryProvider + recallcard_dream.runtime',
+                       'production_core': ('DesktopSession model setup + independent service + PythonMemoryProvider' if service_mode else 'MemoryRuntime::tick + PythonMemoryProvider + recallcard_dream.runtime'),
                        'test_launcher': 'child-process-only ephemeral CA; system trust untouched', 'transport_injected': False,
                        'loopback_only': True, 'tls_verification_enabled': True,
                        'ephemeral_certificate_sha256': hashlib.sha256(cert.read_bytes()).hexdigest(),
@@ -117,7 +124,8 @@ if __name__ == '__main__':
     parser.add_argument('--output', required=True)
     parser.add_argument('--timeout', type=int, default=900)
     parser.add_argument('--synthetic-only', action='store_true', required=True)
+    parser.add_argument('--service-mode', action='store_true')
     parser.add_argument('--runtime-root')
     parser.add_argument('--state-dir')
     args = parser.parse_args()
-    run(args.binary, args.queue, args.output, args.timeout, runtime_root=args.runtime_root, state_dir=args.state_dir)
+    run(args.binary, args.queue, args.output, args.timeout, runtime_root=args.runtime_root, state_dir=args.state_dir, service_mode=args.service_mode)
