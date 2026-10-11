@@ -53,7 +53,23 @@ class ConnectedJourney(FirstUseJourney):
             if self.dialog_windows(title):
                 self.describe_dialog(title, "after-navigation")
 
+    def canonical_summary(self):
+        """Bounded synthetic acceptance evidence, without message bodies or grants."""
+        try:
+            if not self.vault.exists():
+                return {"vault_exists": False, "events": 0, "memories": 0,
+                        "original_present": False, "update_present": False}
+            events = self.events()
+            return {"vault_exists": True, "events": len(events),
+                    "memories": len(self.memories()),
+                    "original_present": any(event.get("content") == ORIGINAL for event in events),
+                    "update_present": any(event.get("content") == UPDATE for event in events)}
+        except Exception as error:
+            return {"readable": False, "error_type": type(error).__name__}
+
     def exercise(self):
+        identifier = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_text())["identifier"]
+        self.vault = self.temporary / "data" / identifier / "vault"
         archive = self.create_archive()
         project = self.temporary / "synthetic-agent-project"
         project.mkdir()
@@ -207,7 +223,7 @@ def main():
                 except Exception: pass
             raise
         finally:
-            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.7-connected-context-native", "passed_steps": smoke.steps, "application": str(smoke.application), "cli": str(smoke.cli), "build": getattr(smoke, "build_identity", None), "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False, "external_agents_executed": False}, ensure_ascii=False, indent=2))
+            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.7-connected-context-native", "passed_steps": smoke.steps, "application": str(smoke.application), "cli": str(smoke.cli), "build": getattr(smoke, "build_identity", None), "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False, "external_agents_executed": False, "canonical": smoke.canonical_summary()}, ensure_ascii=False, indent=2))
             try:
                 if smoke.vault.exists():
                     subprocess.run([str(smoke.cli), "--vault", str(smoke.vault), "--json", "service", "stop"], timeout=15, capture_output=True)

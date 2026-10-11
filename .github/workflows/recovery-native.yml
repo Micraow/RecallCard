@@ -37,7 +37,8 @@ jobs:
       - name: Frontend and protocol checks
         run: |
           python3 scripts/sync_version.py --check
-          /usr/bin/python3 -m py_compile desktop/tests/first_use_native.py
+          /usr/bin/python3 -m py_compile desktop/tests/connected_context_native.py
+          /usr/bin/python3 -m unittest discover -s desktop/tests -p 'test_*.py'
           /usr/bin/python3 -m unittest discover -s python/tests
           cd desktop
           npm ci --ignore-scripts --no-audit --no-fund
@@ -62,13 +63,13 @@ jobs:
           cargo build --locked --release --bin recallcard --target-dir desktop/src-tauri/target
           cargo build --locked --release --features custom-protocol --manifest-path desktop/src-tauri/Cargo.toml
           git diff --exit-code -- Cargo.lock desktop/src-tauri/Cargo.lock
-      - name: Real first-use native journey with synthetic data
+      - name: Real connected native journey with synthetic data
         timeout-minutes: 10
         env:
           LANG: C.UTF-8
           GDK_BACKEND: x11
         run: |
-          dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" /usr/bin/python3 desktop/tests/first_use_native.py --application desktop/src-tauri/target/release/recallcard-desktop --cli desktop/src-tauri/target/release/recallcard --artifacts "$RUNNER_TEMP/recallcard-native-evidence"
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" /usr/bin/python3 desktop/tests/connected_context_native.py --application desktop/src-tauri/target/release/recallcard-desktop --cli desktop/src-tauri/target/release/recallcard --artifacts "$RUNNER_TEMP/recallcard-native-evidence"
       - name: Keep only synthetic summary and screenshots
         if: always()
         uses: actions/upload-artifact@v4
