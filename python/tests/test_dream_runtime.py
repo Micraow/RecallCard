@@ -61,6 +61,41 @@ class RuntimeTests(unittest.TestCase):
         factory.assert_not_called()
         return response
 
+    def test_staged_review_only_extraction_accepts_network_consent_without_auto_apply(self):
+        request = request_fixture()
+        request["config"]["pipeline"] = "staged_review"
+        request["config"]["consent"]["auto_apply"] = False
+        request["job"]["memory_read_set"] = []
+        response, transport, _ = self.run_request(request, FakeTransport(envelope(result_for(request["job"]))))
+        self.assertIs(response["ok"], True)
+        self.assertEqual(len(transport.calls), 1)
+        sent = json.loads(transport.calls[0][1])
+        self.assertEqual(json.loads(sent["messages"][-1]["content"])["memory_read_set"], [])
+
+    def test_staged_consolidation_forwards_validated_extraction_without_granting_publication(self):
+        request = request_fixture()
+        request["config"]["pipeline"] = "staged_review"
+        request["config"]["consent"]["auto_apply"] = False
+        source = fixture()
+        source["memory_read_set"] = []
+        request["extraction"] = {"job": source, "result": result_for(source)}
+        response, transport, _ = self.run_request(request)
+        self.assertIs(response["ok"], True)
+        sent = json.loads(transport.calls[0][1])
+        self.assertEqual(json.loads(sent["messages"][-2]["content"])["extraction_context"], request["extraction"])
+        request["extraction"]["result"]["input_hash"] = "f" * 64
+        self.assert_rejected_before_call(request, "job_mismatch")
+
+    def test_stage_context_and_pipeline_cannot_bypass_source_only_or_legacy_boundary(self):
+        request = request_fixture()
+        request["config"]["pipeline"] = "staged_review"
+        self.assert_rejected_before_call(request, "invalid_fields")
+        request["config"]["pipeline"] = "unknown"
+        self.assert_rejected_before_call(request, "invalid_config")
+        request["config"]["pipeline"] = "legacy_single"
+        request["extraction"] = {}
+        self.assert_rejected_before_call(request, "invalid_fields")
+
     def test_success_uses_one_call_and_exact_approval(self):
         response, transport, factory = self.run_request()
         self.assertEqual(set(response), {"ok", "result", "usage", "verification"})

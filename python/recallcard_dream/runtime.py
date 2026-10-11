@@ -76,6 +76,9 @@ def _config(value):
     endpoint = validate_endpoint(provider["endpoint"])
     model = _text(provider["model"], 256)
     scope = _scope(value["scope"])
+    pipeline = value.get("pipeline", "legacy_single")
+    if pipeline not in {"legacy_single", "staged_review"}:
+        _fail("invalid_config")
     consent = value["consent"]
     required = {"endpoint", "model", "scope", "send_source_snapshots", "send_memory_snapshots",
                 "auto_apply", "accepted_at"}
@@ -83,7 +86,8 @@ def _config(value):
         _fail("approval_required")
     if (consent["endpoint"] != endpoint or consent["model"] != model or consent["scope"] != scope
             or consent["send_source_snapshots"] is not True or consent["send_memory_snapshots"] is not True
-            or consent["auto_apply"] is not True):
+            or type(consent["auto_apply"]) is not bool
+            or (pipeline == "legacy_single" and consent["auto_apply"] is not True)):
         _fail("approval_required")
     _date(consent["accepted_at"], nullable=False)
     budget = value["budget"]
@@ -96,7 +100,7 @@ def _config(value):
     operation = _integer(timeouts.get("operation_seconds", 30), 1, 1800)
     connect = _integer(timeouts.get("connect_seconds", 30), 1, min(120, operation))
     read = _integer(timeouts.get("read_seconds", 30), 1, operation)
-    return endpoint, model, scope, output_tokens, request_bytes, (connect, read, operation)
+    return endpoint, model, scope, output_tokens, request_bytes, (connect, read, operation), pipeline
 
 
 def _usage(diagnostics, max_request_bytes):
@@ -120,20 +124,28 @@ def _usage(diagnostics, max_request_bytes):
 def execute_request(data: bytes, *, client_factory=None):
     """最多执行一次网络请求；注入 client_factory 只用于纯合成、无网络测试。"""
     request = load_json(data, MAX_INPUT_BYTES)
-    _fields(request, {"schema", "config", "job"})
+    _fields(request, {"schema", "config", "job"}, {"extraction"})
     if request["schema"] != REQUEST_SCHEMA:
         _fail("invalid_schema")
-    endpoint, model, scope, output_tokens, request_bytes, timeouts = _config(request["config"])
+    endpoint, model, scope, output_tokens, request_bytes, timeouts, pipeline = _config(request["config"])
     job = validate_job(request["job"])
     if job["allowed_scope"] != scope:
         _fail("scope_denied")
+    extraction = None
+    if "extraction" in request:
+        if pipeline != "staged_review":
+            _fail("invalid_fields")
+        from .staged import validate_extraction_context
+        extraction = validate_extraction_context(request["extraction"], job)
+    elif pipeline == "staged_review" and job["memory_read_set"]:
+        _fail("invalid_fields")
     approval = NetworkApproval(enabled=True, endpoint=endpoint, scopes=(scope,), dream_data=True)
     client = (client_factory or DreamClient)(
         endpoint, model, approval, max_requests=1, max_output_tokens=output_tokens,
         connect_timeout=timeouts[0], read_timeout=timeouts[1], timeout=timeouts[2],
         max_request_bytes=request_bytes, max_total_request_bytes=request_bytes,
     )
-    completed = client.execute(job)
+    completed = client.execute(job, extraction=extraction) if extraction is not None else client.execute(job)
     if not isinstance(completed, dict) or "result" not in completed:
         _fail("invalid_response")
     result = validate_result(completed["result"], job, max_result_bytes=MAX_RESULT_BYTES)
