@@ -21,6 +21,7 @@ pub struct AgentReadService<'a> {
     access: &'a Access,
     explicit_config: Option<PathBuf>,
     loaded: Mutex<Option<Loaded>>,
+    event_vectors: Option<&'a crate::event_vectors::EventVectorIndex>,
 }
 impl<'a> AgentReadService<'a> {
     pub fn new(
@@ -35,7 +36,15 @@ impl<'a> AgentReadService<'a> {
             access,
             explicit_config,
             loaded: Mutex::new(None),
+            event_vectors: None,
         }
+    }
+    pub fn with_event_vectors(
+        mut self,
+        index: Option<&'a crate::event_vectors::EventVectorIndex>,
+    ) -> Self {
+        self.event_vectors = index;
+        self
     }
     fn selected_config(&self, access: &Access) -> Result<Option<ConfigIdentity>> {
         let path = match &self.explicit_config {
@@ -154,6 +163,7 @@ impl<'a> AgentReadService<'a> {
                 Some(backend) => Context::with_semantic(self.vault, access.clone(), backend),
                 None => Context::new(self.vault, access.clone()),
             };
+            let context = context.with_event_vectors(self.event_vectors);
             let mut result = crate::transport::invoke(&context, name, args);
             if self.selected_config(&access) != before {
                 *cache = None;

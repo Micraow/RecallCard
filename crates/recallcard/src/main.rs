@@ -289,9 +289,35 @@ enum Command {
         detail: String,
         #[arg(long)]
         cursor: Option<String>,
+        /// 显式固定的本地Event向量索引；只用已缓存查询，绝不联网
+        #[arg(long)]
+        event_vector_index: Option<PathBuf>,
+        /// 独立的已导入query向量缓存；仅本地读取，不改原语料缓存
+        #[arg(long, requires = "event_vector_index")]
+        event_query_cache: Option<PathBuf>,
         /// 由本机维护者固定的可选语义 worker 配置；默认不启用
         #[arg(long)]
         semantic_config: Option<PathBuf>,
+    },
+    /// 只读复用本地向量缓存，核验原文片段后生成独立Event索引；不请求提供器
+    EventVectorImport {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        cache_dir: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+    },
+    /// 显式导入外部已取得的query向量到独立缓存；不会请求模型或读取Key
+    EventVectorQueryImport {
+        #[arg(long)]
+        query_file: PathBuf,
+        #[arg(long)]
+        vector_file: PathBuf,
+        #[arg(long)]
+        cache_dir: PathBuf,
     },
     /// 启动 AI 只读 MCP 入口；资料库和授权范围在启动时固定
     Mcp {
@@ -303,6 +329,12 @@ enum Command {
         ipc_endpoint: Option<PathBuf>,
         #[arg(long, conflicts_with = "ipc_endpoint")]
         semantic_config: Option<PathBuf>,
+        /// 显式本地Event向量索引；IPC必须由服务端独立配置，不能绕过
+        #[arg(long, conflicts_with = "ipc_endpoint")]
+        event_vector_index: Option<PathBuf>,
+        /// 独立的已导入query向量缓存；仅本地读取，不改原语料缓存
+        #[arg(long, requires = "event_vector_index")]
+        event_query_cache: Option<PathBuf>,
     },
     /// 启动固定资料库和范围的只读本机 IPC 服务
     #[command(hide = true)]
@@ -770,6 +802,8 @@ fn run(cli: Cli) -> Result<Value> {
             detail,
             cursor,
             semantic_config,
+            event_vector_index,
+            event_query_cache,
         } => {
             let semantic = semantic_config
                 .as_ref()
@@ -780,38 +814,64 @@ fn run(cli: Cli) -> Result<Value> {
                 Some(semantic) => Context::with_semantic(&vault, access, semantic),
                 None => Context::new(&vault, access),
             };
-            context.search(SearchArgs {
-                lexical_match,
-                include_navigation,
-                query,
-                target,
-                session_ref,
-                as_of,
-                event_filter: if role.is_some()
-                    || occurred_from.is_some()
-                    || occurred_until.is_some()
-                    || on_current_path.is_some()
-                {
-                    Some(recallcard::context::EventFilter {
-                        role: role
-                            .map(|role| {
-                                serde_json::from_value(json!(role))
-                                    .map_err(|_| "未知角色".to_string())
-                            })
-                            .transpose()?,
-                        occurred_from,
-                        occurred_until,
-                        on_current_path,
-                    })
-                } else {
-                    None
-                },
-                limit,
-                detail,
-                budget_tokens,
-                cursor,
-            })
+            let event_index = event_vector_index
+                .as_deref()
+                .map(|path| {
+                    recallcard::event_vectors::EventVectorIndex::open(path)?
+                        .with_query_cache(event_query_cache.as_deref())
+                })
+                .transpose()?;
+            context
+                .with_event_vectors(event_index.as_ref())
+                .search(SearchArgs {
+                    lexical_match,
+                    include_navigation,
+                    query,
+                    target,
+                    session_ref,
+                    as_of,
+                    event_filter: if role.is_some()
+                        || occurred_from.is_some()
+                        || occurred_until.is_some()
+                        || on_current_path.is_some()
+                    {
+                        Some(recallcard::context::EventFilter {
+                            role: role
+                                .map(|role| {
+                                    serde_json::from_value(json!(role))
+                                        .map_err(|_| "未知角色".to_string())
+                                })
+                                .transpose()?,
+                            occurred_from,
+                            occurred_until,
+                            on_current_path,
+                        })
+                    } else {
+                        None
+                    },
+                    limit,
+                    detail,
+                    budget_tokens,
+                    cursor,
+                })
         }
+        Command::EventVectorImport {
+            manifest,
+            cache_dir,
+            output,
+            scope,
+        } => recallcard::event_vectors::import(
+            &vault,
+            Access::new(scope)?,
+            &manifest,
+            &cache_dir,
+            &output,
+        ),
+        Command::EventVectorQueryImport {
+            query_file,
+            vector_file,
+            cache_dir,
+        } => recallcard::event_vectors::import_query(&query_file, &vector_file, &cache_dir),
         Command::Mcp { .. } => Err("MCP 必须以 stdio 模式启动".into()),
         Command::Daemon {
             scope,
@@ -930,11 +990,20 @@ fn main() {
         scope,
         ipc_endpoint,
         semantic_config,
+        event_vector_index,
+        event_query_cache,
         connection_id,
     } = &cli.command
     {
         let result = open_cli_vault(&cli.vault).and_then(|vault| {
             let access = Access::new(scope.clone())?;
+            let event_index = event_vector_index
+                .as_deref()
+                .map(|path| {
+                    recallcard::event_vectors::EventVectorIndex::open(path)?
+                        .with_query_cache(event_query_cache.as_deref())
+                })
+                .transpose()?;
             if let Some(id) = connection_id {
                 if ipc_endpoint.is_some() {
                     return Err("受连接授权管理的 MCP 尚不支持 IPC 代理；不会忽略撤权".into());
@@ -944,7 +1013,8 @@ fn main() {
                     id,
                     &access,
                     semantic_config.clone(),
-                );
+                )
+                .with_event_vectors(event_index.as_ref());
                 return recallcard::transport::serve_mcp_service_io(
                     |name, args| service.invoke(name, args),
                     std::io::stdin().lock(),
@@ -966,14 +1036,20 @@ fn main() {
             }
             if let Some(path) = semantic_config {
                 let semantic = recallcard::semantic::SemanticSearch::from_config_file(path)?;
-                let context = Context::with_semantic(&vault, access, &semantic);
+                let context = Context::with_semantic(&vault, access, &semantic)
+                    .with_event_vectors(event_index.as_ref());
                 return recallcard::transport::serve_mcp_service_io(
                     |name, args| recallcard::transport::invoke(&context, name, args),
                     std::io::stdin().lock(),
                     std::io::stdout().lock(),
                 );
             }
-            recallcard::transport::serve_mcp(&vault, access)
+            let context = Context::new(&vault, access).with_event_vectors(event_index.as_ref());
+            recallcard::transport::serve_mcp_service_io(
+                |name, args| recallcard::transport::invoke(&context, name, args),
+                std::io::stdin().lock(),
+                std::io::stdout().lock(),
+            )
         });
         if let Err(error) = result {
             eprintln!("{error}");

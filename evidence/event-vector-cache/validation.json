@@ -1,0 +1,57 @@
+{
+  "schema": "recallcard.validation/1",
+  "feature": "offline-event-vector-cache-and-packed-source-retrieval",
+  "base_public_commit": "c57d2ddf70b7977312490a310cc440f91a93f0bc",
+  "implementation_scope": [
+    "Explicit local RCVEC001 source-cache import bound to authorized event refs, exact UTF-8 source ranges, text hashes, model, dimensions and cache identity.",
+    "Atomically committed private index with streamed contiguous pack, per-record binary hashes, bounded IO, no resident corpus cache.",
+    "Optional local-only query-vector import and overlay; unavailable query vector yields visible lexical fallback.",
+    "Direct and managed stdio MCP integration with original authorization, revocation, source revalidation and bounded graph context.",
+    "Existing equal-weight RRF ranking preserved; storage changes do not establish retrieval quality."
+  ],
+  "public_test_data": "Independent artificial conversations and normalized 3-D vectors only; no real conversations, queries, cache material or personal experiment outputs.",
+  "checks": {
+    "event_vector_integration_tests": {
+      "passed": 11,
+      "failed": 0
+    },
+    "session_context_integration_tests": {
+      "passed": 13,
+      "failed": 0
+    },
+    "full_rust_all_targets": {
+      "passed": 649,
+      "failed": 14,
+      "failed_targets": [
+        "ipc",
+        "ipc_bridges"
+      ],
+      "failure_reason": "Execution environment rejects Unix socket bind with Operation not permitted; same pre-existing environment limitation."
+    },
+    "clippy_all_targets_deny_warnings": "passed",
+    "cargo_fmt_check": "passed",
+    "release_build": "passed (optimized, no LTO, no debug info)",
+    "desktop_frontend_e2e": "not rerun in this Rust-only batch; prior environment lacks locked browser-test dependencies",
+    "remote_ci": "intentionally skipped; not a CI pass"
+  },
+  "tested_boundaries": [
+    "Nonlexical hit deep inside a long message retains exact winning chunk range and follows verified source edges.",
+    "Role, scope and suppression filters are applied before loading candidate vector payloads.",
+    "Managed connection revocation blocks event-vector retrieval.",
+    "Wrong model, source hash, UTF-8 range, vector header or norm rejects import without a partial index or temporary pack.",
+    "Corrupt pack payload, invalid offset, size or hash fails closed.",
+    "Legacy cache and packed storage produce identical toy rankings, source ranges, context windows and cursors.",
+    "Existing index changes invalidate reads; source-cache symlinks are rejected.",
+    "Query import binds exact UTF-8 query bytes and does not overwrite files.",
+    "Uncached query fallback remains visible with no results and 512-byte result budget.",
+    "No encoder, provider API, Python worker or credential loading is introduced."
+  ],
+  "limitations": [
+    "Exact bounded local scan, not ANN or arbitrary-corpus latency guarantee.",
+    "Only preexisting or explicitly imported query vectors support semantic event ranking.",
+    "Equal-weight RRF can elevate weak lexical agreement above a stronger semantic-only result; full production retrieval must be evaluated separately.",
+    "Known fixture regressions are not blind evaluation; no public model-quality claim is made here.",
+    "Byte budgets measure result JSON UTF-8 bytes, not downstream model tokens or whole MCP framing.",
+    "Desktop/native IPC setup does not configure this offline event index."
+  ]
+}

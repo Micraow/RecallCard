@@ -101,6 +101,7 @@ pub(super) struct Match<'a> {
     pub document: &'a Document,
     pub related_refs: Vec<String>,
     pub score_source_ref: Option<String>,
+    pub hit_range: Option<(usize, usize)>,
 }
 pub(super) fn group_sources<'a>(ranked: Vec<(f64, &'a Document)>, query: &str) -> Vec<Match<'a>> {
     let mut owners = BTreeMap::new();
@@ -160,6 +161,7 @@ pub(super) fn group_sources<'a>(ranked: Vec<(f64, &'a Document)>, query: &str) -
                 document: doc,
                 related_refs: related.remove(&doc.reference).unwrap_or_default(),
                 score_source_ref,
+                hit_range: None,
             })
         })
         .collect();
@@ -184,7 +186,16 @@ fn item(entry: &Match<'_>, query: &str, limit: usize) -> Result<Value> {
     if let Some(reference) = &entry.score_source_ref {
         value["score_source_ref"] = json!(reference);
     }
-    let (start, end) = matching_window(&doc.text, query, limit);
+    let (start, end) = if let Some((start, until)) = entry.hit_range {
+        value["matched_chunk_range"] = json!({"start_byte":start,"end_byte":until});
+        let mut end = (start + limit).min(until);
+        while !doc.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        (start, end)
+    } else {
+        matching_window(&doc.text, query, limit)
+    };
     value["text"] = json!(&doc.text[start..end]);
     value["text_truncated"] = json!(start != 0 || end != doc.text.len());
     value["text_range"] = json!({"start_byte":start,"end_byte":end,"total_bytes":doc.text.len(),"projection":match doc.kind.as_str(){"event"=>"event.text","view"=>"view.navigation",_=>"memory.content"}});
@@ -230,6 +241,9 @@ fn envelope(
 fn compact_status(value: &mut Value) {
     let coverage = &value["coverage"];
     let mut compact = json!({"event_search":coverage["event_search"],"semantic_search":coverage["semantic_search"],"scope_filtered":true});
+    if let Some(vectors) = coverage.get("event_vectors") {
+        compact["event_vectors"] = json!({"status":vectors["status"],"error":vectors["error"],"query_encoding":"existing_cache_only","network_requests":0});
+    }
     if let Some(filter) = coverage.get("event_filter") {
         compact["event_filter"] = filter.clone();
     }

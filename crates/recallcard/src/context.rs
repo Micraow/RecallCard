@@ -201,6 +201,7 @@ pub struct Context<'a> {
     vault: &'a Vault,
     access: Access,
     semantic: Option<&'a SemanticSearch>,
+    event_vectors: Option<&'a crate::event_vectors::EventVectorIndex>,
 }
 impl<'a> Context<'a> {
     pub fn new(vault: &'a Vault, access: Access) -> Self {
@@ -208,6 +209,7 @@ impl<'a> Context<'a> {
             vault,
             access,
             semantic: None,
+            event_vectors: None,
         }
     }
     /// 只由可信启动代码注入；SearchArgs 不包含配置、路径或网络开关。
@@ -216,7 +218,15 @@ impl<'a> Context<'a> {
             vault,
             access,
             semantic: Some(semantic),
+            event_vectors: None,
         }
+    }
+    pub fn with_event_vectors(
+        mut self,
+        index: Option<&'a crate::event_vectors::EventVectorIndex>,
+    ) -> Self {
+        self.event_vectors = index;
+        self
     }
     pub fn documents(&self) -> Result<Vec<Document>> {
         let _read_guard = self.vault.read_guard()?;
@@ -461,7 +471,20 @@ impl<'a> Context<'a> {
         } else {
             None
         };
+        let event_snapshot_at = std::time::Instant::now();
+        let mut event_snapshot_ms = 0;
+        let event_candidates = if let Some(index) = self
+            .event_vectors
+            .filter(|_| matches!(args.target.as_str(), "all" | "events"))
+        {
+            let snapshot = self.documents()?;
+            event_snapshot_ms = event_snapshot_at.elapsed().as_millis();
+            Some(index.candidates(&args.query, &search_documents(&snapshot, &args, Utc::now())))
+        } else {
+            None
+        };
         // worker 返回后重读正本并重新计算有效时间；保持最终读取锁到响应构造结束。
+        let final_read_at = std::time::Instant::now();
         let _final_read_guard = self.vault.read_guard()?;
         let current = if matches!(args.target.as_str(), "memories" | "views") {
             self.memory_documents_locked(&_final_read_guard)?
@@ -537,7 +560,38 @@ impl<'a> Context<'a> {
             }
             ranked = fuse(&docs, &ranked, &routes);
         }
-        let ranked = search::group_sources(ranked, &args.query);
+        let (event_hits, mut event_vector_coverage) = match event_candidates {
+            Some(Ok(hits)) => match hits.revalidate(&docs) {
+                Ok(()) => {
+                    ranked = fuse(&docs, &ranked, &hits.references);
+                    let coverage = hits.coverage.clone();
+                    (Some(hits), coverage)
+                }
+                Err(code) => (
+                    None,
+                    json!({"status":"unavailable","error":code,"network_requests":0}),
+                ),
+            },
+            Some(Err(code)) => (
+                None,
+                json!({"status":"unavailable","error":code,"network_requests":0}),
+            ),
+            None => (
+                None,
+                json!({"status":"not_configured","network_requests":0}),
+            ),
+        };
+        if event_vector_coverage["status"] == "available" {
+            event_vector_coverage["timing_ms"]["vault_snapshot"] = json!(event_snapshot_ms);
+            event_vector_coverage["timing_ms"]["final_read_and_ranking"] =
+                json!(final_read_at.elapsed().as_millis());
+        }
+        let mut ranked = search::group_sources(ranked, &args.query);
+        if let Some(hits) = &event_hits {
+            for entry in &mut ranked {
+                entry.hit_range = hits.ranges.get(&entry.document.reference).copied();
+            }
+        }
         let navigation_count = ranked.iter().filter(|m| m.document.kind == "view").count();
         let fact_count = ranked.len() - navigation_count;
         let ranked = if args.include_navigation && args.target == "all" {
@@ -560,6 +614,7 @@ impl<'a> Context<'a> {
                             &item.document.reference,
                             &item.related_refs,
                             &item.score_source_ref,
+                            item.hit_range,
                         )
                     })
                     .collect::<Vec<_>>(),
@@ -594,6 +649,7 @@ impl<'a> Context<'a> {
                 &args,
                 &binding,
                 &_final_read_guard,
+                event_vector_coverage,
             );
         }
         let offset = if let Some(cursor) = &args.cursor {
@@ -606,6 +662,9 @@ impl<'a> Context<'a> {
             0
         };
         let mut coverage = json!({"event_search":"available","semantic_search":"unavailable","undreamed_events_included":true,"scope_filtered":true,"indexed_generation":generation,"lexical_matching":"all_terms","source_grouping":"memory_with_matching_source_events"});
+        if self.event_vectors.is_some() {
+            coverage["event_vectors"] = event_vector_coverage;
+        }
         coverage["lexical_match"] = json!(args.lexical_match);
         if args.lexical_match == "identifier_prefix" {
             coverage["prefix_candidates_truncated"] = json!(prefix_candidates_truncated);

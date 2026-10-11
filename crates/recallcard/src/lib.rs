@@ -20,6 +20,7 @@ pub mod import_qwen;
 pub mod native;
 
 pub mod agent_hook;
+pub mod event_vectors;
 pub mod ipc;
 pub mod semantic;
 pub mod sync;

@@ -31,9 +31,11 @@ struct Message<'a> {
     anchor: &'a str,
     relation: &'static str,
     distance: usize,
+    hit_range: Option<(usize, usize)>,
 }
 
 impl Context<'_> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn session_context_response(
         &self,
         ranked: &[search::Match<'_>],
@@ -42,7 +44,9 @@ impl Context<'_> {
         args: &SearchArgs,
         search_binding: &str,
         guard: &crate::vault::WriteGuard,
+        mut event_vector_coverage: Value,
     ) -> Result<Value> {
+        let began = std::time::Instant::now();
         let mut snapshot = crate::vault::EventSnapshot::new(self.vault, guard);
         let events = snapshot.all()?;
         let visible: BTreeSet<_> = current
@@ -171,6 +175,10 @@ impl Context<'_> {
                     anchor,
                     relation,
                     distance,
+                    hit_range: ranked
+                        .iter()
+                        .find(|entry| entry.document.reference == reference)
+                        .and_then(|entry| entry.hit_range),
                 });
                 if source_ids[adjacency::source_node_id(event)].is_none() {
                     reasons.insert("ambiguous_source_identity");
@@ -247,6 +255,7 @@ impl Context<'_> {
                             &message.document.text,
                             &args.query,
                             message.relation == "anchor",
+                            message.hit_range,
                         ),
                     )
                 })
@@ -275,6 +284,9 @@ impl Context<'_> {
         {
             return Err("会话上下文游标偏移无效".into());
         }
+        if event_vector_coverage["status"] == "available" {
+            event_vector_coverage["timing_ms"]["graph_window"] = json!(began.elapsed().as_millis());
+        }
         let coverage = json!({
             "source_grouping":"same_scope_session_and_official_source_graph",
             "ordering":"ranked_sessions_then_anchors_then_bidirectional_distance",
@@ -282,7 +294,7 @@ impl Context<'_> {
             "context_window":{"max_anchors":MAX_ANCHORS,"max_hops_each_direction":MAX_HOPS,"max_messages_per_session":MAX_MESSAGES},
             "completeness":"bounded_visible_source_graph_only",
             "visibility_note":"隐藏、修订或未授权节点不披露；没有返回邻居不证明没有其他消息。窗口之外用原始ref显式read并重新应用所需过滤。",
-            "semantic_coverage":"event_embeddings_not_configured_by_this_mode",
+            "event_vectors":event_vector_coverage,
             "selected_message_count":messages.len(),"text_order":"one_excerpt_per_message_then_round_robin_remaining_ranges"
         });
         let mut items = Vec::new();
@@ -368,8 +380,21 @@ impl Context<'_> {
     }
 }
 
-fn text_pieces(text: &str, query: &str, anchor: bool) -> VecDeque<(usize, usize)> {
-    let (from, until) = matching_window(text, if anchor { query } else { "" }, TEXT_SLICE_BYTES);
+fn text_pieces(
+    text: &str,
+    query: &str,
+    anchor: bool,
+    hit_range: Option<(usize, usize)>,
+) -> VecDeque<(usize, usize)> {
+    let (from, until) = if let Some((start, end)) = hit_range.filter(|_| anchor) {
+        let mut until = (start + TEXT_SLICE_BYTES).min(end);
+        while !text.is_char_boundary(until) {
+            until -= 1;
+        }
+        (start, until)
+    } else {
+        matching_window(text, if anchor { query } else { "" }, TEXT_SLICE_BYTES)
+    };
     let mut pieces = VecDeque::from([(from, until)]);
     for (mut start, stop) in [(0, from), (until, text.len())] {
         while start < stop {
@@ -432,7 +457,7 @@ fn page_or_empty(
 ) -> Result<Value> {
     if total == 0 {
         return Ok(
-            json!({"results":[],"sessions":[],"status":"no_matches","truncated":false,"next_cursor":null,"budget_unit":"utf8_bytes","session_count":0,"selected_slice_count":0}),
+            json!({"results":[],"sessions":[],"status":"no_matches","truncated":false,"next_cursor":null,"budget_unit":"utf8_bytes","session_count":0,"selected_slice_count":0,"coverage":{"event_vectors":{"status":coverage["event_vectors"]["status"],"error":coverage["event_vectors"]["error"],"query_encoding":"existing_cache_only","network_requests":0}}}),
         );
     }
     if items.is_empty() && position < total {

@@ -47,7 +47,8 @@ MCP framing, tool definitions and replayed conversation history are additional
 overhead. A token-bounded client must count with its actual model tokenizer.
 
 Every selected message receives an initial excerpt before long-message tails
-are returned round-robin. Anchor excerpts are centered on actual query text.
+are returned round-robin. Anchor excerpts start at a verified vector hit when available; otherwise they
+are centered on actual query text.
 Thus a long assistant response does not consume all available bytes before a
 short user correction. Small budgets may still require multiple pages.
 
@@ -78,10 +79,13 @@ permissions require a new search. Empty text still advances the cursor.
 
 ## Important production and evaluation boundaries
 
-This mode does not add event embeddings to the production index. The current
-semantic index covers current memories; raw-event anchor retrieval remains the
-existing lexical route. A standalone event-embedding evaluation is not proof
-that its index or full-session expansion is wired into production MCP.
+Raw-event vectors can now be supplied through an explicitly selected offline
+index; see [existing vector cache import](offline-event-vectors.md). The existing
+memory semantic index remains separate. Without that event index, raw-event
+anchors remain lexical. With it, only queries whose vectors are already cached
+(or explicitly imported into a separate query cache) use event-vector ranking.
+Missing query vectors produce visible lexical fallback, never an automatic
+provider request. A standalone embedding score is not a production MCP result.
 
 DeepSeek and Qwen official imports validate and retain parent/child relationships
 and nearest visible parents; Qwen also retains current-path markers. ChatGPT's
