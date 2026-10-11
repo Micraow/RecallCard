@@ -1,0 +1,71 @@
+name: Recovered Linux candidate package
+on:
+  push:
+    branches: ["recovery/native-20261011"]
+    paths: [".github/workflows/recovery-candidate.yml", "desktop/tests/candidate_package_smoke.py"]
+permissions:
+  contents: read
+concurrency:
+  group: recovered-candidate-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  package:
+    if: contains(github.event.head_commit.message, '[candidate package]')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check fixed application baseline
+        run: git diff --exit-code 631d37e6eb2772fb7e9ba604146d8db2296e0ff1 -- crates Cargo.toml Cargo.lock desktop/frontend desktop/ui desktop/src-tauri desktop/package.json desktop/package-lock.json python extension VERSION scripts/package_desktop.py
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - name: Official native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
+      - name: Build fixed application source
+        run: |
+          npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
+          npm --prefix desktop run build
+          cargo build --locked --release --bin recallcard --target-dir desktop/src-tauri/target
+          cargo build --locked --release --features custom-protocol --manifest-path desktop/src-tauri/Cargo.toml
+          git diff --exit-code
+          cargo metadata --locked --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$RUNNER_TEMP/cli-metadata.json"
+          cargo metadata --locked --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$RUNNER_TEMP/gui-metadata.json"
+      - name: Package explicit public resources and dependency licenses
+        run: |
+          python3 -m unittest discover -s scripts/tests -p 'test_runtime_package.py'
+          python3 scripts/package_desktop.py --binary desktop/src-tauri/target/release/recallcard-desktop --cli desktop/src-tauri/target/release/recallcard --metadata "$RUNNER_TEMP/cli-metadata.json" --metadata "$RUNNER_TEMP/gui-metadata.json" --commit "$GITHUB_SHA" --profile release --out "$RUNNER_TEMP/candidate"
+      - name: Check extracted candidate startup without repeating full journey
+        timeout-minutes: 5
+        env:
+          LANG: C.UTF-8
+          GDK_BACKEND: x11
+        run: |
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" /usr/bin/python3 desktop/tests/candidate_package_smoke.py --archive "$RUNNER_TEMP"/candidate/*.zip --artifacts "$RUNNER_TEMP/package-smoke" --commit "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-recovered-linux-x86_64-${{ github.sha }}
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RecallCard-package-smoke-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/package-smoke/summary.json
+            ${{ runner.temp }}/package-smoke/*.png
+          if-no-files-found: ignore
+          retention-days: 14
