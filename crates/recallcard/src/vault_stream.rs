@@ -64,36 +64,47 @@ impl Vault {
     {
         let mut ids = BTreeSet::new();
         for path in files_recursive(&self.root().join("events"), "jsonl")? {
-            let file = open_local_file(&path)?;
-            if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-                return Err("事件正本不是普通文件".into());
-            }
-            let mut reader = BufReader::new(file);
-            loop {
-                let mut bytes = Vec::new();
-                let size = reader
-                    .by_ref()
-                    .take(MAX_EVENT_LINE as u64 + 1)
-                    .read_until(b'\n', &mut bytes)
-                    .map_err(|e| e.to_string())?;
-                if size == 0 {
-                    break;
-                }
-                if size > MAX_EVENT_LINE || bytes.last() != Some(&b'\n') || size == 1 {
-                    return Err("事件段不完整或单条正本超过安全上限".into());
-                }
-                let event: Event =
-                    serde_json::from_slice(&bytes).map_err(|_| "事件正本损坏或存在 Git 冲突")?;
-                event.validate()?;
+            read_event_segment(&path, |event| {
                 if !ids.insert(event.id.clone()) {
                     return Err("事件编号重复".into());
                 }
-                visit(event)?;
-            }
+                visit(event)
+            })?;
         }
         Ok(())
     }
 }
+/// 读取目标正本段仍逐条验证完整性与内容摘要；定位缓存不能替代此检查。
+pub(crate) fn read_event_segment(
+    path: &std::path::Path,
+    mut visit: impl FnMut(Event) -> Result<()>,
+) -> Result<()> {
+    let file = open_local_file(path)?;
+    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err("事件正本不是普通文件".into());
+    }
+    let mut reader = BufReader::new(file);
+    loop {
+        let mut bytes = Vec::new();
+        let size = reader
+            .by_ref()
+            .take(MAX_EVENT_LINE as u64 + 1)
+            .read_until(b'\n', &mut bytes)
+            .map_err(|e| e.to_string())?;
+        if size == 0 {
+            break;
+        }
+        if size > MAX_EVENT_LINE || bytes.last() != Some(&b'\n') || size == 1 {
+            return Err("事件段不完整或单条正本超过安全上限".into());
+        }
+        let event: Event =
+            serde_json::from_slice(&bytes).map_err(|_| "事件正本损坏或存在 Git 冲突")?;
+        event.validate()?;
+        visit(event)?;
+    }
+    Ok(())
+}
+
 fn version_key(input: &EventInput) -> Result<String> {
     let mut normalized = input.clone();
     normalized.revision_of = None;

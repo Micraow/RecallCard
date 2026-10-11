@@ -18,10 +18,10 @@ use std::path::PathBuf;
 
 #[derive(Clone)]
 pub struct ModelOperation {
-    root: PathBuf,
+    pub(super) root: PathBuf,
     root_identity: FileIdentity,
     marker: FileIdentity,
-    scope: String,
+    pub(super) scope: String,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelSetupStatus {
@@ -55,7 +55,7 @@ impl DesktopSession {
     }
 }
 impl ModelOperation {
-    fn vault(&self) -> AppResult<Vault> {
+    pub(super) fn vault(&self) -> AppResult<Vault> {
         let vault = Vault::open_existing(&self.root).map_err(|_| denied())?;
         if file_identity(&open_local_file(vault.root()).map_err(|_| denied())?)
             .map_err(|_| denied())?
@@ -70,6 +70,12 @@ impl ModelOperation {
             return Err(denied());
         }
         Ok(vault)
+    }
+    pub fn retry_index(
+        &self,
+    ) -> AppResult<crate::application::background_memory::IndexRefreshStatus> {
+        let vault = self.vault()?;
+        MemoryRuntime::new(&vault).retry_index(&self.scope)
     }
     pub fn status(&self) -> AppResult<ModelSetupStatus> {
         let vault = self.vault()?;
@@ -185,6 +191,15 @@ impl ModelOperation {
     pub fn review(&self, id: &str) -> AppResult<MemoryJobReview> {
         let vault = self.vault()?;
         MemoryRuntime::new(&vault).review(id, &self.scope)
+    }
+    pub fn approve(
+        &self,
+        id: &str,
+        result_hash: &str,
+        approve_protected: bool,
+    ) -> AppResult<JobStatus<MemoryProgress>> {
+        let vault = self.vault()?;
+        MemoryRuntime::new(&vault).approve(id, &self.scope, result_hash, approve_protected)
     }
     pub fn stop_service(&self) -> AppResult<ServiceStatus> {
         let vault = self.vault()?;

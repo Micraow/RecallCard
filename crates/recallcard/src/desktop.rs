@@ -10,7 +10,9 @@ mod connection_operation;
 pub use connection_operation::ConnectionOperation;
 mod background;
 mod branches;
+mod git_sync;
 mod handoff;
+pub use git_sync::{DesktopGitSyncPreview, GitSyncOperation};
 mod imports;
 mod memory;
 mod recent;
@@ -24,7 +26,7 @@ use crate::filesystem::{file_identity, open_local_file, FileIdentity};
 
 use crate::{
     capture::redact_event,
-    context::{truncate_utf8, BootstrapArgs, Context, ReadArgs, SearchArgs},
+    context::{truncate_utf8, BootstrapArgs, Context, ReadArgs},
     dream::{DreamJob, DreamReceipt, DreamResult, DreamReview},
     import_bundle::{self, ConversationSummary, ImportCoverage, ParsedImport},
     model::{hash, validate_scope, EventInput, Origin, Result, Role},
@@ -136,6 +138,7 @@ pub struct DesktopSession {
     pending_import: Option<PendingImport>,
     pending_import_selection: Option<PendingImportSelection>,
     pending_dream: Option<PendingDream>,
+    pending_git_sync: Option<git_sync::PendingGitSync>,
     pending_note: Option<PendingNote>,
     pending_memory: Option<memory::PendingMemory>,
     pending_background: Option<background::PendingBackground>,
@@ -233,6 +236,7 @@ impl DesktopSession {
         self.pending_import = None;
         self.pending_import_selection = None;
         self.pending_dream = None;
+        self.pending_git_sync = None;
         self.pending_note = None;
         self.pending_memory = None;
         self.pending_background = None;
@@ -260,7 +264,7 @@ impl DesktopSession {
         })
     }
 
-    /// 不注入向量执行器，不联网；每条查询都显式绑定一个 scope。
+    /// 仅使用当前范围明确保存的离线配置；模型等待不持有 Vault 锁。
     pub fn search(
         &self,
         session_id: &str,
@@ -268,27 +272,9 @@ impl DesktopSession {
         query: &str,
         target: &str,
     ) -> Result<Value> {
-        validate_target(target)?;
-        if query.trim().is_empty() || query.len() > 4096 {
-            return Err("请输入 1–4096 字节的检索词".into());
-        }
-        let vault = self.vault(session_id)?;
-        let _guard = vault.read_guard().map_err(|_| health_error())?;
-        let context = self.context(session_id, scope)?;
-        let response = context
-            .search(SearchArgs {
-                query: query.into(),
-                target: target.into(),
-                session_ref: None,
-                as_of: None,
-                event_filter: None,
-                limit: 30,
-                detail: "context".into(),
-                budget_tokens: RESPONSE_LIMIT,
-                cursor: None,
-            })
-            .map_err(|_| "检索失败，请刷新资料库并检查所选范围".to_owned())?;
-        records::WorkspaceRecords::load(vault, &context)?.enrich_list(response)
+        self.model_operation(session_id, scope)
+            .and_then(|operation| operation.search(query, target))
+            .map_err(|e| e.message)
     }
 
     /// 首屏展示也经过 Context 的权限/抑制过滤，不直接返回 Vault 文件列表。
@@ -552,10 +538,10 @@ impl DesktopSession {
     pub fn return_import_selection(&mut self, session_id: &str, selection_id: &str) -> Result<()> {
         self.vault(session_id)?;
         self.pending_import = None;
-        if !self
+        if self
             .pending_import_selection
             .as_ref()
-            .is_some_and(|p| p.selection_id == selection_id)
+            .is_none_or(|p| p.selection_id != selection_id)
         {
             return Err("会话清单已失效，请重新选择备份文件".into());
         }
@@ -633,10 +619,10 @@ impl DesktopSession {
     /// 只有用户确认预览后才能调用；核对完整二进制文件和此前选定的会话。
     pub fn confirm_import(&mut self, session_id: &str, preview_id: &str) -> Result<Value> {
         self.vault(session_id)?;
-        if !self
+        if self
             .pending_import
             .as_ref()
-            .is_some_and(|p| p.preview_id == preview_id)
+            .is_none_or(|p| p.preview_id != preview_id)
         {
             return Err("导入预览已失效，请重新选择并审查文件".into());
         }
@@ -849,6 +835,7 @@ impl DesktopSession {
         self.pending_import = None;
         self.pending_import_selection = None;
         self.pending_dream = None;
+        self.pending_git_sync = None;
         self.pending_note = None;
         self.pending_memory = None;
         self.pending_background = None;
@@ -1117,16 +1104,24 @@ impl DesktopSession {
         allow_capture: bool,
     ) -> Result<Value> {
         check_scope(scope)?;
-        crate::native::prepare_install_from_binary(
-            self.vault(session_id)?,
+        let vault = self.vault(session_id)?;
+        let cfg = crate::application::background_memory::MemoryRuntime::new(vault)
+            .configuration()
+            .map_err(|e| e.message)?;
+        let semantic_config = if cfg.scope == scope {
+            cfg.candidate_semantic_config
+        } else {
+            None
+        };
+        crate::native::prepare_install_configured_from_binary(
+            vault,
             vec![scope.into()],
             extension_id,
             output,
-            None,
-            if allow_capture {
-                Some(scope.into())
-            } else {
-                None
+            crate::native::NativeInstallOptions {
+                ipc_endpoint: None,
+                capture_scope: allow_capture.then(|| scope.into()),
+                semantic_config,
             },
             binary,
         )
@@ -1319,4 +1314,8 @@ fn archive_error() -> String {
 }
 
 mod application_model;
+mod cloud_semantic;
+mod semantic_setup;
 pub use application_model::{ModelOperation, ModelSetupStatus};
+pub use cloud_semantic::{CloudSemanticSetup, CloudSemanticStatus};
+pub use semantic_setup::SemanticSetupStatus;

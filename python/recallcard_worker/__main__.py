@@ -12,8 +12,10 @@ import tempfile
 from .embedding import (
     MAX_JSON_BYTES, EmbeddingClient, EmbeddingError, EmbeddingSpace, NetworkApproval,
     _fields, _string, canonical, fail, index_corpus, load_json, scopes,
-    search_index, validate_index,
+    search_index, validate_index, text_hash,
 )
+from .local_query import LocalQueryClient, LocalIndexClient
+from .managed_cloud import ManagedCloudClient
 
 
 class Worker:
@@ -49,6 +51,15 @@ class Worker:
 
     def dispatch(self, request: dict) -> dict:
         op = request.get("op")
+        if op == "embed_documents":
+            _fields(request, {"id", "op", "space", "texts", "allowed_scopes"})
+            if not isinstance(self.client, (LocalIndexClient, ManagedCloudClient)):
+                fail("index_not_approved", "未配置独立当前 Memory 编码批准")
+            space = EmbeddingSpace.from_dict(request["space"])
+            vectors = self.client.embed_documents(space, request["texts"], request["allowed_scopes"])
+            return {"space_signature": space.signature,
+                    "encoded": [{"input_hash": text_hash(text), "vector": vector} for text, vector in zip(request["texts"], vectors)],
+                    "diagnostics": self.client.diagnostics()}
         if op == "space_signature":
             _fields(request, {"id", "op", "space"})
             space = EmbeddingSpace.from_dict(request["space"])
@@ -85,8 +96,11 @@ class Worker:
         if not initial["results"]:
             return {**initial, "query_cache_hit": False, "diagnostics": self.client.diagnostics()}
         query_vector, cache_hit = self.client.query_vector(space, request["query"], request["allowed_scopes"])
-        return {**search_index(index, query_vector, **arguments), "query_cache_hit": cache_hit,
-                "diagnostics": self.client.diagnostics()}
+        result = {**search_index(index, query_vector, **arguments), "query_cache_hit": cache_hit,
+                  "diagnostics": self.client.diagnostics()}
+        if isinstance(self.client, (LocalQueryClient, ManagedCloudClient)):
+            result['encoded_query'] = {'vector': query_vector, 'input_hash': text_hash(space.prepare(request['query'], 'query'))}
+        return result
 
 
 def serve(worker: Worker, source, destination):
@@ -158,10 +172,17 @@ class ChineseParser(argparse.ArgumentParser):
 def parser() -> argparse.ArgumentParser:
     result = ChineseParser(description="RecallCard 可选向量 worker；默认禁止联网，全部配置留在进程外")
     result.add_argument("--stdio", action="store_true", help="使用有界 JSONL stdin/stdout 协议")
+    result.add_argument("--managed-cloud-once", action="store_true", help="本机宿主已持久预留的单请求编码；仍须独立目的地/范围/数据批准")
     result.add_argument("--allow-network", action="store_true", help="明确允许发送已选数据；仍须指定目的地、scope 和数据类型")
     result.add_argument("--approve-endpoint", help="本进程唯一允许接收数据的完整 HTTPS 接口地址")
     result.add_argument("--approve-scope", action="append", default=[], help="明确批准发送的 scope，可重复")
     result.add_argument("--approve-data", action="append", choices=["corpus", "query"], default=[], help="明确批准发送语料或查询，可重复")
+    result.add_argument("--local-query-endpoint", help="显式配置无凭据的数字回环 embedding 查询端点")
+    result.add_argument("--local-index-endpoint", help="独立批准的数字回环语料编码端点")
+    result.add_argument("--local-index-scope", action="append", default=[], help="独立批准本机语料编码范围")
+    result.add_argument("--local-query-scope", action="append", default=[], help="允许本机按需编码的 scope")
+    result.add_argument("--max-local-calls", type=int, default=20, help="本机查询编码次数预算")
+    result.add_argument("--max-local-bytes", type=int, default=65536, help="本机查询累计文本字节预算")
     result.add_argument("--key-env", default="RECALLCARD_EMBEDDING_API_KEY", help="只读取此环境变量的 key；不接收明文 key 参数")
     result.add_argument("--max-retries", type=int, default=2, help="单批最多重试次数，默认 2、最高 5")
     result.add_argument("--max-network-calls", type=int, default=100, help="整个进程的请求次数预算，包含重试")
@@ -191,6 +212,26 @@ def main(argv=None) -> int:
                                  max_network_calls=arguments.max_network_calls, max_transmitted_bytes=arguments.max_transmitted_bytes,
                                  timeout=arguments.timeout, price_per_million_tokens=arguments.price_per_million_tokens,
                                  pricing_date=arguments.pricing_date, pricing_currency=arguments.pricing_currency)
+        if arguments.managed_cloud_once:
+            if not arguments.stdio or not arguments.allow_network or arguments.local_query_endpoint or arguments.local_index_endpoint or arguments.local_query_scope or arguments.local_index_scope:
+                fail("invalid_config", "单次云编码需独立启动，不能继承或混用本机配置")
+            client = ManagedCloudClient(approval, key_env=arguments.key_env, timeout=arguments.timeout)
+        if arguments.local_query_endpoint and arguments.local_index_endpoint:
+            fail("invalid_config", "查询与语料编码使用独立 worker")
+        if arguments.local_index_endpoint:
+            if not arguments.stdio or arguments.allow_network or arguments.approve_endpoint or approved_scopes or arguments.approve_data or arguments.local_query_scope:
+                fail("invalid_config", "本机语料配置不能混用其他批准")
+            client = LocalIndexClient(arguments.local_index_endpoint, arguments.local_index_scope, max_calls=arguments.max_local_calls, max_bytes=arguments.max_local_bytes, timeout=arguments.timeout)
+        elif arguments.local_index_scope:
+            fail("invalid_config", "语料范围需要独立本机端点")
+        if arguments.local_query_endpoint:
+            if not arguments.stdio or arguments.allow_network or arguments.approve_endpoint or approved_scopes or arguments.approve_data:
+                fail('invalid_config', '本机 query-only 与云批准/语料编码配置不能混用')
+            client = LocalQueryClient(arguments.local_query_endpoint, arguments.local_query_scope,
+                                      max_calls=arguments.max_local_calls, max_bytes=arguments.max_local_bytes,
+                                      timeout=arguments.timeout)
+        elif arguments.local_query_scope:
+            fail('invalid_config', '本机查询 scope 需要明确的本机端点')
         if arguments.stdio:
             serve(Worker(client), sys.stdin.buffer, sys.stdout.buffer)
         else:

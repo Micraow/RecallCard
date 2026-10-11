@@ -11,6 +11,7 @@ use std::io::{Read, Write};
 use zeroize::Zeroizing;
 
 const SERVICE: &str = "RecallCard model provider";
+const EMBEDDING_SERVICE: &str = "RecallCard embedding provider";
 const HANDOFF_SCHEMA: &str = "recallcard.credential-handoff/1";
 const MAX_HANDOFF: u64 = 16 * 1024;
 
@@ -147,6 +148,12 @@ pub struct OsKeyringBackend {
 }
 impl OsKeyringBackend {
     pub fn new(vault: &Vault, target: &MemoryProviderConfig) -> AppResult<Self> {
+        Self::for_service(vault, target, SERVICE)
+    }
+    pub fn embedding(vault: &Vault, target: &MemoryProviderConfig) -> AppResult<Self> {
+        Self::for_service(vault, target, EMBEDDING_SERVICE)
+    }
+    fn for_service(vault: &Vault, target: &MemoryProviderConfig, service: &str) -> AppResult<Self> {
         if !cfg!(any(
             target_os = "linux",
             target_os = "macos",
@@ -163,7 +170,7 @@ impl OsKeyringBackend {
         .map_err(|_| unavailable())?;
         let identity =
             hash(&serde_json::to_vec(&(root, marker, target)).map_err(|_| unavailable())?);
-        let entry = keyring::Entry::new(SERVICE, &identity).map_err(|_| unavailable())?;
+        let entry = keyring::Entry::new(service, &identity).map_err(|_| unavailable())?;
         Ok(Self { entry })
     }
 }
@@ -385,4 +392,85 @@ fn validate_target(target: &MemoryProviderConfig) -> AppResult<()> {
 
 pub fn provider_ref(target: &MemoryProviderConfig) -> String {
     hash(&serde_json::to_vec(target).expect("固定供应商字段可序列化"))
+}
+
+/// 向量凭据独立类型，不可传入整理 LLM provider；Debug/状态永远没有密钥。
+pub struct EmbeddingCredential(PreparedCredential);
+impl std::fmt::Debug for EmbeddingCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddingCredential")
+            .field("status", &self.0.status)
+            .finish()
+    }
+}
+impl EmbeddingCredential {
+    pub(crate) fn for_target(&self, target: &MemoryProviderConfig) -> Option<&str> {
+        self.0.for_target(target)
+    }
+    pub fn status(&self) -> &CredentialStatus {
+        &self.0.status
+    }
+    pub fn matches_target(&self, target: &MemoryProviderConfig) -> bool {
+        self.0.target == *target
+    }
+}
+fn embedding_credential(mut value: PreparedCredential) -> EmbeddingCredential {
+    value.status.provider_ref = Some(hash(
+        &serde_json::to_vec(&(
+            "cloud-embedding",
+            &value.target.endpoint,
+            &value.target.model,
+        ))
+        .expect("固定字段可序列化"),
+    ));
+    EmbeddingCredential(value)
+}
+pub fn prepare_embedding(
+    vault: &Vault,
+    target: MemoryProviderConfig,
+    key: String,
+    storage: CredentialStorage,
+) -> AppResult<EmbeddingCredential> {
+    validate_target(&target)?;
+    let backend = if storage == CredentialStorage::OsProtected {
+        OsKeyringBackend::embedding(vault, &target).ok()
+    } else {
+        None
+    };
+    prepare_embedding_with_backend(
+        target,
+        key,
+        storage,
+        backend.as_ref().map(|b| b as &dyn CredentialBackend),
+    )
+}
+pub fn prepare_embedding_with_backend(
+    target: MemoryProviderConfig,
+    key: String,
+    storage: CredentialStorage,
+    backend: Option<&dyn CredentialBackend>,
+) -> AppResult<EmbeddingCredential> {
+    prepare_with_backend(target, key, storage, backend).map(embedding_credential)
+}
+pub fn load_embedding_os(
+    vault: &Vault,
+    target: &MemoryProviderConfig,
+) -> AppResult<Option<EmbeddingCredential>> {
+    validate_target(target)?;
+    let backend = OsKeyringBackend::embedding(vault, target)?;
+    match backend.load() {
+        Ok(Some(key)) => Ok(Some(embedding_credential(PreparedCredential {
+            target: target.clone(),
+            status: CredentialStatus::protected(),
+            secret: Secret::from_user_input(key)?,
+        }))),
+        Ok(None) => Ok(None),
+        Err(_) => Err(unavailable()),
+    }
+}
+pub fn forget_embedding_os(vault: &Vault, target: &MemoryProviderConfig) -> AppResult<()> {
+    validate_target(target)?;
+    OsKeyringBackend::embedding(vault, target)?
+        .remove()
+        .map_err(|_| unavailable())
 }

@@ -63,6 +63,8 @@ impl Fixture {
             &json!({"schema":"recallcard.embedding-query-cache/1","space_signature":signature,"queries":[{"query_hash":hash(query.as_bytes()),"input_hash":hash(query.as_bytes()),"vector":[1.0,0.0]}]}),
         );
         SemanticConfig {
+            local_index: None,
+            local_query: None,
             python: if cfg!(windows) { "python" } else { "python3" }.into(),
             python_path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../python")
@@ -662,11 +664,15 @@ fn cli_mcp_reuses_real_worker_query_cache_and_budget_with_fake_provider() {
     fixture.fake(&mut config, &format!(
         "from . import protocol, embedding\nopen({},'a').write('start\\n')\nos.environ['RECALLCARD_SYNTHETIC_UNUSED_KEY']='synthetic-never-sent'\ndef fake_transport(endpoint, body, key, timeout, response_limit):\n    open({},'a').write('call\\n')\n    payload=json.loads(body)\n    return embedding.TransportResponse(200,embedding.canonical({{'model':payload['model'],'data':[{{'index':i,'embedding':[1.0,0.0]}} for i in range(len(payload['input']))],'usage':{{'prompt_tokens':1,'total_tokens':1}}}}),{{}})\noriginal=embedding.EmbeddingClient\nprotocol.EmbeddingClient=lambda *args,**kwargs: original(*args,transport=fake_transport,**kwargs)\nreturn protocol.main(argv)",
         serde_json::to_string(&starts).unwrap(), serde_json::to_string(&network_calls).unwrap()));
-    fs::copy(
-        original_python.join("recallcard_worker/embedding.py"),
-        config.python_path.join("recallcard_worker/embedding.py"),
-    )
-    .unwrap();
+    // The real protocol imports both optional clients at startup. Preserve its
+    // complete module graph while replacing only the provider transport.
+    for module in ["embedding.py", "local_query.py", "managed_cloud.py"] {
+        fs::copy(
+            original_python.join("recallcard_worker").join(module),
+            config.python_path.join("recallcard_worker").join(module),
+        )
+        .unwrap();
+    }
     fs::copy(
         original_python.join("recallcard_worker/__main__.py"),
         config.python_path.join("recallcard_worker/protocol.py"),

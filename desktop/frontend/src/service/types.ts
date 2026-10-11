@@ -30,6 +30,7 @@ export interface MemoryRow {
   updated_at: string;
 }
 export interface Memory extends MemoryRow {
+  supersedes?: string[];
   labels: string[];
   scope: string;
   recorded_at: string;
@@ -37,6 +38,26 @@ export interface Memory extends MemoryRow {
   time_note?: string;
   valid_from?: string | null;
   valid_to?: string | null;
+}
+/** 搜索返回带版本 ref，管理列表返回裸 ID。这里仅拆合同，ID 仍由核心校验。 */
+export function parseMemoryTarget(target: string): {id: string; revision: number | null} | null {
+  const match = /^(?:memory:)?(mem_[a-z0-9_]{1,128})(?:@([1-9][0-9]*))?$/.exec(target);
+  if (!match) return null;
+  const revision = match[2] ? Number(match[2]) : null;
+  return revision !== null && !Number.isSafeInteger(revision) ? null : {id:match[1],revision};
+}
+/** 历史边只含裸 ID；不将非法路径或版本引用修饰成另一个合法目标。 */
+export function memoryPredecessors(memory: Pick<Memory,'id'|'supersedes'>): {ids:string[]; invalid:number} {
+  if(memory.supersedes === undefined) return {ids:[],invalid:0};
+  if(!Array.isArray(memory.supersedes)) return {ids:[],invalid:1};
+  const ids=new Set<string>();let invalid=0;
+  for(const candidate of memory.supersedes){
+    if(typeof candidate !== 'string'){invalid++;continue;}
+    const target=parseMemoryTarget(candidate);
+    if(!target || target.id!==candidate || target.revision!==null || candidate===memory.id){invalid++;continue;}
+    ids.add(candidate);
+  }
+  return {ids:[...ids],invalid};
 }
 export interface MemoryPage {
   memories: MemoryRow[];
@@ -143,6 +164,7 @@ export interface SearchRow {
   };
 }
 export interface SearchPage {
+  coverage?: {semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string};
   results: SearchRow[];
   truncated?: boolean;
 }

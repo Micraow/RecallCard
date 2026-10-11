@@ -220,6 +220,87 @@ async fn execute_model<T: serde::Serialize + Send + 'static>(
 }
 
 #[tauri::command]
+async fn semantic_setup_status(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<recallcard::desktop::SemanticSetupStatus> {
+    execute_model(state.service.clone(), session_id, scope, |operation| {
+        operation.semantic_status()
+    })
+    .await
+}
+#[tauri::command]
+async fn semantic_setup_apply(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    request: recallcard::semantic::LocalSemanticSetup,
+) -> recallcard::application::AppResult<recallcard::desktop::SemanticSetupStatus> {
+    let binary = trusted_packaged_cli(&app).ok();
+    execute_model(
+        state.service.clone(),
+        session_id,
+        scope,
+        move |operation| match binary {
+            Some(binary) => operation.configure_semantic_with_binary(request, &binary),
+            None => operation.configure_semantic(request),
+        },
+    )
+    .await
+}
+#[tauri::command]
+async fn semantic_setup_disable(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<recallcard::desktop::SemanticSetupStatus> {
+    execute_model(state.service.clone(), session_id, scope, |operation| {
+        operation.disable_semantic()
+    })
+    .await
+}
+
+#[tauri::command]
+async fn cloud_semantic_status(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<recallcard::desktop::CloudSemanticStatus> {
+    execute_model(state.service.clone(), session_id, scope, |operation| {
+        operation.cloud_semantic_status()
+    })
+    .await
+}
+#[tauri::command]
+async fn cloud_semantic_apply(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    request: recallcard::desktop::CloudSemanticSetup,
+    api_key: Option<String>,
+) -> recallcard::application::AppResult<recallcard::desktop::CloudSemanticStatus> {
+    let binary = trusted_packaged_cli(&app).ok();
+    execute_model(state.service.clone(), session_id, scope, move |operation| {
+        operation.configure_cloud_semantic(request, api_key, binary.as_deref())
+    })
+    .await
+}
+#[tauri::command]
+async fn cloud_semantic_disable(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<recallcard::desktop::CloudSemanticStatus> {
+    execute_model(state.service.clone(), session_id, scope, |operation| {
+        operation.disable_cloud_semantic()
+    })
+    .await
+}
+
+#[tauri::command]
 async fn model_setup_status(
     state: State<'_, AppState>,
     session_id: String,
@@ -244,6 +325,7 @@ async fn inspect_model_credential(
 }
 #[tauri::command]
 async fn configure_memory_model(
+    app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     scope: String,
@@ -251,9 +333,18 @@ async fn configure_memory_model(
     api_key: Option<String>,
     credential_storage: Option<recallcard::application::credentials::CredentialStorage>,
 ) -> recallcard::application::AppResult<recallcard::application::runtime::ProviderSetupResult> {
-    execute_model(state.service.clone(), session_id, scope, move |operation| {
-        operation.configure(config, api_key, credential_storage)
-    })
+    let binary = trusted_packaged_cli(&app).ok();
+    execute_model(
+        state.service.clone(),
+        session_id,
+        scope,
+        move |operation| match binary {
+            Some(binary) => {
+                operation.configure_with_binary(config, api_key, credential_storage, &binary)
+            }
+            None => operation.configure(config, api_key, credential_storage),
+        },
+    )
     .await
 }
 #[tauri::command]
@@ -292,6 +383,37 @@ async fn memory_job_review(
 {
     execute_model(state.service.clone(), session_id, scope, move |operation| {
         operation.review(&job_id)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn memory_index_retry(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<
+    recallcard::application::background_memory::IndexRefreshStatus,
+> {
+    execute_model(state.service.clone(), session_id, scope, move |operation| {
+        operation.retry_index()
+    })
+    .await
+}
+
+#[tauri::command]
+async fn memory_job_approve(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    job_id: String,
+    result_hash: String,
+    approve_protected: bool,
+) -> recallcard::application::AppResult<
+    recallcard::application::JobStatus<recallcard::application::background_memory::MemoryProgress>,
+> {
+    execute_model(state.service.clone(), session_id, scope, move |operation| {
+        operation.approve(&job_id, &result_hash, approve_protected)
     })
     .await
 }
@@ -625,6 +747,59 @@ async fn import_job_conversations(
 }
 
 #[tauri::command]
+async fn git_sync_status(state: State<'_, AppState>, session_id: String) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.git_sync_status(&session_id)
+    })
+    .await
+}
+#[tauri::command]
+async fn preview_git_sync(
+    state: State<'_, AppState>,
+    session_id: String,
+    remote: String,
+) -> Result<recallcard::desktop::DesktopGitSyncPreview, String> {
+    execute(state.service.clone(), move |s| {
+        s.preview_git_sync(&session_id, &remote)
+    })
+    .await
+}
+#[tauri::command]
+async fn cancel_git_sync_preview(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    execute(state.service.clone(), move |s| {
+        s.cancel_git_sync_preview(&session_id)
+    })
+    .await
+}
+#[tauri::command]
+async fn apply_git_sync(
+    state: State<'_, AppState>,
+    session_id: String,
+    preview_id: String,
+    approve_whole_vault: bool,
+    approve_transfer: bool,
+) -> Result<Value, String> {
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let operation = service
+            .lock()
+            .map_err(|_| "本机资料会话暂不可用")?
+            .begin_git_sync(
+                &session_id,
+                &preview_id,
+                approve_whole_vault,
+                approve_transfer,
+            )?;
+        // 确认后释放窗口会话锁；长 Git 操作由已有 Vault writer 锁串行化。
+        operation.run()
+    })
+    .await
+    .map_err(|_| "同步任务未收到回执，请先检查真实 Git 状态，不要假定未提交或已推送")?
+}
+#[tauri::command]
 async fn vault_status(
     state: State<'_, AppState>,
     session_id: String,
@@ -658,10 +833,11 @@ async fn search_records(
     query: String,
     target: String,
 ) -> Result<Value, String> {
-    execute(state.service.clone(), move |s| {
-        s.search(&session_id, &scope, &query, &target)
+    execute_model(state.service.clone(), session_id, scope, move |operation| {
+        operation.search(&query, &target)
     })
     .await
+    .map_err(|e| e.message)
 }
 #[tauri::command]
 async fn read_record(
@@ -930,6 +1106,17 @@ fn packaged_cli(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .into_iter()
         .find(|p| p.is_file())
         .ok_or("当前安装包缺少连接组件，请使用包含 recallcard 的完整运行包或新版安装包".into())
+}
+// 随包资源路径必须先注册固定位置与摘要；不把 JS 参数作为可执行文件路径。
+fn trusted_packaged_cli(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let binary = packaged_cli(app)?;
+    if let Ok(resources) = app.path().resource_dir() {
+        if binary.starts_with(resources.join("说明与许可证")) {
+            return recallcard::application::runtime::register_packaged_cli(&binary, &resources)
+                .map_err(|e| e.message);
+        }
+    }
+    Ok(binary)
 }
 fn prepare_client_binary(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let bundled = packaged_cli(app)?;
@@ -1536,11 +1723,19 @@ fn main() {
             application_job_resume,
             memory_runtime_status,
             model_setup_status,
+            semantic_setup_status,
+            semantic_setup_apply,
+            semantic_setup_disable,
+            cloud_semantic_status,
+            cloud_semantic_apply,
+            cloud_semantic_disable,
             inspect_model_credential,
             configure_memory_model,
             stop_local_service,
             memory_job_control,
             memory_job_review,
+            memory_job_approve,
+            memory_index_retry,
             connection_inventory,
             connection_configure,
             connection_agent_configs,
@@ -1571,6 +1766,10 @@ fn main() {
             write_clipboard,
             cancel_previews,
             vault_status,
+            git_sync_status,
+            preview_git_sync,
+            cancel_git_sync_preview,
+            apply_git_sync,
             browse_records,
             list_conversations,
             conversation_messages,

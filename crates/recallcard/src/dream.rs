@@ -13,6 +13,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod rollback;
+mod split;
+
 const JOB_SCHEMA: &str = "recallcard.dream-job/1";
 const RESULT_SCHEMA: &str = "recallcard.dream-result/1";
 const MAX_JOB_BYTES: usize = 1024 * 1024;
@@ -66,6 +69,8 @@ fn suggestion() -> Evidence {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DreamProposal {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub navigation: Option<Vec<crate::navigation::Hint>>,
     pub operation: DreamOperation,
     pub scope: String,
     #[serde(default)]
@@ -95,11 +100,27 @@ pub struct DreamProposal {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct DreamSplitPlan {
+    pub target_ref: String,
+    pub expected_revision: u64,
+    pub proposal_indexes: Vec<usize>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DreamSplitHistory {
+    pub target_ref: String,
+    pub retired_ref: String,
+    pub branch_refs: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DreamResult {
     pub schema: String,
     pub job_id: String,
     pub input_hash: String,
     pub proposals: Vec<DreamProposal>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split_plans: Vec<DreamSplitPlan>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -124,6 +145,8 @@ pub struct DreamReceipt {
     pub result_hash: String,
     pub applied_at: DateTime<Utc>,
     pub source_coverage: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split_history: Vec<DreamSplitHistory>,
     pub changes: Vec<DreamAppliedMemory>,
     pub already_applied: bool,
 }
@@ -138,6 +161,8 @@ pub struct DreamReview {
     pub can_apply: bool,
     pub changes: Vec<DreamChange>,
     pub diagnostics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split_history: Vec<DreamSplitHistory>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -149,6 +174,8 @@ struct Transaction {
     approve_protected: bool,
     writes: Vec<DreamChange>,
     receipt: DreamReceipt,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    rollback: bool,
 }
 
 impl Vault {
@@ -169,6 +196,22 @@ impl Vault {
         }
         let sources = unique(source_ids, "Dream 来源")?;
         let memories = unique(memory_ids, "Dream 旧记忆")?;
+        let mut selected_memories = Vec::new();
+        let mut required_sources = sources
+            .iter()
+            .map(|id| event_ref(id))
+            .collect::<Result<BTreeSet<_>>>()?;
+        for reference in memories {
+            let (id, revision) = memory_ref(&reference)?;
+            let memory = self.memory(&id)?;
+            if revision.is_some_and(|r| r != memory.revision) {
+                return Err("导出指定的记忆版本已经过期".into());
+            }
+            required_sources.extend(memory.data.source_refs.iter().cloned());
+            selected_memories.push(memory);
+        }
+        let mut events = crate::vault::EventSnapshot::new(self, &_lock);
+        let suppressed = self.suppressed_ids_for_sources(&required_sources, &mut events)?;
         let mut job = DreamJob {
             schema: JOB_SCHEMA.into(),
             job_id: String::new(),
@@ -183,21 +226,16 @@ impl Vault {
         };
         for id in sources {
             let id = event_ref(&id)?;
-            let event = self.event(&id)?;
-            self.check_dream_source(&event, scope)?;
+            let event = events.event(&id)?;
+            self.check_dream_source(&event, scope, &suppressed)?;
             job.source_refs.push(DreamSource {
                 reference: format!("event:{id}"),
                 content_hash: digest(&event)?,
                 event,
             });
         }
-        for id in memories {
-            let (id, requested_revision) = memory_ref(&id)?;
-            let memory = self.memory(&id)?;
-            if requested_revision.is_some_and(|r| r != memory.revision) {
-                return Err("导出指定的记忆版本已经过期".into());
-            }
-            self.check_dream_memory(&memory, scope)?;
+        for memory in selected_memories {
+            self.check_dream_memory_with(&memory, scope, |id| events.event(id), &suppressed)?;
             job.memory_read_set.push(DreamReadMemory {
                 reference: format!("memory:{}@{}", memory.id, memory.revision),
                 content_hash: digest(&memory)?,
@@ -226,7 +264,7 @@ impl Vault {
     pub fn dream_review(&self, result: &DreamResult) -> Result<DreamReview> {
         let _lock = self.lock()?;
         let (job, result_hash) = self.load_result(result)?;
-        if self.existing_receipt(result, &result_hash)?.is_some() {
+        if let Some(receipt) = self.existing_receipt(result, &result_hash)? {
             return Ok(DreamReview {
                 job_id: result.job_id.clone(),
                 input_hash: result.input_hash.clone(),
@@ -236,6 +274,7 @@ impl Vault {
                 can_apply: true,
                 changes: vec![],
                 diagnostics: vec!["相同结果已发布，无需再次写入".into()],
+                split_history: receipt.split_history,
             });
         }
         self.review_current(&job, result, result_hash, &_lock)
@@ -272,6 +311,7 @@ impl Vault {
             input_hash: job.input_hash.clone(),
             result_hash,
             applied_at: Utc::now(),
+            split_history: review.split_history.clone(),
             source_coverage: job
                 .source_refs
                 .iter()
@@ -299,6 +339,7 @@ impl Vault {
             approve_protected,
             writes: review.changes,
             receipt,
+            rollback: false,
         };
         if serde_json::to_vec_pretty(&transaction)
             .map_err(error)?
@@ -323,6 +364,14 @@ impl Vault {
             return Ok(json!({"ok":true,"recovered":false}));
         }
         let transaction: Transaction = read_json(&path)?;
+        if transaction.rollback {
+            self.finish_split_rollback(&transaction)?;
+            drop(_lock);
+            self.refresh_split_rollback_views()?;
+            return Ok(
+                json!({"ok":true,"recovered":true,"rolled_back":true,"result_hash":transaction.receipt.result_hash}),
+            );
+        }
         self.finish_dream_transaction(&transaction)?;
         drop(_lock);
         self.refresh_dream_views()?;
@@ -347,6 +396,11 @@ impl Vault {
     }
     fn load_result(&self, result: &DreamResult) -> Result<(DreamJob, String)> {
         validate_result(result)?;
+        let rollback = self.rollback_path(&digest(result)?)?;
+        reject_symlink(&rollback)?;
+        if rollback.exists() {
+            return Err("此结果已显式回滚，旧批准不能重放；请审阅新的提议".into());
+        }
         let path = self
             .state_dir()?
             .join("dream-jobs")
@@ -373,13 +427,19 @@ impl Vault {
             || receipt.job_id != result.job_id
             || receipt.input_hash != result.input_hash
             || receipt.result_hash != result_hash
+            || receipt.split_history != split::history(result, result_hash)?
         {
             return Err("该 Job 已发布另一结果，或持久收据损坏；拒绝重复覆盖".into());
         }
         Ok(Some(receipt))
     }
-    fn check_dream_source(&self, event: &Event, scope: &str) -> Result<()> {
-        if self.is_suppressed(&event.id)? {
+    fn check_dream_source(
+        &self,
+        event: &Event,
+        scope: &str,
+        suppressed: &BTreeSet<String>,
+    ) -> Result<()> {
+        if suppressed.contains(&event.id) {
             return Err("Dream 来源已被抑制，不能导出或重新提炼".into());
         }
         if event.data.scope != scope {
@@ -390,21 +450,19 @@ impl Vault {
         }
         Ok(())
     }
-    fn check_dream_memory(&self, memory: &Memory, scope: &str) -> Result<()> {
-        self.check_dream_memory_with(memory, scope, |id| self.event(id))
-    }
     fn check_dream_memory_with(
         &self,
         memory: &Memory,
         scope: &str,
         event: impl FnMut(&str) -> Result<Event>,
+        suppressed: &BTreeSet<String>,
     ) -> Result<()> {
-        if self.is_suppressed(&memory.id)?
+        if suppressed.contains(&memory.id)
             || memory
                 .data
                 .source_refs
                 .iter()
-                .any(|id| self.is_suppressed(id).unwrap_or(true))
+                .any(|id| suppressed.contains(id))
         {
             return Err("Dream 旧记忆或其来源已被抑制".into());
         }
@@ -421,10 +479,11 @@ impl Vault {
         guard: &crate::vault::WriteGuard,
     ) -> Result<DreamReview> {
         let mut events = crate::vault::EventSnapshot::new(self, guard);
+        let suppressed = self.suppressed_ids_from_event_iter(events.all()?.values())?;
         let mut allowed_sources = BTreeSet::new();
         for source in &job.source_refs {
             let current = events.event(&source.event.id)?;
-            self.check_dream_source(&current, &job.allowed_scope)?;
+            self.check_dream_source(&current, &job.allowed_scope, &suppressed)?;
             if digest(&current)? != source.content_hash {
                 return Err("Dream 来源哈希已改变，请重新导出任务".into());
             }
@@ -448,7 +507,12 @@ impl Vault {
         let mut baseline = BTreeMap::new();
         for old in &job.memory_read_set {
             let current = self.memory(&old.memory.id)?;
-            self.check_dream_memory_with(&current, &job.allowed_scope, |id| events.event(id))?;
+            self.check_dream_memory_with(
+                &current,
+                &job.allowed_scope,
+                |id| events.event(id),
+                &suppressed,
+            )?;
             if current.revision != old.memory.revision || digest(&current)? != old.content_hash {
                 return Err("Dream 旧记忆 read-set 已过期，请重新读取和整理，不能覆盖".into());
             }
@@ -457,9 +521,35 @@ impl Vault {
         let mut changes = Vec::new();
         let mut touched = BTreeSet::new();
         let mut protected = false;
+        let split_targets = split::targets(job, result)?;
+        for old in split_targets.values() {
+            if touched.insert(old.id.clone()) {
+                protected |= old.data.protected;
+                let mut retired = old.clone();
+                retired.state = MemoryState::Superseded;
+                retired.revision = retired
+                    .revision
+                    .checked_add(1)
+                    .ok_or("记忆版本已达到上限")?;
+                retired.updated_at = Utc::now();
+                changes.push(DreamChange {
+                    operation: DreamOperation::Supersede,
+                    before: Some(old.clone()),
+                    after: Some(retired),
+                });
+            }
+        }
         let mut diagnostics = vec!["结构/来源校验不能证明自然语言结论真实，请人工核对 diff".into()];
         let mut can_apply = true;
         for (index, proposal) in result.proposals.iter().enumerate() {
+            crate::navigation::validate(proposal.navigation.as_deref().unwrap_or_default())?;
+            if matches!(
+                proposal.operation,
+                DreamOperation::Noop | DreamOperation::Conflict
+            ) && proposal.navigation.as_ref().is_some_and(|h| !h.is_empty())
+            {
+                return Err("noop/conflict 不接受导航修改".into());
+            }
             if proposal.scope != job.allowed_scope {
                 return Err("Dream 提议不能扩大或改变授权 scope".into());
             }
@@ -489,31 +579,19 @@ impl Vault {
                 }
                 continue;
             }
-            let content = proposal
-                .content
-                .clone()
-                .ok_or("新增/修改提议必须提供 content")?;
-            let mut input = MemoryInput {
-                content,
-                source_refs: refs,
-                evidence: proposal.evidence.clone(),
-                confidence: proposal.model_score,
-                scope: proposal.scope.clone(),
-                authority: "dream".into(),
-                protected: false,
-                observed_at: proposal.observed_at,
-                time_note: proposal.time_note.clone(),
-                supersedes: vec![],
-                entities: proposal.entities.clone(),
-                tags: proposal.labels.clone(),
-                valid_from: proposal.valid_from,
-                valid_to: proposal.valid_to,
-            };
+            let mut input = proposal_input(proposal)?;
             Self::validate_evidence_with(&input, |id| events.event(id))?;
             match proposal.operation {
                 DreamOperation::Add => {
                     if proposal.target_ref.is_some() || proposal.expected_revision.is_some() {
                         return Err("add 不能携带修改目标或旧版本".into());
+                    }
+                    if let Some(old) = split_targets.get(&index) {
+                        input.supersedes = vec![old.id.clone()];
+                        input.protected = old.data.protected;
+                        if input.protected {
+                            input.authority = old.data.authority.clone();
+                        }
                     }
                     let after = proposed_memory(self, input, &result_hash, index);
                     if self.memory_path(&after.id).exists() {
@@ -541,6 +619,9 @@ impl Vault {
                         .get(&id)
                         .ok_or("修改目标不在 Job 的 memory_read_set 内")?
                         .clone();
+                    if !before.data.navigation.is_empty() && proposal.navigation.is_none() {
+                        return Err("更新已有导航记忆须明确提供完整 navigation；不会静默丢入口或保留可能过期的简介".into());
+                    }
                     if before.revision != expected {
                         return Err("修改目标版本与任务基线不一致".into());
                     }
@@ -612,6 +693,7 @@ impl Vault {
         Ok(DreamReview {
             job_id: job.job_id.clone(),
             input_hash: job.input_hash.clone(),
+            split_history: split::history(result, &result_hash)?,
             result_hash,
             already_applied: false,
             requires_protected_approval: protected,
@@ -670,7 +752,7 @@ impl Vault {
     }
 
     fn validate_transaction(&self, tx: &Transaction) -> Result<()> {
-        if tx.schema_version != 1 || tx.vault_root != self.root().to_string_lossy() {
+        if tx.rollback || tx.schema_version != 1 || tx.vault_root != self.root().to_string_lossy() {
             return Err("事务不属于当前 Vault 或版本不受支持".into());
         }
         validate_job(&tx.job)?;
@@ -697,19 +779,15 @@ impl Vault {
         if coverage != tx.receipt.source_coverage {
             return Err("事务来源覆盖收据不一致".into());
         }
-        // 恢复时不经过公共读取屏障，但仍逐条确认来源及 suppression 没有被外部替换。
-        let suppressed = self.suppressed_ids_for_dream_recovery()?;
+        split::validate_writes(tx)?;
+        // 恢复时不经过 Dream 自身的公共读取屏障，Event 事务仍须在读取前阻断。
+        self.check_dream_recovery_barrier()?;
         let allowed: BTreeSet<_> = tx
             .job
             .source_refs
             .iter()
             .map(|s| s.event.id.as_str())
             .collect();
-        let mut recovery_sources: BTreeSet<String> =
-            allowed.iter().map(|id| (*id).to_string()).collect();
-        for after in tx.writes.iter().filter_map(|change| change.after.as_ref()) {
-            recovery_sources.extend(after.data.source_refs.iter().cloned());
-        }
         let source_keys: BTreeMap<_, _> = tx
             .job
             .source_refs
@@ -725,11 +803,10 @@ impl Vault {
             }) {
                 return Err("恢复时整理来源已有新修订，停止发布旧事实".into());
             }
-            if recovery_sources.contains(&event.id) {
-                current_events.insert(event.id.clone(), event);
-            }
+            current_events.insert(event.id.clone(), event);
             Ok(())
         })?;
+        let suppressed = self.suppressed_ids_for_dream_recovery(current_events.values())?;
         for source in &tx.job.source_refs {
             let current = current_events
                 .get(&source.event.id)
@@ -832,11 +909,37 @@ impl Vault {
 
 fn proposed_memory(vault: &Vault, input: MemoryInput, result_hash: &str, index: usize) -> Memory {
     let mut memory = vault.new_memory(input);
-    memory.id = format!(
+    memory.id = proposed_id(result_hash, index);
+    memory
+}
+fn proposed_id(result_hash: &str, index: usize) -> String {
+    format!(
         "mem_{}",
         &hash(format!("{result_hash}:{index}").as_bytes())[..32]
-    );
-    memory
+    )
+}
+fn proposal_input(p: &DreamProposal) -> Result<MemoryInput> {
+    Ok(MemoryInput {
+        navigation: p.navigation.clone().unwrap_or_default(),
+        content: p.content.clone().ok_or("新增/修改提议必须提供 content")?,
+        source_refs: p
+            .source_refs
+            .iter()
+            .map(|r| event_ref(r))
+            .collect::<Result<Vec<_>>>()?,
+        evidence: p.evidence.clone(),
+        confidence: p.model_score,
+        scope: p.scope.clone(),
+        authority: "dream".into(),
+        protected: false,
+        observed_at: p.observed_at,
+        time_note: p.time_note.clone(),
+        supersedes: vec![],
+        entities: p.entities.clone(),
+        tags: p.labels.clone(),
+        valid_from: p.valid_from,
+        valid_to: p.valid_to,
+    })
 }
 fn digest<T: Serialize>(value: &T) -> Result<String> {
     Ok(hash(&serde_json::to_vec(value).map_err(error)?))
@@ -930,7 +1033,7 @@ fn validate_job(job: &DreamJob) -> Result<()> {
     }
     Ok(())
 }
-fn validate_result(result: &DreamResult) -> Result<()> {
+pub(crate) fn validate_result(result: &DreamResult) -> Result<()> {
     validate_job_id(&result.job_id)?;
     if result.schema != RESULT_SCHEMA {
         return Err("不支持的 DreamResult schema；自由聊天回复不是完整结果".into());
@@ -942,6 +1045,24 @@ fn validate_result(result: &DreamResult) -> Result<()> {
     }
     if result.proposals.is_empty() {
         return Err("DreamResult 必须明确给出提议或 noop，不能把空输出视为完成".into());
+    }
+    if result.split_plans.len() > MAX_MEMORIES {
+        return Err("拆分计划超过上限".into());
+    }
+    for plan in &result.split_plans {
+        let (_, revision) = memory_ref(&plan.target_ref)?;
+        if revision != Some(plan.expected_revision)
+            || plan.expected_revision == 0
+            || !(2..=8).contains(&plan.proposal_indexes.len())
+            || plan
+                .proposal_indexes
+                .iter()
+                .any(|i| *i >= result.proposals.len())
+            || plan.proposal_indexes.iter().collect::<BTreeSet<_>>().len()
+                != plan.proposal_indexes.len()
+        {
+            return Err("拆分需要完整旧版本及2–8个不重复的有效提议编号".into());
+        }
     }
     for p in &result.proposals {
         validate_scope(&p.scope)?;

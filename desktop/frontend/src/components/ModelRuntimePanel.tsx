@@ -1,17 +1,26 @@
+import { monthlyBudgetLabel } from "../service/runtime";
 import { useEffect, useRef, useState } from 'react';
 import type { ScopedService } from '../service/client';
 import { appError, type AppError } from '../service/contracts';
 import { usePollingResource } from '../service/hooks';
 import type { ModelSetupRequest, ModelSetupSnapshot } from '../service/setup';
 import { dateLabel } from '../service/types';
-import { canRetryMemoryJob, runtimeLabel, type MemoryJob } from '../service/runtime';
+import { canRetryMemoryJob, memoryJobWindow, runtimeLabel, type MemoryJob } from '../service/runtime';
 import { Badge, Dialog, ErrorNotice, Loading } from './common';
 import { Icon } from './Icon';
 import { ModelSetupDialog } from './ModelSetup';
+import { MemoryReviewDialog } from './MemoryReview';
+import { CloudSemanticSetupPanel } from './CloudSemanticSetup';
+import { SemanticSetupPanel } from './SemanticSetup';
 
 export function ModelRuntimePanel({ service, settings = false, refreshToken = 0 }: { service: ScopedService; settings?: boolean; refreshToken?: number }) {
   const status = usePollingResource(() => service.setupStatus(), [service, refreshToken]);
   const [editing, setEditing] = useState(false);
+  const [jobFilter,setJobFilter]=useState<'pending'|'all'>('pending');
+  const [jobPage,setJobPage]=useState(0);
+  useEffect(()=>{setJobFilter('pending');setJobPage(0);},[service]);
+  const [indexBusy,setIndexBusy]=useState(false);
+  const indexLock=useRef(false);
   const [stopping, setStopping] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
   const [operationError, setOperationError] = useState<AppError | null>(service.modelLastError ? appError(service.modelLastError) : null);
@@ -38,6 +47,13 @@ export function ModelRuntimePanel({ service, settings = false, refreshToken = 0 
     catch (reason) { setStopRequested(false); setOperationError(appError(reason)); }
   };
   useEffect(() => { if (status.data?.service && !status.data.service.running) setStopRequested(false); }, [status.data?.service?.running]);
+  const retryIndex=async()=>{
+    if(indexLock.current)return;
+    indexLock.current=true;setIndexBusy(true);setOperationError(null);
+    try {await service.retryMemoryIndex();status.refresh();}
+    catch(reason){setOperationError(appError(reason));}
+    finally{indexLock.current=false;setIndexBusy(false);}
+  };
   if (status.loading) return <Loading label="正在核对本机服务与模型状态" />;
   if (status.error) return <ErrorNotice error={status.error} retry={status.refresh} />;
   const snapshot = status.data!;
@@ -45,20 +61,29 @@ export function ModelRuntimePanel({ service, settings = false, refreshToken = 0 
   const running = snapshot.service?.running === true;
   const requestActive = pending || !!service.modelPending;
   const initial = service.modelDraft ? { ...snapshot, runtime: { ...runtime, config: service.modelDraft } } : snapshot;
+  const jobWindow=memoryJobWindow(runtime.jobs,jobFilter,jobPage);
   return <section className={`model-runtime-panel ${settings ? 'settings-model-panel' : ''}`} aria-label="后台整理与本机服务">
-    <div className="runtime-summary"><span className="runtime-icon"><Icon name="moon" size={22} /></span><div className="runtime-summary-main"><div className="runtime-title"><h2>后台记忆整理</h2><Badge tone={runtime.state === 'failed' || runtime.state === 'needs_input' ? 'warning' : 'muted'}>{runtimeLabel(runtime.state)}</Badge></div><p>{runtime.message}</p><div className="runtime-facts"><span>{running ? '本机服务运行中' : '本机服务未运行'}</span><span>{snapshot.credential.present ? '已提供凭据' : '尚无可用凭据'}</span><span>{runtime.jobs.some(job => job.state === 'completed' && job.progress.provider_calls > 0) ? '已有整理完成记录' : '模型响应尚未验证'}</span></div></div><button className="button" disabled={requestActive || stopRequested} onClick={() => setEditing(true)}>{runtime.config.provider ? '检查模型设置' : '连接模型'}</button></div>
+    <div className="runtime-summary"><span className="runtime-icon"><Icon name="moon" size={22} /></span><div className="runtime-summary-main"><div className="runtime-title"><h2>后台记忆整理</h2><Badge tone={runtime.state === 'failed' || runtime.state === 'needs_input' ? 'warning' : 'muted'}>{runtimeLabel(runtime.state)}</Badge></div><p>{runtime.message}</p><div className="runtime-facts"><span>{running ? '本机服务运行中' : '本机服务未运行'}</span><span>{runtime.config.pipeline==='staged_review'?'提取→整合，人工审阅后保存':'旧版单阶段配置；重新保存模型设置可切换分阶段审阅'}</span><span>{snapshot.credential.present ? '已提供凭据' : '尚无可用凭据'}</span><span>{runtime.jobs.some(job => job.state === 'completed' && job.progress.provider_calls > 0) ? '已有整理完成记录' : '模型响应尚未验证'}</span></div></div><button className="button" disabled={requestActive || stopRequested} onClick={() => setEditing(true)}>{runtime.config.provider ? '检查模型设置' : '连接模型'}</button></div>
     {requestActive && <p className="context-note" role="status"><span className="spinner" />此资料库的模型设置正在更新，请等待实际结果。不会重复提交密钥。</p>}
     {stopRequested && <p className="context-note" role="status">已请求停止，正在等待安全边界；尚未确认服务退出。</p>}
     {operationError && <ErrorNotice error={operationError} />}
     {snapshot.service_error && !operationError && <ErrorNotice error={snapshot.service_error} />}
     {snapshot.service?.error && <ErrorNotice error={snapshot.service.error} />}
-    {settings && <div className="model-setting-details"><dl><div><dt>模型目的地</dt><dd>{runtime.config.provider ? `${runtime.config.provider.model} · ${runtime.config.provider.endpoint}` : '尚未配置，不会默认把资料发送给供应商'}</dd></div><div><dt>密钥方式</dt><dd>{snapshot.credential.message}</dd></div><div><dt>实际服务心跳</dt><dd>{running && snapshot.service?.heartbeat_at ? dateLabel(snapshot.service.heartbeat_at, true) : '没有运行中的服务回执'}</dd></div><div><dt>本月资源使用</dt><dd>{runtime.usage.reserved_calls} / {runtime.config.budget.max_calls_per_month} 次预留请求 · {runtime.usage.reserved_tokens.toLocaleString()} / {runtime.config.budget.max_reserved_tokens_per_month.toLocaleString()} tokens</dd></div></dl><p className="field-hint">{runtime.budget_note}</p><div className="model-service-controls"><button className="button compact" disabled={!running || requestActive || stopRequested} onClick={() => setStopping(true)}><Icon name="pause" size={14} />暂停并停止本机服务</button>{!running && <span>服务未运行，已保存的原话仍可查找。</span>}</div><details className="advanced-details"><summary>高级启动方式</summary><p>可以由受保护的启动环境提供 RECALLCARD_DREAM_API_KEY。不要把密钥写进资料库、源码或普通配置文件。此方式不表示已经保存在系统凭据存储。</p></details></div>}
-    {runtime.jobs.length > 0 && <div className="memory-runtime-jobs"><div className="section-heading"><h2>最近整理任务</h2><span>{runtime.jobs.length} 项</span></div>{[...runtime.jobs].sort((a,b)=>b.created_at.localeCompare(a.created_at)).slice(0,10).map(job => <MemoryJobRow key={job.job_id} service={service} job={job} refresh={status.refresh} />)}</div>}
+    {settings && <div className="model-setting-details"><dl><div><dt>模型目的地</dt><dd>{runtime.config.provider ? `${runtime.config.provider.model} · ${runtime.config.provider.endpoint}` : '尚未配置，不会默认把资料发送给供应商'}</dd></div><div><dt>密钥方式</dt><dd>{snapshot.credential.message}</dd></div><div><dt>实际服务心跳</dt><dd>{running && snapshot.service?.heartbeat_at ? dateLabel(snapshot.service.heartbeat_at, true) : '没有运行中的服务回执'}</dd></div><div><dt>本月资源使用</dt><dd>{runtime.usage.reserved_calls} 次预留请求 · {runtime.usage.reserved_tokens.toLocaleString()} tokens；月度预算：{monthlyBudgetLabel(runtime.config.budget)}</dd></div></dl><p className="field-hint">{runtime.budget_note}</p><div className="model-service-controls"><button className="button compact" disabled={!running || requestActive || stopRequested} onClick={() => setStopping(true)}><Icon name="pause" size={14} />暂停并停止本机服务</button>{!running && <span>服务未运行，已保存的原话仍可查找。</span>}</div><details className="advanced-details"><summary>高级启动方式</summary><p>可以由受保护的启动环境提供 RECALLCARD_DREAM_API_KEY。不要把密钥写进资料库、源码或普通配置文件。此方式不表示已经保存在系统凭据存储。</p></details></div>}
+    {runtime.index_refresh && <div className="context-note" role="status"><strong>文档向量索引</strong><p>{runtime.index_refresh.message}</p><p>已准备 {runtime.index_refresh.ready_documents} / {runtime.index_refresh.total_documents} 条 · 累计新向量 {runtime.index_refresh.new_vectors} 条 · 最后核验 {dateLabel(runtime.index_refresh.checked_at,true)}</p>{runtime.index_refresh.error_code && <p>状态码：{runtime.index_refresh.error_code}</p>}{runtime.index_refresh.generation && <p>目标代次：{runtime.index_refresh.generation.slice(0,12)} · 已发布：{runtime.index_refresh.indexed_generation?.slice(0,12) || '尚未确认'}</p>}{runtime.index_refresh.can_retry && <button className="button compact" disabled={indexBusy || requestActive || stopRequested} onClick={()=>void retryIndex()}>重试本机索引更新</button>}<p>索引失败不会撤回已批准记忆；半成品不参与语义检索。未配置本机语料编码时不会自动扩大查询授权。</p></div>}
+    {settings && <><CloudSemanticSetupPanel service={service}/><SemanticSetupPanel service={service}/></>}
+    {runtime.jobs.length > 0 && <div className="memory-runtime-jobs"><div className="section-heading"><h2>整理任务</h2><span>待处理或进行中 {jobWindow.pendingCount} 项 · 全部 {runtime.jobs.length} 项</span></div>
+      <div className="segmented-tabs" aria-label="整理任务筛选"><button aria-pressed={jobFilter==='pending'} className={jobFilter==='pending'?'active':''} onClick={()=>{setJobFilter('pending');setJobPage(0);}}>待处理 / 进行中</button><button aria-pressed={jobFilter==='all'} className={jobFilter==='all'?'active':''} onClick={()=>{setJobFilter('all');setJobPage(0);}}>全部任务</button></div>
+      {!jobWindow.total&&<p role="status">暂无待处理或运行中的任务。已完成与取消的记录仍可在「全部任务」查看。</p>}
+      {jobWindow.rows.map(job => <MemoryJobRow key={job.job_id} service={service} job={job} refresh={status.refresh} />)}
+      {!!jobWindow.total&&<div className="connection-controls" aria-label="整理任务分页"><button className="button compact" disabled={jobWindow.page===0} onClick={()=>setJobPage(jobWindow.page-1)}>上一页任务</button><span role="status">显示 {jobWindow.start}–{jobWindow.end} / {jobWindow.total} 项</span><button className="button compact" disabled={jobWindow.page+1>=jobWindow.pages} onClick={()=>setJobPage(jobWindow.page+1)}>下一页任务</button></div>}
+    </div>}
     {editing && <ModelSetupDialog key={runtime.config.scope} initial={initial} scope={service.scope} inspect={target => service.inspectModel(target)} submit={submit} close={() => setEditing(false)} />}
     {stopping && <Dialog title="暂停并停止本机服务？" close={() => setStopping(false)}><div className="modal-body"><p>将暂停整个资料库的后台任务，并在安全边界停止服务。已保存的来源和记忆会保留。</p><p>仅当前服务持有的会话密钥会在服务退出后失效；系统中已安全保存的密钥不会被删除。只关闭窗口不会清除会话密钥。</p></div><div className="modal-footer"><button className="button" onClick={() => setStopping(false)}>取消</button><button className="button primary" onClick={() => void stop()}>确认暂停并停止</button></div></Dialog>}
   </section>;
 }
 function MemoryJobRow({ service, job, refresh }: { service: ScopedService; job: MemoryJob; refresh: () => void }) {
+  const [reviewing, setReviewing] = useState(false);
   const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
   const submitting = useRef(false);
@@ -78,5 +103,5 @@ function MemoryJobRow({ service, job, refresh }: { service: ScopedService; job: 
   };
   const label = ({queued:'等待整理',running:'正在整理',paused:'已暂停',needs_input:'需要处理',failed:'未完成',completed:'已完成',cancelled:'已取消'})[job.state];
   const phase = ({preflight:'检查资料',parsing:'读取来源',preparing:'准备有界来源',executing:'等待模型响应',validating:'核对证据与版本',committing:'保存记忆',indexing:'更新检索',finished:'处理结束'})[job.phase];
-  return <div className="memory-runtime-job"><div className="job-title"><strong>{phase}</strong><Badge tone={job.state==='needs_input'||job.state==='failed'?'warning':job.state==='completed'?'success':'muted'}>{label}</Badge><span className="row-date">{dateLabel(job.updated_at,true)}</span></div><p>读取 {job.progress.sources_selected} 条来源 · 已保存 {job.progress.memories_committed} 条记忆 · 跳过 {job.progress.sources_skipped} 条来源</p>{job.error && <ErrorNotice error={job.error} />}{canRetryMemoryJob(job) && <p className="field-hint">修复连接或额度后可重试；重试可能再次产生请求费用，上次预留预算不会自动退还。</p>}{error && <ErrorNotice error={error} />}<div className="connection-controls">{job.state==='running'||job.state==='queued'?<button className="button compact" disabled={busy} onClick={()=>void controls('pause')}>暂停任务</button>:job.state==='paused'?<button className="button compact" disabled={busy} onClick={()=>void controls('resume')}>继续任务</button>:canRetryMemoryJob(job)?<button className="button compact" disabled={busy} onClick={()=>void controls('retry')}>重试任务</button>:null}{['needs_input','failed','paused'].includes(job.state)&&<button className="text-button" disabled={busy} onClick={()=>void controls('cancel')}>取消此候选任务</button>}</div></div>;
+  return <div className="memory-runtime-job">{reviewing && <MemoryReviewDialog key={`${service.workspace.session_id}:${service.scope}:${job.job_id}`} service={service} jobId={job.job_id} close={()=>setReviewing(false)} committed={()=>{setReviewing(false);refresh();}} />}<div className="job-title"><strong>{phase}</strong><Badge tone={job.state==='needs_input'||job.state==='failed'?'warning':job.state==='completed'?'success':'muted'}>{label}</Badge><span className="row-date">{dateLabel(job.updated_at,true)}</span></div><p>读取 {job.progress.sources_selected} 条来源 · 已保存 {job.progress.memories_committed} 条记忆 · 跳过 {job.progress.sources_skipped} 条来源</p>{job.error && <ErrorNotice error={job.error} />}{canRetryMemoryJob(job) && <p className="field-hint">修复连接或额度后可重试；重试可能再次产生请求费用，上次预留预算不会自动退还。</p>}{error && <ErrorNotice error={error} />}<div className="connection-controls">{['needs_input','failed'].includes(job.state) && <button className="button compact" disabled={busy} onClick={()=>setReviewing(true)}>审阅候选</button>}{job.state==='running'||job.state==='queued'?<button className="button compact" disabled={busy} onClick={()=>void controls('pause')}>暂停任务</button>:job.state==='paused'?<button className="button compact" disabled={busy} onClick={()=>void controls('resume')}>继续任务</button>:canRetryMemoryJob(job)?<button className="button compact" disabled={busy} onClick={()=>void controls('retry')}>重试任务</button>:null}{['needs_input','failed','paused'].includes(job.state)&&<button className="text-button" disabled={busy} onClick={()=>void controls('cancel')}>取消此候选任务</button>}</div></div>;
 }

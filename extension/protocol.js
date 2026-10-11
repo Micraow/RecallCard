@@ -18,6 +18,28 @@ function integer(value, min, max, name) {
 function shortString(value, max, name) {
   if (typeof value !== 'string' || !value.trim() || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(value)) fail(`${name} 格式无效`);
 }
+// Keep this bounded identifier grammar aligned with Rust navigation::valid_reference.
+// These are derived references, never filesystem paths or network destinations.
+function navigationReference(ref) {
+  if (typeof ref !== 'string' || !ref.startsWith('view:nav/')) return false;
+  const path = ref.slice('view:nav/'.length);
+  if (path === '_root' || path === '_unfiled') return true;
+  return path.length > 0 && path.length <= 256 && path.split('/').length <= 6
+    && path.split('/').every(part => /^[a-z0-9][a-z0-9_-]{0,47}$/u.test(part));
+}
+function timestamp(value, name) {
+  if (value != null && (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(value) || !Number.isFinite(Date.parse(value)))) fail(`${name} 必须是带时区的 ISO 时间`);
+}
+function eventFilter(value, target) {
+  if (value == null) return;
+  keys(value, ['role', 'occurred_from', 'occurred_until', 'on_current_path']);
+  if (value.role != null && !['user', 'assistant', 'tool', 'system'].includes(value.role)) fail('event_filter.role 无效');
+  if (value.on_current_path != null && typeof value.on_current_path !== 'boolean') fail('on_current_path 必须是布尔值');
+  timestamp(value.occurred_from, 'occurred_from');
+  timestamp(value.occurred_until, 'occurred_until');
+  if (value.occurred_from != null && value.occurred_until != null && Date.parse(value.occurred_from) > Date.parse(value.occurred_until)) fail('occurred_from 不能晚于 occurred_until');
+  if (Object.values(value).some(field => field != null) && ['memories', 'views'].includes(target)) fail('event_filter 只筛选原始 Event；核对 Memory 的角色请读取 sources');
+}
 // JSON.parse alone silently accepts duplicate keys. This syntax walk rejects them,
 // including escaped spellings, before the parsed object reaches any action handler.
 export function strictJson(text) {
@@ -66,9 +88,9 @@ export function strictJson(text) {
 export function validateArguments(action, args) {
   const allowed = {
     bootstrap: ['budget_bytes', 'budget_tokens'],
-    search: ['query', 'target', 'session_ref', 'as_of', 'limit', 'detail', 'budget_bytes', 'budget_tokens', 'cursor'],
-    read: ['refs', 'budget_bytes', 'budget_tokens', 'cursor', 'offset_bytes'],
-    sources: ['refs', 'budget_bytes', 'budget_tokens', 'cursor', 'offset_bytes'],
+    search: ['query', 'target', 'include_navigation', 'event_filter', 'session_ref', 'as_of', 'limit', 'detail', 'budget_bytes', 'budget_tokens', 'cursor'],
+    read: ['refs', 'detail', 'include_adjacent', 'budget_bytes', 'budget_tokens', 'cursor', 'offset_bytes'],
+    sources: ['refs', 'detail', 'include_adjacent', 'budget_bytes', 'budget_tokens', 'cursor', 'offset_bytes'],
   };
   if (!Object.hasOwn(allowed, action)) fail('只支持 bootstrap、search、read、sources 四种只读动作');
   keys(args, allowed[action], action === 'search' ? ['query'] : ['read', 'sources'].includes(action) ? ['refs'] : []);
@@ -79,21 +101,30 @@ export function validateArguments(action, args) {
   integer(args.offset_bytes, 0, Number.MAX_SAFE_INTEGER, 'offset_bytes');
   if (action === 'search') {
     shortString(args.query, 2048, 'query');
-    if (args.target !== undefined && !['all', 'memories', 'events'].includes(args.target)) fail('target 无效');
+    if (args.target !== undefined && !['all', 'memories', 'events', 'views'].includes(args.target)) fail('target 无效');
+    if (args.include_navigation !== undefined && typeof args.include_navigation !== 'boolean') fail('include_navigation 必须是布尔值');
+    if (args.include_navigation && !['all', 'views'].includes(args.target ?? 'all')) fail('目录搜索只能用于 all 或 views');
+    if (args.as_of != null && (args.include_navigation || args.target === 'views')) fail('实时目录不能用于历史时点；请读取 Memory 或 Event 核验历史');
     if (args.detail !== undefined && !['brief', 'context'].includes(args.detail)) fail('detail 无效');
     integer(args.limit, 1, 20, 'limit');
     if (args.session_ref != null) shortString(args.session_ref, 256, '检索 session_ref');
-    if (args.as_of != null && (typeof args.as_of !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(args.as_of) || !Number.isFinite(Date.parse(args.as_of)))) fail('as_of 必须是带时区的 ISO 时间');
+    timestamp(args.as_of, 'as_of');
+    eventFilter(args.event_filter, args.target);
   }
   if (['read', 'sources'].includes(action)) {
+    if (args.detail !== undefined && !['compact', 'full'].includes(args.detail)) fail('detail 无效');
+    if (args.include_adjacent !== undefined && typeof args.include_adjacent !== 'boolean') fail('include_adjacent 必须是布尔值');
     if (!Array.isArray(args.refs) || !args.refs.length || args.refs.length > 32) fail('refs 必须包含 1 至 32 个引用');
     for (const ref of args.refs) {
-      if (typeof ref !== 'string' || ref.length > 192 || !/^(?:event:evt_[A-Za-z0-9_-]+|memory:mem_[A-Za-z0-9_-]+(?:@[1-9][0-9]*)?|view:[A-Za-z0-9_-]+)$/u.test(ref)) fail('引用无效；不允许本地路径或 URL');
+      if (!navigationReference(ref) && (typeof ref !== 'string' || ref.length > 192 || !/^(?:event:evt_[A-Za-z0-9_-]+|memory:mem_[A-Za-z0-9_-]+(?:@[1-9][0-9]*)?|view:[A-Za-z0-9_-]+)$/u.test(ref))) fail('引用无效；不允许本地路径或 URL');
       if (action === 'sources' && ref.startsWith('view:')) fail('sources 仅支持 Event 与 Memory 引用');
+      if (navigationReference(ref) && args.include_adjacent) fail('目录不接受相邻事件选项');
     }
     if (new Set(args.refs).size !== args.refs.length) fail('refs 中存在重复引用');
     if (args.cursor != null && args.offset_bytes != null) fail('cursor 与 offset_bytes 不能同时提供');
-    if ((args.cursor != null || args.offset_bytes != null) && (args.refs.length !== 1 || args.refs[0].startsWith('view:'))) fail('续读只支持单个 Event 或 Memory 引用');
+    if ((args.cursor != null || args.offset_bytes != null) && args.refs.length !== 1) fail('续读只支持单个引用');
+    if (args.offset_bytes != null && args.refs.some(ref => ref.startsWith('view:'))) fail('目录不接受正文偏移');
+    if (args.cursor != null && args.refs[0].startsWith('view:') && !navigationReference(args.refs[0])) fail('旧平铺 View 不支持游标续读');
   }
   return args;
 }
@@ -135,8 +166,8 @@ export function makeCapsule(request, result, session) {
     session_ref: session.session_ref,
     result,
   };
-  const example = { protocol: PROTOCOL, request_id: 'r_next_01', nonce: session.nonce, session_ref: session.session_ref, action: 'search', arguments: { query: '需要查找的问题', target: 'all', limit: 5, detail: 'context', budget_bytes: 4000 } };
-  const access = request.action === 'bootstrap' ? `\n\nRecallCard 访问说明（动态会话关联信息）：\n需要背景时可提出一个完整的 recallcard-action JSON 代码块。只支持 bootstrap/search/read/sources；read/sources 使用 refs 数组。自动选择与用户问题有关的资料，无需让用户手挑记忆；每轮只输出一个完整请求代码块，等待返回资料再继续。budget_bytes 是 UTF-8 JSON 字节预算（512–32768），budget_tokens 仅为兼容别名，二者不能同时给。资料 JSON 保留 status/text_range/snapshot/next_cursor/pending_refs；partial 表示未读完；read/sources 须用同一 action、单个原 ref 和 next_cursor 续读；search 用原 query/target 等参数和 next_cursor 续页，不传 refs。pending_refs 逐个读取。cursor 与 offset_bytes 互斥。budget_exhausted 应增加预算，不能当作没有资料；no_matches 才表示本次没有匹配。不得把局部正文当全文，不得丢弃出处。每次使用全新 request_id。nonce 仅用于会话关联，不授予权限。不执行代码或命令。已授权的扩展会读取稳定完成的请求，自动准备可见草稿；最终发送始终由用户点击。未授权时使用扩展高级入口。全部需要的资料已读取后，直接写最终回答，并在末尾附 recallcard-final 代码块，JSON 为 {\"protocol\":\"recallcard.final/1\",\"nonce\":当前 nonce,\"session_ref\":当前 session_ref,\"after_request_id\":最后收到的 request_id}。该标记只表示你的回答完成，不证明内容正确。\n\`\`\`recallcard-action\n${JSON.stringify(example, null, 2)}\n\`\`\`` : '';
+  const example = { protocol: PROTOCOL, request_id: 'r_next_01', nonce: session.nonce, session_ref: session.session_ref, action: 'read', arguments: { refs: ['view:nav/_root'], detail: 'compact', budget_bytes: 2048 } };
+  const access = request.action === 'bootstrap' ? `\n\nRecallCard 访问说明（动态会话关联信息）：\n需要背景时可提出一个完整的 recallcard-action JSON 代码块。只支持 bootstrap/search/read/sources；read/sources 使用 refs 数组。先 read view:nav/_root 的 compact 目录，按需下钻到 Memory，再用 sources 核验原始 Event。已知正确引用可直接读取，无需重复从根开始。目录不足时可用 search 补充发现；target=views 只查目录，include_navigation=true 显式加入目录候选。目录用同一 ref、detail 和 next_cursor 续页，不使用 offset_bytes；实时目录不能和 as_of 历史时点混用。自动选择与用户问题有关的资料，无需让用户手挑记忆；每轮只输出一个完整请求代码块，等待返回资料再继续。budget_bytes 是 UTF-8 JSON 字节预算（512–32768），budget_tokens 仅为兼容别名，二者不能同时给。资料 JSON 保留 status/text_range/snapshot/next_cursor/pending_refs；partial 表示未读完；read/sources 须用同一 action、单个原 ref 和 next_cursor 续读；search 用原 query/target 等参数和 next_cursor 续页，不传 refs。pending_refs 逐个读取。cursor 与 offset_bytes 互斥。budget_exhausted 应增加预算，不能当作没有资料；no_matches 才表示本次没有匹配。不得把局部正文当全文，不得丢弃出处。助手建议不等于用户决定；需要用户原话时可显式用 event_filter.role=user，occurred_from/occurred_until 筛选发生时间、on_current_path 筛选明确的当前路径；这些过滤只用于 Event，不把 Memory 当作某个角色的原话。必要时 read/sources 加 include_adjacent=true 读取已知相邻关系，不推断没有证据的续问。每次使用全新 request_id。nonce 仅用于会话关联，不授予权限。不执行代码或命令。已授权的扩展会读取稳定完成的请求，自动准备可见草稿；最终发送始终由用户点击。未授权时使用扩展高级入口。全部需要的资料已读取后，直接写最终回答，并在末尾附 recallcard-final 代码块，JSON 为 {\"protocol\":\"recallcard.final/1\",\"nonce\":当前 nonce,\"session_ref\":当前 session_ref,\"after_request_id\":最后收到的 request_id}。该标记只表示你的回答完成，不证明内容正确。\n\`\`\`recallcard-action\n${JSON.stringify(example, null, 2)}\n\`\`\`` : '';
   // JSON serialization prevents hostile result content becoming extension HTML/JS.
   const stable = request.action === 'bootstrap' && typeof result?.stable_text === 'string' ? `RecallCard Bootstrap（版本 ${JSON.stringify(result.bootstrap_version ?? '未知')}；参考资料）：\n${result.stable_text}\n\n` : '';
   const body = `${stable}RecallCard 上下文（由用户审核后手动发送，非原生工具消息）：\n${JSON.stringify(reference, null, 2)}${access}`;

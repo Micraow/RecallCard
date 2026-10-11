@@ -214,3 +214,43 @@ test('插入核验 request_id 被预留且失败不重放；重新准备必须�
   assert.equal(h.state().used.length,used+1);assert.ok(h.state().used.includes(checked.request_id));
   await assert.rejects(h.broker.handle(h.message('insert'),popup),/先准备/);
 });
+
+test('目录到用户原话的网页接力保留参数、分页与角色，插入前重查同一页', async () => {
+  // Real broker/protocol; Native replies are synthetic and do not prove Native execution.
+  const h = harness();
+  const rounds = [
+    { action: 'read', arguments: { refs: ['view:nav/_root'], detail: 'compact', budget_bytes: 2048 }, result: { entries: [{ ref: 'view:nav/projects/atlas' }], status: 'complete', next_cursor: null } },
+    { action: 'read', arguments: { refs: ['view:nav/projects/atlas'], detail: 'compact', cursor: 'synthetic-generation:1' }, result: { entries: [{ ref: 'memory:mem_atlas' }], status: 'complete', next_cursor: null } },
+    { action: 'sources', arguments: { refs: ['memory:mem_atlas'], detail: 'compact' }, result: { source_refs: ['event:evt_atlas'], status: 'complete' } },
+    { action: 'read', arguments: { refs: ['event:evt_atlas'], detail: 'compact', include_adjacent: true }, result: { results: [{ ref: 'event:evt_atlas', role: 'user', text: '合成用户决定', snapshot: 'synthetic-event-generation' }], status: 'complete' } },
+  ];
+  let index = 0;
+  h.api.native = async (host, request) => {
+    h.calls.push({ host, request });
+    assert.equal(request.action, rounds[index].action);
+    assert.deepEqual(request.arguments, rounds[index].arguments);
+    return { ok: true, result: structuredClone(rounds[index].result) };
+  };
+  for (index = 0; index < rounds.length; index++) {
+    const request = { protocol: 'recallcard.action/1', request_id: `r_directory_${index}`, nonce: h.state().nonce, session_ref: h.state().session_ref, action: rounds[index].action, arguments: rounds[index].arguments };
+    await h.broker.handle(h.message('execute', { text: '```recallcard-action\n' + JSON.stringify(request) + '\n```' }), popup);
+    assert.deepEqual(h.state().preview.source_request.arguments, rounds[index].arguments);
+  }
+  index = rounds.length - 1;
+  assert.match(h.state().preview.text, /"role": "user"/);
+  assert.match(h.state().preview.text, /synthetic-event-generation/);
+  await h.broker.handle(h.message('insert'), popup);
+  assert.equal(h.calls.length, 5);
+  assert.notEqual(h.calls[3].request.request_id, h.calls[4].request.request_id);
+  assert.equal(h.state().preview.delivery, 'draft');
+});
+
+test('目录分页结果在插入前被撤权时清除预览，不降级复用缓存', async () => {
+  const h = harness();
+  const request = { protocol: 'recallcard.action/1', request_id: 'r_directory_revoke', nonce: h.state().nonce, session_ref: h.state().session_ref, action: 'read', arguments: { refs: ['view:nav/_root'], detail: 'compact', cursor: 'synthetic:1' } };
+  h.api.native = async () => ({ ok: true, result: { entries: [{ ref: 'memory:mem_private' }], status: 'complete' } });
+  await h.broker.handle(h.message('execute', { text: '```recallcard-action\n' + JSON.stringify(request) + '\n```' }), popup);
+  h.api.native = async () => ({ ok: false, error: '合成撤权拒绝' });
+  await assert.rejects(h.broker.handle(h.message('insert'), popup), /旧预览已废弃/);
+  assert.equal(h.state().preview, null);
+});

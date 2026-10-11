@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { appError, type AppError } from "../service/contracts";
 import { scopeLabel } from "../service/types";
-import { validMemoryTimeouts, type MemoryConfig } from "../service/runtime";
+import { validMemoryTimeouts, monthlyBudgetLabel, type MemoryConfig } from "../service/runtime";
 import {
   validModelTarget,
   type ModelSetupRequest,
@@ -31,6 +31,7 @@ export function ModelSetupDialog({
   const [endpoint, setEndpoint] = useState(defaults.provider?.endpoint || "");
   const [model, setModel] = useState(defaults.provider?.model || "");
   const [apiKey, setApiKey] = useState("");
+  const [budgetMode, setBudgetMode] = useState<"limited" | "unlimited">(defaults.budget.mode ?? "limited");
   const [calls, setCalls] = useState(
     String(defaults.budget.max_calls_per_month),
   );
@@ -48,17 +49,17 @@ export function ModelSetupDialog({
   const [capability, setCapability] = useState<ModelSetupSnapshot | null>(null);
   const [remember, setRemember] = useState(false);
   const [sendApproved, setSendApproved] = useState(false);
-  const [applyApproved, setApplyApproved] = useState(false);
+  const [reviewAcknowledged, setReviewAcknowledged] = useState(false);
   const [busy, setBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submitLock = useRef(false);
   const [error, setError] = useState<AppError | null>(null);
   const validBudget = validMemoryTimeouts(timeouts) &&
-    Number.isSafeInteger(Number(calls)) &&
+    (budgetMode === "unlimited" || (Number.isSafeInteger(Number(calls)) &&
     Number(calls) >= 1 &&
     Number(calls) <= 1_000_000 &&
     Number.isSafeInteger(Number(tokens)) &&
-    Number(tokens) > 0 &&
+    Number(tokens) > 0)) &&
     Number.isSafeInteger(Number(output)) &&
     Number(output) >= 1 &&
     Number(output) <= 131072;
@@ -73,7 +74,7 @@ export function ModelSetupDialog({
     setError(null);
     setRemember(false);
     setSendApproved(false);
-    setApplyApproved(false);
+    setReviewAcknowledged(false);
     try {
       const status = await inspect({
         endpoint: endpoint.trim(),
@@ -103,12 +104,13 @@ export function ModelSetupDialog({
     }
   };
   const confirm = async () => {
-    if (!capability || !sendApproved || !applyApproved || submitLock.current) return;
+    if (!capability || !sendApproved || !reviewAcknowledged || submitLock.current) return;
     submitLock.current = true; setBusy(true); setSubmitting(true); setError(null);
     const provider = { endpoint: endpoint.trim(), model: model.trim() };
     const config: MemoryConfig = {
       ...defaults,
       schema: "recallcard.memory-runtime/1",
+      pipeline: "staged_review",
       enabled: true,
       paused: false,
       scope,
@@ -119,13 +121,14 @@ export function ModelSetupDialog({
         scope,
         send_source_snapshots: true,
         send_memory_snapshots: true,
-        auto_apply: true,
+        auto_apply: false,
         accepted_at: new Date().toISOString(),
       },
       budget: {
         ...defaults.budget,
-        max_calls_per_month: Number(calls),
-        max_reserved_tokens_per_month: Number(tokens),
+        mode: budgetMode,
+        max_calls_per_month: budgetMode === "unlimited" ? defaults.budget.max_calls_per_month : Number(calls),
+        max_reserved_tokens_per_month: budgetMode === "unlimited" ? defaults.budget.max_reserved_tokens_per_month : Number(tokens),
         max_output_tokens_per_call: Number(output),
       },
     };
@@ -139,7 +142,7 @@ export function ModelSetupDialog({
         (remember && capability.credential.os_protected_available === true)
           ? "os_protected"
           : "session_only",
-    }); } catch (reason) { setError(appError(reason)); setStep("input"); setSendApproved(false); setApplyApproved(false); } finally { submitLock.current = false; setBusy(false); setSubmitting(false); }
+    }); } catch (reason) { setError(appError(reason)); setStep("input"); setSendApproved(false); setReviewAcknowledged(false); } finally { submitLock.current = false; setBusy(false); setSubmitting(false); }
   };
   return (
     <Dialog
@@ -212,6 +215,11 @@ export function ModelSetupDialog({
               </div>
               <p className="field-hint">慢模型可延长等待，单步不得超过整个请求。暂停或取消会终止本机等待；已发出的请求仍可能计费。</p>
             </details>
+            <label className="field-label" htmlFor="model-budget-mode">月度预算模式</label>
+            <select id="model-budget-mode" className="field-input" value={budgetMode} onChange={event => setBudgetMode(event.target.value as "limited" | "unlimited")}>
+              <option value="limited">有限配额</option><option value="unlimited">无限预算，持续计量</option>
+            </select>
+            {budgetMode === "unlimited" && <p className="field-hint" role="status">不会因月度请求或 token 用量自动停止，可能持续产生供应商费用。仍可暂停、撤权，单次输入/输出与时限保留。</p>}
             <div className="budget-fields">
               <div>
                 <label className="field-label" htmlFor="model-month-calls">
@@ -223,6 +231,7 @@ export function ModelSetupDialog({
                   type="number"
                   min="1"
                   max="1000000"
+                  disabled={budgetMode === "unlimited"}
                   value={calls}
                   onChange={(event) => setCalls(event.target.value)}
                 />
@@ -236,6 +245,7 @@ export function ModelSetupDialog({
                   className="field-input"
                   type="number"
                   min="1"
+                  disabled={budgetMode === "unlimited"}
                   value={tokens}
                   onChange={(event) => setTokens(event.target.value)}
                 />
@@ -285,10 +295,10 @@ export function ModelSetupDialog({
               <label className="checkbox-row">
                 <input
                   type="checkbox"
-                  checked={applyApproved}
-                  onChange={(event) => setApplyApproved(event.target.checked)}
+                  checked={reviewAcknowledged}
+                  onChange={(event) => setReviewAcknowledged(event.target.checked)}
                 />
-                允许自动应用可回退的普通记忆更新；冲突、受保护内容和人工维护内容留待处理
+                了解每批通常先提取、再整合，共两次模型请求；候选须经人工审核后发布
               </label>
               <div className="credential-choice">
                 <h3>密钥保留方式</h3>
@@ -317,8 +327,7 @@ export function ModelSetupDialog({
                 )}
               </div>
               <div className="model-budget-review">
-                每月最多 {Number(calls).toLocaleString()} 次请求 · 预留{" "}
-                {Number(tokens).toLocaleString()} tokens · 单次输出最多{" "}
+                月度预算：{monthlyBudgetLabel({...defaults.budget, mode: budgetMode, max_calls_per_month: Number(calls), max_reserved_tokens_per_month: Number(tokens)})} · 单次输出最多{" "}
                 {Number(output).toLocaleString()} tokens · 连接 {connectSeconds} 秒 / 读取 {readSeconds} 秒 / 整个请求 {operationSeconds} 秒
               </div>
               <p className="field-hint">
@@ -336,7 +345,7 @@ export function ModelSetupDialog({
               ? () => {
                   setStep("input");
                   setSendApproved(false);
-                  setApplyApproved(false);
+                  setReviewAcknowledged(false);
                 }
               : dismiss
           }
@@ -354,7 +363,7 @@ export function ModelSetupDialog({
         ) : (
           <button
             className="button primary"
-            disabled={busy || !sendApproved || !applyApproved}
+            disabled={busy || !sendApproved || !reviewAcknowledged}
             onClick={() => void confirm()}
           >
             {submitting ? "正在更新服务…" : "保存授权并启动服务"}

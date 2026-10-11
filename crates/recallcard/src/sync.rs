@@ -6,6 +6,7 @@ use crate::{
     vault::{read_json, reject_symlink},
     Vault,
 };
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -13,6 +14,17 @@ use std::{
     path::Path,
     process::{Command, Output, Stdio},
 };
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GitSyncPreview {
+    pub remote: String,
+    pub fetch_destination: String,
+    pub push_destination: String,
+    pub scopes: Vec<String>,
+    pub status: Value,
+    #[serde(skip_serializing)]
+    pub(crate) fingerprint: String,
+}
 
 impl Vault {
     /// 仅同步明确指定、已经配置的远端与当前同名分支。
@@ -22,6 +34,10 @@ impl Vault {
             let _guard = self.lock()?;
             self.sync_locked(remote)?
         };
+        self.finish_sync(result)
+    }
+
+    fn finish_sync(&self, result: Value) -> Result<Value> {
         // rebuild 自身按步骤加锁，不能在持有 writer 锁时调用。
         let rebuilt = self.rebuild().map_err(|error| {
             format!("Git 已正常推送，但本机索引/视图重建失败：{error}；请执行 rebuild")
@@ -32,6 +48,10 @@ impl Vault {
     /// 只读本机状态，不访问远端，也不暴露远端 URL 或凭据。
     pub fn git_status(&self) -> Result<Value> {
         let _guard = self.read_guard()?;
+        self.git_status_locked()
+    }
+
+    fn git_status_locked(&self) -> Result<Value> {
         self.check_git_root()?;
         let branch = self.git_optional(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
         let head = self.git_optional(&["rev-parse", "--verify", "HEAD"])?;
@@ -46,6 +66,97 @@ impl Vault {
             "syncable_paths":changed.iter().filter(|p| approved_path(p)).collect::<Vec<_>>(),
             "remote_names":remotes.lines().collect::<Vec<_>>()
         }))
+    }
+
+    /// 桌面确认预览只读本机，不查询远端。范围始终是整个 Vault。
+    pub fn git_sync_preview(&self, remote: &str) -> Result<GitSyncPreview> {
+        let _guard = self.read_guard()?;
+        self.git_sync_preview_locked(remote)
+    }
+
+    /// 在同一个 writer 锁中重验预览，再复用 CLI 的同步算法。
+    pub(crate) fn sync_reviewed(&self, remote: &str, expected: &str) -> Result<Value> {
+        let result = {
+            let _guard = self.lock()?;
+            let current = self.git_sync_preview_locked(remote)?;
+            if current.fingerprint != expected {
+                return Err(
+                    "资料、Git 分支/暂存区或远端配置已改变，请重新检查同步预览；未提交或联网"
+                        .into(),
+                );
+            }
+            self.sync_locked(remote)?
+        };
+        self.finish_sync(result)
+    }
+
+    fn git_sync_preview_locked(&self, remote: &str) -> Result<GitSyncPreview> {
+        validate_remote(remote)?;
+        let status = self.git_status_locked()?;
+        self.ensure_git_idle()?;
+        if status["branch"].as_str().is_none() {
+            return Err("HEAD 处于游离状态，请先选择要同步的本地分支".into());
+        }
+        if !status["remote_names"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|name| name == remote))
+        {
+            return Err("请先在此资料库配置自己确认过的 Git 远端，再重新读取本机状态".into());
+        }
+        let fetch = self.git_text(&["remote", "get-url", "--all", remote], "检查拉取目标")?;
+        let push = self.git_text(
+            &["remote", "get-url", "--push", "--all", remote],
+            "检查推送目标",
+        )?;
+        if fetch.lines().count() != 1 || push.lines().count() != 1 {
+            return Err("同步只支持一个拉取目标和一个推送目标，请先整理远端配置".into());
+        }
+        let fetch_destination = destination_label(fetch.trim())?;
+        let push_destination = destination_label(push.trim())?;
+        self.check_index_paths()?;
+        self.validate_sync_canonical()?;
+        self.ensure_git_identity()?;
+        if let Some(head) = status["head"].as_str() {
+            self.check_tree(head)?;
+            self.ensure_immutable_events(head, None)?;
+        }
+        let mut content = Vec::new();
+        for path in self
+            .changed_paths()?
+            .into_iter()
+            .filter(|path| approved_path(path))
+        {
+            let file = self.root().join(&path);
+            reject_symlink(&file)?;
+            let digest = match fs::read(&file) {
+                Ok(bytes) => Some(hash(&bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return Err("无法核对待同步文件，请检查本机访问状态".into()),
+            };
+            content.push((path, digest));
+        }
+        let mut scopes: BTreeSet<String> = self
+            .events()?
+            .into_iter()
+            .map(|event| event.data.scope)
+            .collect();
+        scopes.extend(self.memories()?.into_iter().map(|memory| memory.data.scope));
+        let scopes: Vec<_> = scopes.into_iter().collect();
+        // URL 与配置仅参与摘要；不通过预览、错误、日志回传凭据。
+        let index = self.git_ok(&["ls-files", "--stage", "-z"], "核对暂存摘要")?;
+        let config = self.git_ok(
+            &["config", "--local", "--null", "--list"],
+            "核对本地 Git 配置",
+        )?;
+        let fingerprint = hash(&serde_json::to_vec(&json!({"status":status,"fetch":fetch,"push":push,"scopes":scopes,"content":content,"index":hash(&index.stdout),"config":hash(&config.stdout)})).map_err(|_| "无法生成同步预览摘要")?);
+        Ok(GitSyncPreview {
+            remote: remote.into(),
+            fetch_destination,
+            push_destination,
+            scopes,
+            status,
+            fingerprint,
+        })
     }
 
     fn sync_locked(&self, remote: &str) -> Result<Value> {
@@ -666,4 +777,35 @@ fn canonical_files(root: &Path) -> Result<Vec<String>> {
         visit(root, &root.join(directory), &mut result)?;
     }
     Ok(result)
+}
+
+/// 展示接收者，去除 userinfo、query 与 fragment；未知 helper 协议不开放 GUI 确认。
+fn destination_label(value: &str) -> Result<String> {
+    if value.is_empty() || value.chars().any(char::is_control) || value.contains("::") {
+        return Err("无法安全展示远端目标；请在本机核对 Git 配置，未发起同步".into());
+    }
+    let clean = value.split(['?', '#']).next().unwrap_or("");
+    if let Some((scheme, rest)) = clean.split_once("://") {
+        if !["https", "http", "ssh", "git", "file"].contains(&scheme) {
+            return Err("此远端协议尚不支持桌面目标预览，请使用已核对的标准 Git 目标".into());
+        }
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let host = authority.rsplit('@').next().unwrap_or("");
+        if host.is_empty() && scheme != "file" {
+            return Err("远端接收者为空，请核对 Git 配置".into());
+        }
+        Ok(format!("{scheme}://{host}/{path}"))
+    } else if let Some((host, path)) = clean.split_once(':') {
+        // SCP 风格 SSH；Windows 盘符保留本地路径含义。
+        if host.len() == 1 && host.as_bytes()[0].is_ascii_alphabetic() {
+            return Ok(format!("本地路径：{clean}"));
+        }
+        Ok(format!(
+            "ssh://{}/{}",
+            host.rsplit('@').next().unwrap_or(""),
+            path
+        ))
+    } else {
+        Ok(format!("本地路径：{clean}"))
+    }
 }

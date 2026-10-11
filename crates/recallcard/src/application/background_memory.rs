@@ -17,6 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod index_refresh;
+mod staged;
+pub use index_refresh::IndexRefreshStatus;
+pub use staged::{ExtractionContext, MemoryPipeline, SemanticLookup};
+
 const CONFIG_SCHEMA: &str = "recallcard.memory-runtime/1";
 const MAX_RECORD_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -79,6 +84,8 @@ pub struct MemoryConsent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryBudget {
+    #[serde(default, skip_serializing_if = "super::budget::BudgetMode::is_limited")]
+    pub mode: super::budget::BudgetMode,
     pub max_calls_per_month: u64,
     pub max_reserved_tokens_per_month: u64,
     pub max_output_tokens_per_call: u64,
@@ -87,6 +94,7 @@ pub struct MemoryBudget {
 impl Default for MemoryBudget {
     fn default() -> Self {
         Self {
+            mode: super::budget::BudgetMode::Limited,
             max_calls_per_month: 100,
             max_reserved_tokens_per_month: 1_000_000,
             max_output_tokens_per_call: 4096,
@@ -99,6 +107,17 @@ impl Default for MemoryBudget {
 #[serde(deny_unknown_fields)]
 pub struct MemoryConfig {
     pub schema: String,
+    /// 新配置默认分阶段并待人审；无字段旧配置保留原单调用身份。
+    #[serde(
+        default = "MemoryPipeline::legacy",
+        skip_serializing_if = "MemoryPipeline::is_legacy"
+    )]
+    pub pipeline: MemoryPipeline,
+    /// 可信本机设置引用既有离线检索配置；不继承 query 外发授权。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_semantic_config: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub index_maintenance_enabled: bool,
     pub enabled: bool,
     pub paused: bool,
     pub scope: String,
@@ -117,6 +136,9 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             schema: CONFIG_SCHEMA.into(),
+            pipeline: MemoryPipeline::StagedReview,
+            candidate_semantic_config: None,
+            index_maintenance_enabled: false,
             enabled: false,
             paused: false,
             scope: "personal".into(),
@@ -134,6 +156,13 @@ impl Default for MemoryConfig {
 impl MemoryConfig {
     pub fn validate(&self) -> AppResult<()> {
         self.timeouts.validate()?;
+        if self
+            .candidate_semantic_config
+            .as_ref()
+            .is_some_and(|p| !p.is_absolute())
+        {
+            return Err(invalid("后台候选语义配置必须是明确的本机绝对路径"));
+        }
         if self.schema != CONFIG_SCHEMA
             || validate_scope(&self.scope).is_err()
             || self.quiet_seconds > 86400
@@ -178,7 +207,6 @@ impl MemoryConfig {
                 || consent.scope != self.scope
                 || !consent.send_source_snapshots
                 || !consent.send_memory_snapshots
-                || !consent.auto_apply
                 || consent.accepted_at > Utc::now() + chrono::Duration::minutes(5)
             {
                 return Err(permission());
@@ -235,6 +263,7 @@ pub struct MemoryRuntimeStatus {
     pub usage: MemoryUsage,
     pub jobs: Vec<JobStatus<MemoryProgress>>,
     pub raw_search_available: bool,
+    pub index_refresh: Option<IndexRefreshStatus>,
     pub oversized_sources: u64,
     pub non_current_sources_skipped: u64,
     pub budget_note: String,
@@ -279,6 +308,22 @@ pub trait MemoryProvider {
         Ok(())
     }
     fn execute(&mut self, config: &MemoryConfig, job: &DreamJob) -> AppResult<ProviderOutput>;
+    fn execute_with_extraction(
+        &mut self,
+        config: &MemoryConfig,
+        job: &DreamJob,
+        extraction: Option<&ExtractionContext>,
+        cancelled: &dyn Fn() -> AppResult<bool>,
+    ) -> AppResult<ProviderOutput> {
+        if extraction.is_some() {
+            return Err(AppError::new(
+                ErrorCode::ModelUnavailable,
+                "模型适配器尚不支持分阶段整合",
+                "升级适配器；不会回退为忽略提取结果的单次调用",
+            ));
+        }
+        self.execute_cancellable(config, job, cancelled)
+    }
     fn execute_cancellable(
         &mut self,
         config: &MemoryConfig,
@@ -293,6 +338,8 @@ struct MemoryJobRecord {
     status: JobStatus<MemoryProgress>,
     config_hash: String,
     projection: DreamJob,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    staging: Option<staged::Staging>,
     result: Option<ProviderOutput>,
     dispatch_started: bool,
     receipt: Option<DreamReceipt>,
@@ -334,6 +381,12 @@ struct MemoryConfigRecord {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryJobReview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<ExtractionContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_lookup: Option<SemanticLookup>,
+    #[serde(default)]
+    pub source_snapshots: Vec<crate::dream::DreamSource>,
     pub job: JobStatus<MemoryProgress>,
     pub review: Option<crate::dream::DreamReview>,
     pub note: String,
@@ -455,6 +508,15 @@ impl<'a> MemoryRuntime<'a> {
         record.config.validate()?;
         Ok(record.config)
     }
+    /// 只比较单个原子配置文件，不读取多文件作业状态；可在现有 state 锁内校验，避免递归锁。
+    pub(crate) fn semantic_configuration_matches(
+        &self,
+        scope: &str,
+        path: &Path,
+    ) -> AppResult<bool> {
+        let config = self.read_config()?;
+        Ok(config.scope == scope && config.candidate_semantic_config.as_deref() == Some(path))
+    }
     pub fn configuration(&self) -> AppResult<MemoryConfig> {
         let _guard = self.read_lock()?;
         self.read_config()
@@ -482,6 +544,49 @@ impl<'a> MemoryRuntime<'a> {
         self.write_config_locked(&config)?;
         drop(guard);
         self.status()
+    }
+    pub(crate) fn configure_semantic(
+        &self,
+        scope: &str,
+        path: Option<PathBuf>,
+        index_enabled: bool,
+        resume: bool,
+    ) -> AppResult<MemoryRuntimeStatus> {
+        validate_scope(scope).map_err(|_| invalid("范围无效"))?;
+        let guard = self.lock("state.lock")?;
+        let mut config = self.read_config()?;
+        if config.scope != scope
+            && (config.enabled
+                || config.index_maintenance_enabled
+                || config.candidate_semantic_config.is_some())
+        {
+            return Err(invalid(
+                "此资料库已有另一个活动后台范围；请先在原范围停用，再切换",
+            ));
+        }
+        config.scope = scope.into();
+        config.candidate_semantic_config = path;
+        config.index_maintenance_enabled = index_enabled;
+        if resume {
+            config.paused = false;
+        }
+        config.validate()?;
+        self.write_config_locked(&config)?;
+        self.queue_index_locked(&config)?;
+        drop(guard);
+        self.status()
+    }
+    /// 仅清除调用者刚核验的语义路径；并发切换到本机模型时不得误停新配置。
+    pub(crate) fn clear_semantic_if(&self, scope: &str, expected: &Path) -> AppResult<bool> {
+        let _guard = self.lock("state.lock")?;
+        let mut config = self.read_config()?;
+        if config.scope != scope || config.candidate_semantic_config.as_deref() != Some(expected) {
+            return Ok(false);
+        }
+        config.candidate_semantic_config = None;
+        config.index_maintenance_enabled = false;
+        self.write_config_locked(&config)?;
+        Ok(true)
     }
     /// 仅调整等待时限；同一写锁内保留同期目的地、权限与预算。
     pub fn set_timeouts(&self, timeouts: MemoryTimeouts) -> AppResult<MemoryRuntimeStatus> {
@@ -573,7 +678,8 @@ impl<'a> MemoryRuntime<'a> {
                 "后台整理配置已就绪；运行服务启动后会增量处理新来源",
             )
         };
-        Ok(MemoryRuntimeStatus { schema: CONFIG_SCHEMA.into(), state: state.into(), message: message.into(), config, usage: self.usage()?, jobs, raw_search_available: self.vault.read_guard().is_ok(), oversized_sources, non_current_sources_skipped, budget_note: "请求次数与输出上限是本机限制；预留 token 按字节保守估计，供应商用量不是账单，不保证货币费用上限。未知用量不退还预留。".into() })
+        let index_refresh = self.index_status_locked(&config)?;
+        Ok(MemoryRuntimeStatus { index_refresh, schema: CONFIG_SCHEMA.into(), state: state.into(), message: message.into(), config, usage: self.usage()?, jobs, raw_search_available: self.vault.read_guard().is_ok(), oversized_sources, non_current_sources_skipped, budget_note: "有限模式按月请求/token 配额停止；无限模式仍计量并保留单次上限、暂停与撤权。预留 token 按字节保守估计，供应商用量不是账单，不保证货币费用上限。未知用量不退还预留。".into() })
     }
     pub fn status_for_scope(&self, scope: &str) -> AppResult<MemoryRuntimeStatus> {
         validate_scope(scope).map_err(|_| invalid("资料范围无效"))?;
@@ -584,6 +690,7 @@ impl<'a> MemoryRuntime<'a> {
                 scope: scope.into(),
                 ..Default::default()
             };
+            status.index_refresh = None;
             status.oversized_sources = 0;
             status.non_current_sources_skipped = 0;
             status.state = "unconfigured".into();
@@ -626,6 +733,9 @@ impl<'a> MemoryRuntime<'a> {
     }
     fn save(&self, record: &mut MemoryJobRecord) -> AppResult<()> {
         record.status.updated_at = Utc::now();
+        if serde_json::to_vec(record).map_err(storage)?.len() as u64 > MAX_RECORD_BYTES {
+            return Err(invalid("后台整理检查点超过 4 MiB；未覆盖已保存阶段"));
+        }
         self.vault
             .write_replace(&self.job_path(&record.status.job_id)?, record)
             .map_err(storage)
@@ -675,7 +785,7 @@ impl<'a> MemoryRuntime<'a> {
             return Err(permission());
         }
         self.revalidate_projection(&record.projection)?;
-        let review = record
+        let mut review = record
             .result
             .as_ref()
             .map(|output| {
@@ -688,12 +798,181 @@ impl<'a> MemoryRuntime<'a> {
                 })
             })
             .transpose()?;
+        let extraction = record
+            .staging
+            .as_ref()
+            .filter(|s| s.has_extraction())
+            .map(|s| s.context())
+            .transpose()?;
+        if let (Some(context), Some(output), Some(review)) =
+            (&extraction, &record.result, &mut review)
+        {
+            let findings = staged::boundary_findings(context, &output.result, &record.projection)?;
+            if !findings.is_empty() {
+                review.can_apply = false;
+                review.diagnostics.extend(findings);
+            }
+        }
         Ok(MemoryJobReview {
+            source_snapshots: record.projection.source_refs.clone(),
+            semantic_lookup: record.staging.as_ref().and_then(|s| s.semantic_lookup()),
+            extraction,
             job: record.status,
             review,
             note: "候选尚需结合证据判断；模型评分不能证明事实。修正正文或标签后，该记忆由你维护。"
                 .into(),
         })
+    }
+    /// 仅可信本机人工操作入口；模型只读接口不暴露此方法。
+    pub fn approve(
+        &self,
+        id: &str,
+        scope: &str,
+        approved_result_hash: &str,
+        approve_protected: bool,
+    ) -> AppResult<JobStatus<MemoryProgress>> {
+        validate_scope(scope).map_err(|_| invalid("资料范围无效"))?;
+        let _guard = self.lock("state.lock")?;
+        let mut record = self.load(id)?;
+        if record.status.scope != scope {
+            return Err(permission());
+        }
+        if !matches!(
+            record.status.state,
+            JobState::NeedsInput | JobState::Failed | JobState::Completed
+        ) {
+            return Err(invalid("当前任务不可批准；请先读取完整候选审阅"));
+        }
+        self.checkpoint(&record)?;
+        let result = record
+            .result
+            .as_ref()
+            .ok_or_else(|| invalid("尚未生成完整整合结果"))?
+            .result
+            .clone();
+        if !self.receipt_exists(&record.projection)? {
+            self.revalidate_projection(&record.projection)?;
+        }
+        if let Some(staging) = &record.staging {
+            if !staged::boundary_findings(&staging.context()?, &result, &record.projection)?
+                .is_empty()
+            {
+                return Err(invalid(
+                    "候选跨越提取任务或借用来源；不能用人工按钮绕过来源边界",
+                ));
+            }
+        }
+        let review = self
+            .vault
+            .dream_review(&result)
+            .map_err(|_| invalid("候选或当前来源/版本已失效，请重新审阅"))?;
+        if review.result_hash != approved_result_hash {
+            return Err(invalid("批准摘要与当前候选不一致，请重新审阅"));
+        }
+        if !review.can_apply || (review.requires_protected_approval && !approve_protected) {
+            return Err(AppError::new(
+                ErrorCode::PermissionDenied,
+                "冲突未解决或受保护变更尚未明确批准",
+                "核对完整差异与来源后再决定",
+            ));
+        }
+        if review.already_applied {
+            self.revalidate_receipt_access(&record)?;
+        }
+        record.status.phase = JobPhase::Committing;
+        self.save(&mut record)?;
+        let receipt = match self
+            .vault
+            .dream_apply(&result, approved_result_hash, approve_protected)
+        {
+            Ok(receipt) => receipt,
+            Err(_) => {
+                // 只恢复已持久批准的事务；若没有收据，普通 tick 仍回到待审而不自动批准。
+                record.status.state = JobState::Queued;
+                record.status.error = Some(AppError::new(
+                    ErrorCode::Conflict,
+                    "批准的写入尚未确认完成",
+                    "保留任务与事务日志，后台将核对已批准事务；不要盲目重发",
+                ));
+                self.save(&mut record)?;
+                return Err(record.status.error.clone().unwrap());
+            }
+        };
+        let selected: BTreeSet<String> = if let Some(staging) = &record.staging {
+            staging
+                .context()?
+                .job
+                .source_refs
+                .into_iter()
+                .map(|s| s.event.id)
+                .collect()
+        } else {
+            record
+                .projection
+                .source_refs
+                .iter()
+                .map(|s| s.event.id.clone())
+                .collect()
+        };
+        record.status.progress.sources_committed = receipt
+            .source_coverage
+            .iter()
+            .filter(|r| selected.contains(r.strip_prefix("event:").unwrap_or(r)))
+            .count() as u64;
+        record.status.progress.memories_committed = receipt.changes.len() as u64;
+        record.status.progress.receipt_id = Some(receipt.job_id.clone());
+        record.receipt = Some(receipt);
+        record.status.state = JobState::Completed;
+        record.status.phase = JobPhase::Finished;
+        record.status.error = None;
+        record.status.can_resume = false;
+        self.save(&mut record)?;
+        self.revalidate_receipt_access(&record)?;
+        // 派生索引排队失败也不把已提交 Memory 误报为未批准；tick 会检测当前代次补建。
+        let _ = self.queue_index_locked(&self.read_config()?);
+        Ok(record.status)
+    }
+    fn revalidate_receipt_access(&self, record: &MemoryJobRecord) -> AppResult<()> {
+        // 收据只证明曾发布，不能替代当前来源与当前 Memory 的读取授权。
+        let sources: Vec<_> = record
+            .projection
+            .source_refs
+            .iter()
+            .map(|s| s.event.id.clone())
+            .collect();
+        let fresh = self
+            .vault
+            .dream_export(&sources, &[], &record.status.scope)
+            .map_err(|_| permission())?;
+        if digest(&fresh.source_refs)? != digest(&record.projection.source_refs)? {
+            return Err(permission());
+        }
+        self.revalidate_projection(&fresh)?;
+        let context = crate::context::Context::new(
+            self.vault,
+            crate::policy::Access::new(vec![record.status.scope.clone()]).map_err(storage)?,
+        );
+        let guard = self.vault.read_guard().map_err(storage)?;
+        let docs = context.memory_documents_locked(&guard).map_err(storage)?;
+        let receipt = if let Some(receipt) = &record.receipt {
+            receipt.clone()
+        } else {
+            bounded_read::<DreamReceipt>(
+                &self
+                    .vault
+                    .root()
+                    .join("control/dream-receipts")
+                    .join(format!("{}.json", record.projection.job_id)),
+            )?
+        };
+        if receipt.changes.iter().any(|memory| {
+            !docs
+                .iter()
+                .any(|doc| doc.reference.starts_with(&format!("memory:{}@", memory.id)))
+        }) {
+            return Err(permission());
+        }
+        Ok(())
     }
     pub fn control(
         &self,
@@ -755,6 +1034,9 @@ impl<'a> MemoryRuntime<'a> {
                             .is_some_and(|error| error.code == ErrorCode::InvalidRequest)
                     {
                         record.result = None;
+                        if let Some(staging) = &mut record.staging {
+                            staging.retry_invalid();
+                        }
                     }
                     record.dispatch_started = false;
                     record.status.error = None;
@@ -791,6 +1073,9 @@ impl<'a> MemoryRuntime<'a> {
                     "保留资料与事务文件，检查来源状态后恢复",
                 )
             })?;
+        }
+        if self.maintain_index_once()? {
+            return Ok(None);
         }
         let mut record = {
             let _state = self.lock("state.lock")?;
@@ -922,110 +1207,18 @@ impl<'a> MemoryRuntime<'a> {
                 "检查用量后重试；重试将占用新的请求预算",
             ));
         }
+        if record.staging.is_some() {
+            return self.advance_staged(record, provider);
+        }
         if record.result.is_none() {
-            let config = {
-                let _state = self.lock("state.lock")?;
-                let config = self.checkpoint(record)?;
-                self.revalidate_projection(&record.projection)?;
-                provider.available(&config)?;
-                let mut usage = self.usage()?;
-                let reserved = (serde_json::to_vec(&record.projection)
-                    .map_err(storage)?
-                    .len() as u64)
-                    .saturating_mul(2)
-                    .saturating_add(16_384)
-                    .saturating_add(config.budget.max_output_tokens_per_call);
-                if usage.reserved_calls >= config.budget.max_calls_per_month
-                    || usage.reserved_tokens.saturating_add(reserved)
-                        > config.budget.max_reserved_tokens_per_month
-                {
-                    return Err(AppError::new(
-                        ErrorCode::BudgetExceeded,
-                        "本月后台整理请求或预留 token 预算已用尽",
-                        "调整预算或下月重试；原始资料仍可搜索",
-                    ));
-                }
-                // 先预留，崩溃不得使已发请求成为免费重试。
-                usage.reserved_calls += 1;
-                usage.reserved_tokens += reserved;
-                usage.calls_with_unknown_usage += 1;
-                self.save_usage(&usage)?;
-                record.dispatch_started = true;
-                record.reservation_month = Some(usage.month.clone());
-                record.status.state = JobState::Running;
-                record.status.phase = JobPhase::Executing;
-                record.status.progress.provider_calls += 1;
-                record.status.progress.reserved_tokens += reserved;
-                self.save(record)?;
-                config
-            };
-            let output = provider
-                .execute_cancellable(&config, &record.projection, &|| {
-                    let _state = match self.read_lock() {
-                        Ok(guard) => guard,
-                        Err(error) if error.code == ErrorCode::Conflict && error.retryable => {
-                            return Ok(false)
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    let current = self.read_config()?;
-                    let job = self.load(&record.status.job_id)?;
-                    Ok(current.paused
-                        || !current.enabled
-                        || self.binding(&current)? != record.config_hash
-                        || matches!(job.status.state, JobState::Paused | JobState::Cancelled))
-                })
-                .map_err(|error| {
-                    let mut safe = AppError::new(
-                        error.code,
-                        "模型整理未返回可用的完整结果；未记录供应商正文或凭据",
-                        "查看模型连接与额度后重试；已预留预算不会自动退还",
-                    );
-                    safe.retryable = true;
-                    safe
-                })?;
-            if output.result.job_id != record.projection.job_id
-                || output.result.input_hash != record.projection.input_hash
-                || output.usage.network_calls > 1
-                || output
-                    .usage
-                    .output_tokens
-                    .is_some_and(|n| n > config.budget.max_output_tokens_per_call)
-                || output.usage.request_bytes > config.budget.max_request_bytes_per_call
-                || serde_json::to_vec(&output).map_err(storage)?.len() > 2 * 1024 * 1024
-            {
-                return Err(invalid("模型结果身份或用量超出本次协议边界"));
-            }
-            let _state = self.lock("state.lock")?;
-            let mut usage = self.usage_for_month(
-                record
-                    .reservation_month
-                    .as_deref()
-                    .ok_or_else(|| storage("missing reservation"))?,
-            )?;
-            usage.reported_input_tokens = usage
-                .reported_input_tokens
-                .saturating_add(output.usage.input_tokens.unwrap_or(0));
-            usage.reported_output_tokens = usage
-                .reported_output_tokens
-                .saturating_add(output.usage.output_tokens.unwrap_or(0));
-            if output.usage.input_tokens.is_some() && output.usage.output_tokens.is_some() {
-                usage.calls_with_unknown_usage = usage.calls_with_unknown_usage.saturating_sub(1);
-            }
-            self.save_usage(&usage)?;
-            record.status.progress.input_tokens = output.usage.input_tokens;
-            record.status.progress.output_tokens = output.usage.output_tokens;
+            let output = self.request_provider(record, provider, None)?;
             record.result = Some(output);
             record.status.phase = JobPhase::Validating;
-            let current = self.load(&record.status.job_id)?;
-            if matches!(current.status.state, JobState::Paused | JobState::Cancelled) {
-                record.status.state = current.status.state;
-                record.paused_by_config = current.paused_by_config;
-            }
+            let _state = self.lock("state.lock")?;
             self.save(record)?;
         }
         let _state = self.lock("state.lock")?;
-        self.checkpoint(record)?;
+        let config = self.checkpoint(record)?;
         let result = &record
             .result
             .as_ref()
@@ -1044,7 +1237,11 @@ impl<'a> MemoryRuntime<'a> {
         })?;
         if !review.already_applied {
             self.revalidate_projection(&record.projection)?;
-            if !review.can_apply
+            if !config
+                .consent
+                .as_ref()
+                .is_some_and(|consent| consent.auto_apply)
+                || !review.can_apply
                 || review.requires_protected_approval
                 || requires_decision(&record.projection, result)
             {
@@ -1081,6 +1278,134 @@ impl<'a> MemoryRuntime<'a> {
         record.status.error = None;
         record.status.can_resume = false;
         self.save(record)
+    }
+    fn request_provider<P: MemoryProvider + ?Sized>(
+        &self,
+        record: &mut MemoryJobRecord,
+        provider: &mut P,
+        extraction: Option<&ExtractionContext>,
+    ) -> AppResult<ProviderOutput> {
+        let config = {
+            let _state = self.lock("state.lock")?;
+            let config = self.checkpoint(record)?;
+            self.revalidate_projection(&record.projection)?;
+            provider.available(&config)?;
+            let mut usage = self.usage()?;
+            let reserved = (serde_json::to_vec(&(&record.projection, extraction))
+                .map_err(storage)?
+                .len() as u64)
+                .saturating_mul(2)
+                .saturating_add(16_384)
+                .saturating_add(config.budget.max_output_tokens_per_call);
+            if config.budget.mode.is_limited()
+                && (usage.reserved_calls >= config.budget.max_calls_per_month
+                    || usage.reserved_tokens.saturating_add(reserved)
+                        > config.budget.max_reserved_tokens_per_month)
+            {
+                return Err(AppError::new(
+                    ErrorCode::BudgetExceeded,
+                    "本月后台整理请求或预留 token 预算已用尽",
+                    "调整预算或下月重试；原始资料仍可搜索",
+                ));
+            }
+            // 先预留，崩溃不得使已发请求成为免费重试。
+            let overflow = || {
+                AppError::new(
+                    ErrorCode::BudgetExceeded,
+                    "用量计数器达到可表示上限",
+                    "保留用量记录并检查；没有发出新请求",
+                )
+            };
+            usage.reserved_calls = usage.reserved_calls.checked_add(1).ok_or_else(overflow)?;
+            usage.reserved_tokens = usage
+                .reserved_tokens
+                .checked_add(reserved)
+                .ok_or_else(overflow)?;
+            usage.calls_with_unknown_usage = usage
+                .calls_with_unknown_usage
+                .checked_add(1)
+                .ok_or_else(overflow)?;
+            self.save_usage(&usage)?;
+            record.dispatch_started = true;
+            record.reservation_month = Some(usage.month.clone());
+            record.status.state = JobState::Running;
+            record.status.phase = JobPhase::Executing;
+            record.status.progress.provider_calls += 1;
+            record.status.progress.reserved_tokens += reserved;
+            self.save(record)?;
+            config
+        };
+        let output = provider
+            .execute_with_extraction(&config, &record.projection, extraction, &|| {
+                let _state = match self.read_lock() {
+                    Ok(guard) => guard,
+                    Err(error) if error.code == ErrorCode::Conflict && error.retryable => {
+                        return Ok(false)
+                    }
+                    Err(error) => return Err(error),
+                };
+                let current = self.read_config()?;
+                let job = self.load(&record.status.job_id)?;
+                Ok(current.paused
+                    || !current.enabled
+                    || self.binding(&current)? != record.config_hash
+                    || matches!(job.status.state, JobState::Paused | JobState::Cancelled))
+            })
+            .map_err(|error| {
+                let mut safe = AppError::new(
+                    error.code,
+                    "模型整理未返回可用的完整结果；未记录供应商正文或凭据",
+                    "查看模型连接与额度后重试；已预留预算不会自动退还",
+                );
+                safe.retryable = true;
+                safe
+            })?;
+        if output.result.job_id != record.projection.job_id
+            || output.result.input_hash != record.projection.input_hash
+            || output.usage.network_calls > 1
+            || output
+                .usage
+                .output_tokens
+                .is_some_and(|n| n > config.budget.max_output_tokens_per_call)
+            || output.usage.request_bytes > config.budget.max_request_bytes_per_call
+            || serde_json::to_vec(&output).map_err(storage)?.len() > 2 * 1024 * 1024
+        {
+            return Err(invalid("模型结果身份或用量超出本次协议边界"));
+        }
+        let _state = self.lock("state.lock")?;
+        let mut usage = self.usage_for_month(
+            record
+                .reservation_month
+                .as_deref()
+                .ok_or_else(|| storage("missing reservation"))?,
+        )?;
+        usage.reported_input_tokens = usage
+            .reported_input_tokens
+            .saturating_add(output.usage.input_tokens.unwrap_or(0));
+        usage.reported_output_tokens = usage
+            .reported_output_tokens
+            .saturating_add(output.usage.output_tokens.unwrap_or(0));
+        if output.usage.input_tokens.is_some() && output.usage.output_tokens.is_some() {
+            usage.calls_with_unknown_usage = usage.calls_with_unknown_usage.saturating_sub(1);
+        }
+        self.save_usage(&usage)?;
+        record.status.progress.input_tokens = staged::sum_usage(
+            record.status.progress.input_tokens,
+            output.usage.input_tokens,
+            record.status.progress.provider_calls,
+        );
+        record.status.progress.output_tokens = staged::sum_usage(
+            record.status.progress.output_tokens,
+            output.usage.output_tokens,
+            record.status.progress.provider_calls,
+        );
+        let current = self.load(&record.status.job_id)?;
+        if matches!(current.status.state, JobState::Paused | JobState::Cancelled) {
+            record.status.state = current.status.state;
+            record.paused_by_config = current.paused_by_config;
+        }
+        self.save(record)?;
+        Ok(output)
     }
     fn receipt_exists(&self, job: &DreamJob) -> AppResult<bool> {
         if !job.job_id.starts_with("dream_")
@@ -1265,56 +1590,61 @@ impl<'a> MemoryRuntime<'a> {
             {
                 return Ok(None);
             }
-            let source_ids: BTreeSet<_> = selected.iter().map(|e| e.id.clone()).collect();
-            let terms: BTreeSet<_> = selected
-                .iter()
-                .flat_map(|e| text_terms(&e.data.text()))
-                .collect();
-            let mut related = Vec::new();
-            for path in
-                files_recursive(&self.vault.root().join("memories"), "md").map_err(storage)?
-            {
-                let id = path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .ok_or_else(|| storage("invalid memory"))?;
-                let memory = self.vault.memory(id).map_err(storage)?;
-                if memory.data.scope != config.scope
-                    || !matches!(memory.state, MemoryState::Active | MemoryState::Tentative)
-                    || suppressed.contains(&memory.id)
-                    || memory
-                        .data
-                        .source_refs
-                        .iter()
-                        .any(|id| suppressed.contains(id))
+            let memories = if config.pipeline == MemoryPipeline::LegacySingle {
+                let source_ids: BTreeSet<_> = selected.iter().map(|e| e.id.clone()).collect();
+                let terms: BTreeSet<_> = selected
+                    .iter()
+                    .flat_map(|e| text_terms(&e.data.text()))
+                    .collect();
+                let mut related = Vec::new();
+                for path in
+                    files_recursive(&self.vault.root().join("memories"), "md").map_err(storage)?
                 {
-                    continue;
-                }
-                let score = text_terms(&memory.data.content)
-                    .intersection(&terms)
-                    .count()
-                    + 100
-                        * memory
+                    let id = path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .ok_or_else(|| storage("invalid memory"))?;
+                    let memory = self.vault.memory(id).map_err(storage)?;
+                    if memory.data.scope != config.scope
+                        || !matches!(memory.state, MemoryState::Active | MemoryState::Tentative)
+                        || suppressed.contains(&memory.id)
+                        || memory
                             .data
                             .source_refs
                             .iter()
-                            .filter(|id| source_ids.contains(*id))
-                            .count();
-                if score > 0 {
-                    related.push((score, memory));
-                    related.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
-                    related.truncate(32);
+                            .any(|id| suppressed.contains(id))
+                    {
+                        continue;
+                    }
+                    let score = text_terms(&memory.data.content)
+                        .intersection(&terms)
+                        .count()
+                        + 100
+                            * memory
+                                .data
+                                .source_refs
+                                .iter()
+                                .filter(|id| source_ids.contains(*id))
+                                .count();
+                    if score > 0 {
+                        related.push((score, memory));
+                        related.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
+                        related.truncate(32);
+                    }
                 }
-            }
-            related.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
-            let mut memories = Vec::new();
-            for (_, memory) in related {
-                let size = serde_json::to_vec_pretty(&memory).map_err(storage)?.len() + 256;
-                if memories.len() < 32 && bytes + size <= config.max_projection_bytes {
-                    bytes += size;
-                    memories.push(memory.id);
+                related.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
+                let mut memories = Vec::new();
+                for (_, memory) in related {
+                    let size = serde_json::to_vec_pretty(&memory).map_err(storage)?.len() + 256;
+                    if memories.len() < 32 && bytes + size <= config.max_projection_bytes {
+                        bytes += size;
+                        memories.push(memory.id);
+                    }
                 }
-            }
+                memories
+            } else {
+                Vec::new()
+            };
             (selected, memories, skipped + non_current_sources_skipped)
         };
         let projection = self
@@ -1356,6 +1686,8 @@ impl<'a> MemoryRuntime<'a> {
                 updated_at: now,
             },
             config_hash,
+            staging: (config.pipeline == MemoryPipeline::StagedReview)
+                .then(|| staged::Staging::new(projection.clone())),
             projection,
             result: None,
             dispatch_started: false,
@@ -1384,6 +1716,9 @@ fn is_echo(event: &Event) -> bool {
     })
 }
 fn requires_decision(job: &DreamJob, result: &DreamResult) -> bool {
+    if !result.split_plans.is_empty() {
+        return true;
+    }
     result.proposals.iter().any(|p| {
         if matches!(p.operation, DreamOperation::Noop | DreamOperation::Conflict) {
             return p.operation == DreamOperation::Conflict;
@@ -1485,8 +1820,8 @@ fn invalid(message: &str) -> AppError {
 fn permission() -> AppError {
     AppError::new(
         ErrorCode::PermissionDenied,
-        "后台整理没有有效的目的地、资料范围和自动应用授权",
-        "在设置中确认具体模型接收地址、来源与旧记忆范围、预算和自动应用策略",
+        "后台整理没有有效的目的地、资料范围或发送授权",
+        "在设置中确认具体模型接收地址、来源与旧记忆范围、预算和人工审阅策略",
     )
 }
 fn storage(_error: impl std::fmt::Display) -> AppError {
@@ -1653,11 +1988,24 @@ impl MemoryProvider for PythonMemoryProvider {
         job: &DreamJob,
         cancelled: &dyn Fn() -> AppResult<bool>,
     ) -> AppResult<ProviderOutput> {
+        self.execute_with_extraction(config, job, None, cancelled)
+    }
+    fn execute_with_extraction(
+        &mut self,
+        config: &MemoryConfig,
+        job: &DreamJob,
+        extraction: Option<&ExtractionContext>,
+        cancelled: &dyn Fn() -> AppResult<bool>,
+    ) -> AppResult<ProviderOutput> {
         self.available(config)?;
         if self.credential.is_none() && self.environment_binding.is_none() {
             self.environment_binding = config.provider.clone();
         }
-        let request = serde_json::to_vec(&serde_json::json!({"schema":"recallcard.memory-provider-request/1","config":config,"job":job})).map_err(storage)?;
+        let mut request = serde_json::json!({"schema":"recallcard.memory-provider-request/1","config":config,"job":job});
+        if let Some(extraction) = extraction {
+            request["extraction"] = serde_json::to_value(extraction).map_err(storage)?;
+        }
+        let request = serde_json::to_vec(&request).map_err(storage)?;
         if request.len() > 2 * 1024 * 1024 {
             return Err(invalid("模型 worker 输入超过 2 MiB"));
         }

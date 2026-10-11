@@ -497,11 +497,18 @@ pub fn ensure_service_with_credential(
 ) -> AppResult<ServiceStatus> {
     ensure_service_inner(vault, trusted_cli, Some(credential))
 }
-fn ensure_service_inner(
-    vault: &Vault,
-    trusted_cli: &Path,
-    credential: Option<super::credentials::PreparedCredential>,
-) -> AppResult<ServiceStatus> {
+/// 宿主内部路径复用服务的同目录/固定随包摘要校验；前端不能指定路径。
+pub(crate) fn python_provider_for_cli(trusted_cli: &Path) -> AppResult<PythonMemoryProvider> {
+    verified_cli_hash(trusted_cli)?;
+    let mut provider = default_python_provider();
+    let installed = trusted_cli.parent().ok_or_else(storage)?.join("python");
+    if installed.join("recallcard_worker/__main__.py").is_file() {
+        reject_symlink(&installed).map_err(|_| storage())?;
+        provider.python_path = installed;
+    }
+    Ok(provider)
+}
+fn verified_cli_hash(trusted_cli: &Path) -> AppResult<String> {
     let error = || {
         AppError::new(
             ErrorCode::ModelUnavailable,
@@ -536,6 +543,21 @@ fn ensure_service_inner(
             "重新打开完整发行物并核验，不会运行被替换的文件",
         ));
     }
+    Ok(expected_hash)
+}
+fn ensure_service_inner(
+    vault: &Vault,
+    trusted_cli: &Path,
+    credential: Option<super::credentials::PreparedCredential>,
+) -> AppResult<ServiceStatus> {
+    let expected_hash = verified_cli_hash(trusted_cli)?;
+    let error = || {
+        AppError::new(
+            ErrorCode::ModelUnavailable,
+            "后台启动通道不可用",
+            "配置已保留，请检查安装后重试",
+        )
+    };
     let mut existing = service_status(vault)?;
     let deadline = Instant::now() + SERVICE_STARTUP_TIMEOUT;
     while existing.running && !existing.startup_published() {

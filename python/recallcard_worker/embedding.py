@@ -107,14 +107,15 @@ def _fields(value, required: set[str], optional: set[str] | None = None):
         fail("invalid_input", "字段缺失或含有未知字段")
 
 
-def _endpoint(value) -> str:
+def _endpoint(value, *, offline_loopback=False) -> str:
     _string(value, 2048, "endpoint")
     try:
         url = urlsplit(value)
         port = url.port
     except ValueError:
         fail("invalid_endpoint", "endpoint 格式无效")
-    if (url.scheme != "https" or not url.hostname or url.username is not None or url.password is not None
+    local_metadata = offline_loopback and url.scheme == "http" and url.hostname in ("127.0.0.1", "::1")
+    if ((url.scheme != "https" and not local_metadata) or not url.hostname or url.username is not None or url.password is not None
             or url.query or url.fragment or not url.path or url.path.endswith("/")
             or any(c.isspace() or ord(c) < 33 for c in value) or "\\" in value
             or (port is not None and port < 1)):
@@ -142,7 +143,7 @@ class EmbeddingSpace:
     def from_dict(cls, value: dict) -> "EmbeddingSpace":
         _fields(value, set(cls.__dataclass_fields__))
         _string(value["provider"], 128, "provider")
-        _endpoint(value["endpoint"])
+        _endpoint(value["endpoint"], offline_loopback=True)
         _string(value["model"], 256, "model")
         _integer(value["dimensions"], 1, MAX_DIMENSIONS, "dimensions")
         _string(value["revision"], 256, "revision")
@@ -366,6 +367,8 @@ class EmbeddingClient:
     def embed(self, space: EmbeddingSpace, texts: list[str], requested_scopes: list[str], kind: str) -> list[list[float]]:
         # texts 已由 EmbeddingSpace.prepare 处理；此处再次检查，公开接口不信任调用者。
         space = EmbeddingSpace.from_dict(asdict(space))
+        # 本机 HTTP 只用于已计算向量的空间身份；绝不由此放开携带凭据的网络传输。
+        _endpoint(space.endpoint)
         self.approval.check(space, scopes(requested_scopes), kind)
         if not isinstance(texts, list) or not 1 <= len(texts) <= MAX_BATCH_SIZE:
             fail("input_limit", "每批文本数量超过上限或为空")

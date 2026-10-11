@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ScopedService } from '../service/client';
 import { appError, type AppError } from '../service/contracts';
-import { connectionLabel, connectionName, sameConnectionGrant, healthLabel, healthTone, parseConnectionCode, type ConnectionEntry, type ConnectionGrant, type PairingRequest } from '../service/connections';
+import { connectionLabel, connectionName, sameConnectionGrant, canRefreshBrowserBridge, healthLabel, healthTone, parseConnectionCode, type ConnectionEntry, type ConnectionGrant, type PairingRequest } from '../service/connections';
 import { usePollingResource } from '../service/hooks';
 import { dateLabel, platformLabel, scopeLabel } from '../service/types';
 import { Badge, Dialog, ErrorNotice, Loading } from './common';
 import { Icon } from './Icon';
+import { BrowserReconnectDialog } from './BrowserReconnect';
 
 type Editing = { kind: 'pair'; request: PairingRequest; previous?: ConnectionEntry } | { kind: 'entry'; entry: ConnectionEntry } | { kind: 'manual' };
 export function ConnectionInventoryView({ service, refreshToken = 0, reviewRequestId = '', reviewOpened }: { service: ScopedService; refreshToken?: number; reviewRequestId?: string; reviewOpened?: () => void }) {
   const inventory = usePollingResource(() => service.connections(), [service, refreshToken]);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [revoking, setRevoking] = useState<ConnectionEntry | null>(null);
+  const [reconnecting, setReconnecting] = useState<ConnectionEntry | null>(null);
   const [busyId, setBusyId] = useState('');
   const [error, setError] = useState<AppError | null>(null);
   const lock = useRef(false);
@@ -55,13 +57,14 @@ export function ConnectionInventoryView({ service, refreshToken = 0, reviewReque
         <dl className="connection-observations"><div><dt>最近本机握手</dt><dd>{entry.last_handshake_at ? dateLabel(entry.last_handshake_at, true) : '尚无回执'}</dd></div><div><dt>最近背景读取</dt><dd>{entry.last_bootstrap_at ? dateLabel(entry.last_bootstrap_at, true) : '尚无回执'}</dd></div><div><dt>最近按需读取</dt><dd>{entry.last_read_at ? dateLabel(entry.last_read_at, true) : '尚无回执'}</dd></div><div><dt>最近原话保存</dt><dd>{entry.last_capture_at ? dateLabel(entry.last_capture_at, true) : '尚无回执'}</dd></div></dl>
         {entry.last_error && <p className="connection-operation-error" role="status">{entry.last_error}</p>}
         {entry.grant.client_kind !== 'browser' && <ConnectionHealthView service={service} entry={entry} />}
-        <div className="connection-controls">{!entry.revoked && <>{entry.grant.recall_scopes.includes(service.scope) && <button className="button compact" disabled={busyId === entry.id || !entry.grant.provider_disclosure} onClick={() => void toggle(entry, 'auto_recall')}><Icon name={entry.grant.auto_recall ? 'pause' : 'play'} size={13} />{entry.grant.auto_recall ? '暂停自动准备' : '开启自动准备'}</button>}{entry.grant.capture_scopes.includes(service.scope) && <button className="button compact" disabled={busyId === entry.id} onClick={() => void toggle(entry, 'auto_capture')}><Icon name={entry.grant.auto_capture ? 'pause' : 'play'} size={13} />{entry.grant.auto_capture ? '暂停自动保存' : '开启自动保存'}</button>}</>}<button className="text-button" disabled={busyId === entry.id} onClick={() => setEditing({ kind: 'entry', entry })}>{entry.revoked ? '重新授权' : '检查权限'}</button>{!entry.revoked && <button className="text-button" disabled={busyId === entry.id} onClick={() => setRevoking(entry)}>撤销访问</button>}</div>
+        <div className="connection-controls">{canRefreshBrowserBridge(entry, service.scope) && <button className="button compact" disabled={!!busyId} onClick={() => setReconnecting(entry)}>更新本机桥</button>}{!entry.revoked && <>{entry.grant.recall_scopes.includes(service.scope) && <button className="button compact" disabled={busyId === entry.id || !entry.grant.provider_disclosure} onClick={() => void toggle(entry, 'auto_recall')}><Icon name={entry.grant.auto_recall ? 'pause' : 'play'} size={13} />{entry.grant.auto_recall ? '暂停自动准备' : '开启自动准备'}</button>}{entry.grant.capture_scopes.includes(service.scope) && <button className="button compact" disabled={busyId === entry.id} onClick={() => void toggle(entry, 'auto_capture')}><Icon name={entry.grant.auto_capture ? 'pause' : 'play'} size={13} />{entry.grant.auto_capture ? '暂停自动保存' : '开启自动保存'}</button>}</>}<button className="text-button" disabled={busyId === entry.id} onClick={() => setEditing({ kind: 'entry', entry })}>{entry.revoked ? '重新授权' : '检查权限'}</button>{!entry.revoked && <button className="text-button" disabled={busyId === entry.id} onClick={() => setRevoking(entry)}>撤销访问</button>}</div>
       </div>)}</div> : <p className="connection-empty">尚无此范围的授权。打开扩展，选择「请求桌面连接」，申请会出现在这里。</p>}
       <p className="coverage-note">{inventory.data.identity_notice}读取、捕获和记忆整理分别记录，不以一个「已同步」状态替代。</p>
       <details className="manual-connection"><summary>无法请求连接？</summary><p>仅在自动请求不可用时，从扩展复制连接编号，再在此审阅范围。</p><button className="button compact" onClick={() => setEditing({ kind: 'manual' })}>手动连接浏览器</button></details>
     </>}
     {error && <ErrorNotice error={error} />}
     {editing && <ConnectionPermissionDialog service={service} editing={editing} close={() => setEditing(null)} saved={(entry, requestId) => { updated(entry, requestId); setEditing(null); }} />}
+    {reconnecting && <BrowserReconnectDialog service={service} entry={reconnecting} close={() => setReconnecting(null)} changed={inventory.refresh} />}
     {revoking && <Dialog title="撤销这个连接的访问？" close={() => setRevoking(null)} busy={!!busyId}><div className="modal-body"><p>将停止此连接的读取、自动准备和保存。已经保存到本机的来源会保留。</p><p>已写入网站的草稿不会自动撤回。若需要，请同时在原网页移除它。</p>{error && <ErrorNotice error={error} />}</div><div className="modal-footer"><button className="button" onClick={() => setRevoking(null)} disabled={!!busyId}>取消</button><button className="button danger" onClick={() => void revoke()} disabled={!!busyId}>{busyId ? '正在撤销…' : '确认撤销访问'}</button></div></Dialog>}
   </section>;
 }

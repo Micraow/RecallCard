@@ -20,6 +20,8 @@ pub(crate) struct EventSnapshot<'a> {
     vault: &'a Vault,
     _guard: &'a WriteGuard,
     events: Option<std::collections::BTreeMap<String, Event>>,
+    #[cfg(unix)]
+    locator: Option<crate::event_locator::Locator>,
 }
 impl<'a> EventSnapshot<'a> {
     pub(crate) fn new(vault: &'a Vault, guard: &'a WriteGuard) -> Self {
@@ -27,6 +29,8 @@ impl<'a> EventSnapshot<'a> {
             vault,
             _guard: guard,
             events: None,
+            #[cfg(unix)]
+            locator: None,
         }
     }
     pub(crate) fn all(&mut self) -> Result<&std::collections::BTreeMap<String, Event>> {
@@ -43,6 +47,13 @@ impl<'a> EventSnapshot<'a> {
     }
     pub(crate) fn event(&mut self, id: &str) -> Result<Event> {
         validate_id(id, "evt_")?;
+        #[cfg(unix)]
+        if self.events.is_none() {
+            if self.locator.is_none() {
+                self.locator = Some(crate::event_locator::Locator::open(self.vault)?);
+            }
+            return self.locator.as_mut().unwrap().event(self.vault, id);
+        }
         self.all()?
             .get(id)
             .cloned()
@@ -503,7 +514,47 @@ impl Vault {
             &self.root.join("generated/views/memories.md"),
             out.as_bytes(),
         )?;
+        // 可重建缓存只供检查/恢复，不作为客户端授权依据；查询仍从当前正本投影。
+        let mut scopes = std::collections::BTreeSet::new();
+        for e in self.events()? {
+            scopes.insert(e.data.scope);
+        }
+        for m in &memories {
+            scopes.insert(m.data.scope.clone());
+        }
+        if scopes.is_empty() {
+            scopes.insert("personal".into());
+        }
+        let scopes = scopes.into_iter().collect::<Vec<_>>();
+        let docs = crate::context::Context::new(self, crate::policy::Access::new(scopes.clone())?)
+            .memory_documents_locked(&_lock)?;
+        let navigation = crate::navigation::Index::build(&docs, &scopes, Utc::now())?;
+        self.write_replace(&self.root.join("generated/navigation.json"), &navigation)?;
         Ok(memories.len())
+    }
+    /// 显式范围的离线、人类可浏览快照；不覆盖任何已有导出或正本。
+    pub fn export_navigation(&self, scopes: Vec<String>) -> Result<Value> {
+        let access = crate::policy::Access::new(scopes.clone())?;
+        let _lock = self.lock()?;
+        self.ensure_derived()?;
+        let docs = crate::context::Context::new(self, access).memory_documents_locked(&_lock)?;
+        let navigation = crate::navigation::Index::build(&docs, &scopes, Utc::now())?;
+        let pages = navigation.markdown_pages();
+        let parent = self.root.join("generated/views");
+        let staging = tempfile::Builder::new()
+            .prefix(".navigation-")
+            .tempdir_in(&parent)
+            .map_err(err)?;
+        for (relative, text) in &pages {
+            let path = staging.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).map_err(err)?;
+            self.write_bytes(&path, text.as_bytes())?;
+        }
+        let destination = parent.join(format!("navigation-{}", Uuid::new_v4()));
+        fs::rename(staging.path(), &destination).map_err(err)?;
+        Ok(
+            json!({"ok":true,"index":destination.join("INDEX.md"),"scopes":scopes,"generation":navigation.generation,"pages":pages.len(),"snapshot_only":true}),
+        )
     }
     pub fn ensure_derived(&self) -> Result<()> {
         for name in ["generated/views", "generated/bootstrap", ".index"] {

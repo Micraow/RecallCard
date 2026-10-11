@@ -437,49 +437,11 @@ pub fn invoke_agent(
     name: &str,
     args: Value,
 ) -> crate::model::Result<Value> {
-    let entry = get(vault, id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Agent 连接尚未配置")?;
-    let authorization =
-        authorize(vault, id, entry.permission_revision).map_err(|e| e.to_string())?;
-    let grant = &authorization.entry.grant;
-    if !matches!(
-        grant.client_kind.as_str(),
-        "claude_code" | "codex" | "chatgpt_mcp"
-    ) || !grant.auto_recall
-        || !grant.provider_disclosure
-    {
-        return Err("此客户端的读取或接收方授权已暂停".into());
-    }
-    let scopes = grant
-        .recall_scopes
-        .iter()
-        .filter(|scope| access.permits(scope))
-        .cloned()
-        .collect();
-    let result = crate::transport::invoke(
-        &crate::context::Context::new(vault, crate::policy::Access::new(scopes)?),
-        name,
-        args,
-    );
-    drop(authorization);
-    observe(
-        vault,
-        id,
-        entry.permission_revision,
-        if result.is_ok() {
-            if name == "bootstrap" {
-                "bootstrap"
-            } else {
-                "read"
-            }
-        } else {
-            "failed"
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    result
+    AgentReadService::new(vault, id, access, None).invoke(name, args)
 }
+
+mod agent_semantic;
+pub use agent_semantic::AgentReadService;
 
 fn save_store(vault: &Vault, path: &std::path::Path, store: &Store) -> AppResult<()> {
     if serde_json::to_vec_pretty(store).map_err(storage)?.len() > 900 * 1024 {

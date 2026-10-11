@@ -136,7 +136,7 @@ fn raw_only_hook_explicitly_exposes_searchable_sources_in_selected_scope() {
     event(&vault, "project:other", "其他范围的合成原文", "outside");
     let output = invoke(&vault, STARTUP).unwrap();
     assert!(text(&output).contains("原文 1 条 / 1 个会话；当前记忆 0 条"));
-    assert!(text(&output).contains("先 search，再 read/sources"));
+    assert!(text(&output).contains("先 read 目录，再核对原文"));
     assert!(!text(&output).contains("合成原文"));
 }
 

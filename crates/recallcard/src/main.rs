@@ -149,6 +149,9 @@ enum Command {
         parent_window: Option<u64>,
         #[arg(long)]
         ipc_endpoint: Option<PathBuf>,
+        /// 显式复用现有离线向量配置；不接受 cloud_query 外发批准
+        #[arg(long, conflicts_with = "ipc_endpoint")]
+        semantic_config: Option<PathBuf>,
     },
     /// 生成待人工检查/注册的 Native Messaging 文件
     #[command(hide = true)]
@@ -164,6 +167,9 @@ enum Command {
         output_dir: PathBuf,
         #[arg(long)]
         ipc_endpoint: Option<PathBuf>,
+        /// 显式复用现有离线向量配置；不接受 cloud_query 外发批准
+        #[arg(long, conflicts_with = "ipc_endpoint")]
+        semantic_config: Option<PathBuf>,
     },
     /// 人工管理长期记忆
     Memory {
@@ -189,8 +195,8 @@ enum Command {
         #[arg(long)]
         include_adjacent: bool,
         /// compact 优先正文与必要引用；full 保留详细来源投影
-        #[arg(long, default_value = "full", value_parser = ["full", "compact"])]
-        detail: String,
+        #[arg(long, value_parser = ["full", "compact"])]
+        detail: Option<String>,
     },
     /// 返回原始证据；大记录可按固定范围有界续读
     Sources {
@@ -233,6 +239,11 @@ enum Command {
     /// 根据 canonical Memory 重新生成人类视图
     #[command(hide = true)]
     Views,
+    /// 为明确指定的范围导出离线 Markdown 层级目录（旧快照不会自动更新）
+    NavigationExport {
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+    },
     /// 检查 schema、摘要与证据完整性
     Doctor,
     /// 为 AI 读取固定范围的启动背景；新信息仍可通过 search 查找
@@ -250,6 +261,9 @@ enum Command {
         scope: Vec<String>,
         #[arg(long, default_value = "all")]
         target: String,
+        /// 显式加入分层目录通道；默认保持原 Memory/Event 检索行为
+        #[arg(long)]
+        include_navigation: bool,
         #[arg(long, default_value_t = 5)]
         limit: usize,
         /// 返回内容的 UTF-8 字节上限；不是模型 token 计数
@@ -393,6 +407,9 @@ enum BackgroundCommand {
     Configure {
         #[arg(long)]
         file: String,
+        /// 显式选择月度配额；无限仍计量并保留单次上限、暂停与撤权
+        #[arg(long, value_parser = ["limited", "unlimited"])]
+        budget_mode: Option<String>,
     },
     Pause,
     Resume,
@@ -425,6 +442,11 @@ enum DreamCommand {
     },
     /// 恢复中断的本机多文件事务，冲突时停止
     Recover,
+    /// 显式回滚未提交的纯拆分事务；不撤销已有成功收据
+    Abort {
+        #[arg(long)]
+        result_hash: String,
+    },
 }
 #[derive(Subcommand)]
 enum MemoryCommand {
@@ -556,13 +578,17 @@ fn run(cli: Cli) -> Result<Value> {
             extension_id,
             output_dir,
             ipc_endpoint,
-        } => recallcard::native::prepare_install_from_binary(
+            semantic_config,
+        } => recallcard::native::prepare_install_configured_from_binary(
             &vault,
             scope,
             &extension_id,
             &output_dir,
-            ipc_endpoint,
-            capture_scope,
+            recallcard::native::NativeInstallOptions {
+                ipc_endpoint,
+                capture_scope,
+                semantic_config,
+            },
             &std::env::current_exe().map_err(|e| e.to_string())?,
         ),
         Command::NativeHost { .. } => Err("Native host 必须使用 framed stdio 模式".into()),
@@ -585,6 +611,7 @@ fn run(cli: Cli) -> Result<Value> {
                 approve_protected,
             )?),
             DreamCommand::Recover => vault.dream_recover(),
+            DreamCommand::Abort { result_hash } => vault.dream_abort(&result_hash),
         },
         Command::Memory { action } => match action {
             MemoryCommand::Add { file } => {
@@ -621,11 +648,22 @@ fn run(cli: Cli) -> Result<Value> {
             include_adjacent,
             detail,
         } => {
+            let explicit_directory_detail =
+                id.starts_with(recallcard::navigation::PREFIX) && detail.is_some();
+            let detail = detail.unwrap_or_else(|| {
+                if id.starts_with(recallcard::navigation::PREFIX) {
+                    "compact"
+                } else {
+                    "full"
+                }
+                .into()
+            });
             if budget_bytes.is_some()
                 || offset_bytes.is_some()
                 || cursor.is_some()
                 || include_adjacent
                 || detail != "full"
+                || explicit_directory_detail
             {
                 if scope.is_empty() {
                     return Err("有界读取需要明确 --scope；请使用授权范围".into());
@@ -707,6 +745,7 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Sync { remote } => vault.sync(&remote),
         Command::Status { .. } => vault.git_status(),
         Command::Views => Ok(json!({"ok":true,"memories":vault.rebuild_views()?})),
+        Command::NavigationExport { scope } => vault.export_navigation(scope),
         Command::Doctor => vault.doctor(),
         Command::Bootstrap {
             scope,
@@ -716,6 +755,7 @@ fn run(cli: Cli) -> Result<Value> {
             query,
             scope,
             target,
+            include_navigation,
             limit,
             budget_tokens,
             session_ref,
@@ -738,6 +778,7 @@ fn run(cli: Cli) -> Result<Value> {
                 None => Context::new(&vault, access),
             };
             context.search(SearchArgs {
+                include_navigation,
                 query,
                 target,
                 session_ref,
@@ -839,6 +880,7 @@ fn main() {
         allowed_extension,
         origin,
         ipc_endpoint,
+        semantic_config,
         ..
     } = &cli.command
     {
@@ -861,6 +903,17 @@ fn main() {
                     std::io::stdout().lock(),
                 );
             }
+            if let Some(path) = semantic_config {
+                return recallcard::native::serve_native_semantic_io(
+                    &vault,
+                    access,
+                    path,
+                    allowed_extension,
+                    origin,
+                    std::io::stdin().lock(),
+                    std::io::stdout().lock(),
+                );
+            }
             recallcard::native::serve_native(&vault, access, allowed_extension, origin)
         });
         if let Err(error) = result {
@@ -878,9 +931,21 @@ fn main() {
     {
         let result = open_cli_vault(&cli.vault).and_then(|vault| {
             let access = Access::new(scope.clone())?;
-            if let Some(id)=connection_id {
-                if ipc_endpoint.is_some()||semantic_config.is_some(){return Err("当前受连接授权管理的 MCP 尚不支持同时配置 IPC/语义代理；请移除该组合，不会忽略撤权".into());}
-                return recallcard::transport::serve_mcp_service_io(|name,args|recallcard::application::connections::invoke_agent(&vault,id,&access,name,args),std::io::stdin().lock(),std::io::stdout().lock());
+            if let Some(id) = connection_id {
+                if ipc_endpoint.is_some() {
+                    return Err("受连接授权管理的 MCP 尚不支持 IPC 代理；不会忽略撤权".into());
+                }
+                let service = recallcard::application::connections::AgentReadService::new(
+                    &vault,
+                    id,
+                    &access,
+                    semantic_config.clone(),
+                );
+                return recallcard::transport::serve_mcp_service_io(
+                    |name, args| service.invoke(name, args),
+                    std::io::stdin().lock(),
+                    std::io::stdout().lock(),
+                );
             }
             if let Some(endpoint) = ipc_endpoint {
                 let client = recallcard::ipc::Client::new(
@@ -1180,14 +1245,21 @@ fn run_application(cli: &Cli) -> Option<recallcard::application::AppResult<Value
                     }
                 )?)),
                 BackgroundCommand::Status { scope } => Ok(json!(memory.status_for_scope(scope)?)),
-                BackgroundCommand::Configure { file } => {
-                    let config: MemoryConfig = input(file).map_err(|_| {
+                BackgroundCommand::Configure { file, budget_mode } => {
+                    let mut config: MemoryConfig = input(file).map_err(|_| {
                         AppError::new(
                             ErrorCode::InvalidRequest,
                             "后台配置不是有效 JSON 或含有不允许字段",
                             "使用版本化 MemoryConfig；密钥只能通过受保护启动环境提供",
                         )
                     })?;
+                    if let Some(mode) = budget_mode {
+                        config.budget.mode = if mode == "unlimited" {
+                            recallcard::application::budget::BudgetMode::Unlimited
+                        } else {
+                            recallcard::application::budget::BudgetMode::Limited
+                        };
+                    }
                     let status = memory.configure(config)?;
                     let mut result = json!(status);
                     if status.config.enabled

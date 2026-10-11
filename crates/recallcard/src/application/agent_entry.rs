@@ -84,9 +84,9 @@ fn clean_derived(vault: &Vault, id: &str, include_current: bool) -> crate::Resul
         let legacy = name
             .strip_prefix(".tmp")
             .is_some_and(|s| s.len() == 6 && s.bytes().all(|b| b.is_ascii_alphanumeric()));
-        if !(include_current && name == "context.json")
-            && !name.starts_with(".recallcard-entry-")
-            && !legacy
+        if !(include_current && name == "context.json"
+            || name.starts_with(".recallcard-entry-")
+            || legacy)
         {
             continue;
         }

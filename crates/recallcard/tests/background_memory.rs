@@ -25,6 +25,9 @@ fn config() -> MemoryConfig {
         model: "synthetic-only".into(),
     };
     MemoryConfig {
+        // These regressions exercise the retained single-stage compatibility path.
+        // New ordinary setup uses staged review and must not auto-apply.
+        pipeline: MemoryPipeline::LegacySingle,
         enabled: true,
         quiet_seconds: 0,
         provider: Some(provider.clone()),
@@ -66,6 +69,46 @@ fn fake() -> Fake<impl FnMut(&MemoryConfig, &DreamJob) -> AppResult<ProviderOutp
         calls: 0,
         handler: |_: &MemoryConfig, job: &DreamJob| Ok(add(job)),
     }
+}
+#[test]
+fn new_setup_keeps_staged_review_and_cannot_auto_publish() {
+    struct StagedFake {
+        calls: usize,
+    }
+    impl MemoryProvider for StagedFake {
+        fn execute(&mut self, _: &MemoryConfig, job: &DreamJob) -> AppResult<ProviderOutput> {
+            self.calls += 1;
+            Ok(add(job))
+        }
+        fn execute_with_extraction(
+            &mut self,
+            config: &MemoryConfig,
+            job: &DreamJob,
+            extraction: Option<&ExtractionContext>,
+            _: &dyn Fn() -> AppResult<bool>,
+        ) -> AppResult<ProviderOutput> {
+            assert_eq!(extraction.is_some(), self.calls == 1);
+            self.execute(config, job)
+        }
+    }
+    assert_eq!(
+        MemoryConfig::default().pipeline,
+        MemoryPipeline::StagedReview
+    );
+    let (_dir, vault) = vault();
+    source(&vault, "review-required", "personal", "user");
+    let mut settings = config();
+    settings.pipeline = MemoryPipeline::StagedReview;
+    let runtime = MemoryRuntime::new(&vault);
+    runtime.configure(settings).unwrap();
+    let mut provider = StagedFake { calls: 0 };
+    let job = runtime.tick(&mut provider).unwrap().unwrap();
+    assert_eq!(job.state, JobState::NeedsInput);
+    let error = job.error.unwrap();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.message.contains("等待人工 review"));
+    assert!(vault.memories().unwrap().is_empty());
+    assert_eq!(provider.calls, 2);
 }
 fn raw_search(vault: &Vault) -> Value {
     Context::new(vault, Access::new(vec!["personal".into()]).unwrap())

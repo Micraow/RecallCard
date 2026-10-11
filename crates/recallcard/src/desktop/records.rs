@@ -91,6 +91,21 @@ impl WorkspaceRecords {
         json!({})
     }
 
+    pub(super) fn enrich_current_search(&self, response: Value) -> Result<Value> {
+        let now = chrono::Utc::now();
+        if response["results"].as_array().is_none_or(|rows| {
+            rows.iter().any(|r| {
+                r["ref"].as_str().is_none_or(|reference| {
+                    self.documents
+                        .get(reference)
+                        .is_none_or(|d| d.kind == "memory" && !d.current_memory_at(now))
+                })
+            })
+        }) {
+            return Err("查询期间来源或版本已改变，请重新检索".into());
+        }
+        self.enrich_list(response)
+    }
     pub(super) fn enrich_list(&self, mut response: Value) -> Result<Value> {
         let count = response["results"].as_array().map_or(0, Vec::len);
         for index in 0..count {

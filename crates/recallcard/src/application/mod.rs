@@ -17,3 +17,6 @@ pub mod agent_entry;
 pub mod agent_install;
 pub mod connection_setup;
 pub mod credentials;
+
+pub mod budget;
+pub mod embedding_cloud;

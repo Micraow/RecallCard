@@ -13,6 +13,8 @@ use std::{
 };
 fn configuration() -> MemoryConfig {
     MemoryConfig {
+        // This fake provider tests legacy single-stage scheduling, not staged review.
+        pipeline: MemoryPipeline::LegacySingle,
         enabled: true,
         quiet_seconds: 0,
         provider: Some(MemoryProviderConfig {

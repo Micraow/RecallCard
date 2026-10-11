@@ -33,6 +33,47 @@ pub(super) fn query_terms(text: &str) -> Vec<String> {
         .into_iter()
         .collect()
 }
+/// 长中文问句采用字符双字组候选召回；短词组/空格关键词仍为严格 AND。
+/// 不使用项目名、问题模板、领域词典或验收问题特判；带引号的查询保持精确模式。
+pub(super) fn natural_han_query(text: &str) -> bool {
+    if text.contains(['"', '“', '”']) {
+        return false;
+    }
+    let terms = query_terms(text);
+    let longest = terms
+        .iter()
+        .filter(|s| s.chars().all(han))
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0);
+    let count = text.chars().filter(|c| han(*c)).count();
+    longest >= 6 && (count >= 12 || text.contains(['，', '。', '？', '?', '；', '：', ',', ';']))
+}
+pub(super) fn ranking_terms(text: &str) -> Vec<String> {
+    if !natural_han_query(text) {
+        return query_terms(text);
+    }
+    super::tokenize(text)
+        .into_iter()
+        .filter(|s| !s.chars().all(han) || s.chars().count() == 2)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+pub(super) fn han_term(term: &str) -> bool {
+    term.chars().all(han)
+}
+pub(super) fn coherent_han_overlap(query: &str, fields: &[String]) -> bool {
+    let chars = query.chars().collect::<Vec<_>>();
+    chars
+        .windows(3)
+        .filter(|part| part.iter().all(|c| han(*c)))
+        .any(|part| {
+            fields
+                .iter()
+                .any(|field| field.contains(&part.iter().collect::<String>()))
+        })
+}
 pub(super) fn term_matches(field: &str, term: &str) -> bool {
     if term.chars().all(han) {
         return field.contains(term);
@@ -134,6 +175,11 @@ fn item(entry: &Match<'_>, query: &str, limit: usize) -> Result<Value> {
     let mut value = serde_json::to_value(doc).map_err(|e| e.to_string())?;
     value["ref"] = value["reference"].take();
     value.as_object_mut().unwrap().remove("reference");
+    // hints 是目录生成输入，不能把每条最多 8 KiB 的元数据重复塞进搜索首屏。
+    value.as_object_mut().unwrap().remove("navigation");
+    if !doc.navigation.is_empty() {
+        value["navigation_entry_count"] = json!(doc.navigation.len());
+    }
     value["score"] = json!(entry.score);
     if let Some(reference) = &entry.score_source_ref {
         value["score_source_ref"] = json!(reference);
@@ -141,7 +187,7 @@ fn item(entry: &Match<'_>, query: &str, limit: usize) -> Result<Value> {
     let (start, end) = matching_window(&doc.text, query, limit);
     value["text"] = json!(&doc.text[start..end]);
     value["text_truncated"] = json!(start != 0 || end != doc.text.len());
-    value["text_range"] = json!({"start_byte":start,"end_byte":end,"total_bytes":doc.text.len(),"projection":if doc.kind=="event"{"event.text"}else{"memory.content"}});
+    value["text_range"] = json!({"start_byte":start,"end_byte":end,"total_bytes":doc.text.len(),"projection":match doc.kind.as_str(){"event"=>"event.text","view"=>"view.navigation",_=>"memory.content"}});
     if !entry.related_refs.is_empty() {
         value["related_refs"] = json!(&entry.related_refs[..entry.related_refs.len().min(4)]);
         value["related_ref_count"] = json!(entry.related_refs.len());
@@ -186,6 +232,9 @@ fn compact_status(value: &mut Value) {
     let mut compact = json!({"event_search":coverage["event_search"],"semantic_search":coverage["semantic_search"],"scope_filtered":true});
     if let Some(filter) = coverage.get("event_filter") {
         compact["event_filter"] = filter.clone();
+    }
+    if let Some(nav) = coverage.get("navigation") {
+        compact["navigation"] = json!({"view_candidates":nav["view_candidates"],"fact_candidates":nav["fact_candidates"]});
     }
     value["coverage"] = compact;
 }
@@ -291,6 +340,8 @@ mod tests {
 
     fn document(reference: &str, kind: &str, sources: &[&str]) -> Document {
         Document {
+            navigation_scopes: vec![],
+            navigation: vec![],
             role: None,
             on_current_path: None,
             reference: reference.into(),

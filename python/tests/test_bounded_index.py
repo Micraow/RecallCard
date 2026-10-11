@@ -7,6 +7,10 @@ import random
 import sqlite3
 import tempfile
 import unittest
+import sys
+
+# 与其他测试一致：支持仓库文档中的 unittest discover 命令。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from recallcard_worker.bounded_index import BoundedIndex, EncodedChunk, IndexError, SourceState, digest, vector_bytes
 import struct
 

@@ -16,7 +16,9 @@ import type {
   BrowserSetupInfo,
 } from "./connections";
 import { validateJobs, type JobStatus, type ImportResult } from "./contracts";
-import type { RuntimeStatus, MemoryJob, MemoryConfig } from "./runtime";
+import { refreshBrowserBridge } from "./connections";
+import { parseMemoryTarget } from "./types";
+import { validateMemoryJobReview, type RuntimeStatus, type MemoryJob, type MemoryConfig } from "./runtime";
 import type {
   BuildInfo,
   Workspace,
@@ -50,12 +52,18 @@ export interface ConnectionSetupOperation {
   result: ConnectionSetupResult | null;
   error: unknown;
 }
+export interface BrowserReconnectOperation {
+  entryId: string; scope: string; browser: string; permissionRevision: number;
+  pending: Promise<BrowserRegistration | null> | null;
+  result: BrowserRegistration | null; error: unknown;
+}
 interface ModelOperationState {
   pending: Promise<ModelSetupSnapshot> | null;
   lastError: unknown;
   draft: MemoryConfig | null;
   connectionPending: Promise<ConnectionSetupResult> | null;
   connectionSetup: ConnectionSetupOperation | null;
+  browserReconnect: BrowserReconnectOperation | null;
 }
 export class RecallService {
   private modelOperations = new Map<string, ModelOperationState>();
@@ -80,7 +88,7 @@ export class RecallService {
   scoped(workspace: Workspace, scope: string) {
     let operation = this.modelOperations.get(workspace.session_id);
     if (!operation) {
-      operation = { pending: null, lastError: null, draft: null, connectionPending: null, connectionSetup: null };
+      operation = { pending: null, lastError: null, draft: null, connectionPending: null, connectionSetup: null, browserReconnect: null };
       this.modelOperations.set(workspace.session_id, operation);
     }
     return new ScopedService(this.transport, workspace, scope, operation);
@@ -109,6 +117,7 @@ export class ScopedService {
       draft: null,
       connectionPending: null,
       connectionSetup: null,
+      browserReconnect: null,
     },
   ) {}
   private call<T>(command: string, args: Record<string, unknown> = {}) {
@@ -137,12 +146,19 @@ export class ScopedService {
       filter,
     });
   }
-  async memory(id: string) {
+  async memory(target: string) {
+    const parsed = parseMemoryTarget(target);
+    if (!parsed) throw new Error('记忆引用格式无效，请从当前搜索或记忆列表重新打开。');
+    const {id,revision}=parsed;
     const result = await this.call<{
       memory: Memory;
       hidden: boolean;
       can_restore: boolean;
     }>("managed_memory_view", { id });
+    if (!result.memory || result.memory.id !== id)
+      throw new Error('返回的记忆与所选引用不一致，请重新读取。');
+    if (revision !== null && (result.memory.revision !== revision || result.hidden))
+      throw {code:'stale_reference',message:'此搜索结果的记忆版本或召回状态已变化，未打开另一个版本。',action:'请重新搜索，或从记忆列表明确选择当前版本。'};
     return {
       ...result.memory,
       hidden: result.hidden,
@@ -155,6 +171,16 @@ export class ScopedService {
       eventId,
     });
   }
+  async memorySourceLocation(memoryId: string, eventId: string) {
+    // 先重验这条 Memory 当前确实引用该 Event，再从当前可读正本定位；不推导会话 ID。
+    const event = await this.memorySource(memoryId,eventId);
+    if (!event || event.id !== eventId) throw new Error('来源关联已变化，请重新读取记忆。');
+    const reference=`event:${event.id}`;
+    const location=await this.eventLocation(reference);
+    if (location.ref !== reference || typeof location.conversation_ref !== 'string' || !location.conversation_ref || !Number.isSafeInteger(location.offset) || location.offset < 0)
+      throw new Error('原话定位结果不完整或已变化，请重新读取来源。');
+    return {...location,event_ref:reference};
+  }
   conversations(offset = 0) {
     return this.call<ConversationPage>("list_conversations", { offset });
   }
@@ -165,7 +191,7 @@ export class ScopedService {
     });
   }
   eventLocation(reference: string) {
-    return this.call<{ offset: number; conversation_ref: string }>(
+    return this.call<{ offset: number; conversation_ref: string; ref: string }>(
       "event_location",
       { reference },
     );
@@ -178,6 +204,12 @@ export class ScopedService {
       results: { text?: string; record?: EventRecord; content?: string }[];
     }>("read_record", { reference });
   }
+  cloudSemanticStatus() {return this.call<import("./setup").CloudSemanticStatus>("cloud_semantic_status");}
+  configureCloudSemantic(request:import("./setup").CloudSemanticSetup,apiKey:string|null) {return this.call<import("./setup").CloudSemanticStatus>("cloud_semantic_apply",{request,apiKey});}
+  disableCloudSemantic() {return this.call<import("./setup").CloudSemanticStatus>("cloud_semantic_disable");}
+  semanticStatus() {return this.call<import("./setup").SemanticSetupStatus>("semantic_setup_status");}
+  configureSemantic(request: import("./setup").LocalSemanticSetup) {return this.call<import("./setup").SemanticSetupStatus>("semantic_setup_apply",{request});}
+  disableSemantic() {return this.call<import("./setup").SemanticSetupStatus>("semantic_setup_disable");}
   async setupStatus(): Promise<ModelSetupSnapshot> {
     const result =
       await this.call<Omit<ModelSetupSnapshot, "service_error">>(
@@ -229,8 +261,14 @@ export class ScopedService {
   ) {
     return this.call<MemoryJob>("memory_job_control", { jobId, action });
   }
-  reviewMemoryJob(jobId: string) {
-    return this.call<unknown>("memory_job_review", { jobId });
+  async reviewMemoryJob(jobId: string) {
+    return validateMemoryJobReview(await this.call<unknown>("memory_job_review", { jobId }), jobId, this.scope);
+  }
+  retryMemoryIndex() {
+    return this.call<import("./runtime").IndexRefreshStatus>("memory_index_retry");
+  }
+  approveMemoryJob(jobId: string, resultHash: string, approveProtected: boolean) {
+    return this.call<MemoryJob>("memory_job_approve", { jobId, resultHash, approveProtected });
   }
   runtime() {
     return this.call<RuntimeStatus>("memory_runtime_status");
@@ -276,6 +314,15 @@ export class ScopedService {
       previewId,
       approveProtected,
     });
+  }
+  prepareDreamTask(sourceRefs: string[], memoryRefs: string[]) {
+    return this.call<import('./manualDream').ManualDreamTask>('prepare_dream_task', {sourceRefs, memoryRefs});
+  }
+  reviewDreamText(text: string) {
+    return this.call<import('./manualDream').ManualDreamPreview>('review_dream_text', {text});
+  }
+  applyDream(previewId: string, approveProtected: boolean) {
+    return this.call<import('./manualDream').ManualDreamReceipt>('apply_dream', {previewId, approveProtected});
   }
   cancelPreviews() {
     return this.call<void>("cancel_previews");
@@ -378,6 +425,25 @@ export class ScopedService {
       browser,
       allowCapture,
     });
+  }
+  refreshBrowserConnection(entry: ConnectionEntry, browser: string) {
+    if (this.modelOperation.browserReconnect?.pending)
+      return Promise.reject(new Error('已有本机桥正在更新，请等待系统确认结果，不要重复登记。'));
+    const state: BrowserReconnectOperation = {entryId:entry.id,scope:this.scope,browser,permissionRevision:entry.permission_revision,pending:null,result:null,error:null};
+    this.modelOperation.browserReconnect = state;
+    const pending = refreshBrowserBridge(entry, this.scope, browser, () => this.connections(),
+      (extensionId, selectedBrowser, allowCapture) => this.browserConnection(extensionId, selectedBrowser, allowCapture));
+    state.pending = pending;
+    pending.then(result => {state.result=result;state.pending=null;}, reason => {state.error=reason;state.pending=null;});
+    return pending;
+  }
+  get browserReconnectPending() {return this.modelOperation.browserReconnect?.pending || null;}
+  browserReconnectState(entryId: string) {
+    const state=this.modelOperation.browserReconnect;
+    return state?.scope===this.scope && state.entryId===entryId ? state : null;
+  }
+  dismissBrowserReconnect(entryId: string) {
+    if (!this.browserReconnectPending && this.browserReconnectState(entryId)) this.modelOperation.browserReconnect=null;
   }
   copy(text: string) {
     return this.call<void>("write_clipboard", { text });

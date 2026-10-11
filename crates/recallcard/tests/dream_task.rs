@@ -90,9 +90,34 @@ fn fixed_schema_fields_and_operations_match_rust_result() {
     let prefix = task.split_once(DYNAMIC).unwrap().0;
     let schema_start = prefix.find("\n{\n").unwrap() + 1;
     let schema: Value = serde_json::from_str(&prefix[schema_start..]).unwrap();
-    let serialized = serde_json::to_value(parse_result_text(&minimal()).unwrap()).unwrap();
+    let mut parsed = parse_result_text(&minimal()).unwrap();
+    assert!(
+        serde_json::to_value(&parsed).unwrap()["proposals"][0]
+            .get("navigation")
+            .is_none(),
+        "旧结果必须省略缺省 hints，保持原摘要兼容"
+    );
+    parsed.proposals[0].navigation = Some(vec![]);
+    let serialized = serde_json::to_value(parsed).unwrap();
+    // Late recovered source adds optional split_plans; empty plans deliberately
+    // stay absent so pre-split result hashes remain compatible.
+    assert!(serialized.get("split_plans").is_none());
+    assert_eq!(schema["properties"]["split_plans"]["type"], "array");
+    assert!(!schema["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("split_plans")));
+    let mut explicit_empty = serialized.clone();
+    explicit_empty["split_plans"] = json!([]);
+    let round_trip = parse_result_text(&explicit_empty.to_string()).unwrap();
+    assert_eq!(serde_json::to_value(round_trip).unwrap(), serialized);
     let actual: Vec<_> = serialized.as_object().unwrap().keys().collect();
-    let advertised: Vec<_> = schema["properties"].as_object().unwrap().keys().collect();
+    let advertised: Vec<_> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|key| key.as_str() != "split_plans")
+        .collect();
     assert_eq!(actual, advertised);
     let actual: Vec<_> = serialized["proposals"][0]
         .as_object()

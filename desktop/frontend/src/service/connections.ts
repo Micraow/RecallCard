@@ -22,6 +22,26 @@ export interface PairingRequest {
 export interface ConnectionInventory {
   entries: ConnectionEntry[]; pending_pairings: PairingRequest[]; supported_protocols: string[]; identity_notice: string;
 }
+export function canRefreshBrowserBridge(entry: ConnectionEntry, scope: string): boolean {
+  return entry.grant.client_kind === 'browser' && !entry.revoked && entry.state !== 'revoked'
+    && /^[a-p]{32}$/.test(entry.grant.host_identity) && entry.grant.recall_scopes.includes(scope);
+}
+
+/** 只更新本机桥配置，不重新批准连接；真正登记仍由宿主显示系统确认。 */
+export async function refreshBrowserBridge<T>(
+  reviewed: ConnectionEntry, scope: string, browser: string,
+  read: () => Promise<ConnectionInventory>,
+  install: (extensionId: string, browser: string, allowCapture: boolean) => Promise<T>,
+): Promise<T> {
+  if (!canRefreshBrowserBridge(reviewed, scope) || !['chrome', 'chromium', 'brave'].includes(browser))
+    throw new Error('此连接不能更新本机桥，请检查当前范围和浏览器。');
+  const current = (await read()).entries.find(entry => entry.id === reviewed.id);
+  if (!current || !canRefreshBrowserBridge(current, scope)
+      || current.permission_revision !== reviewed.permission_revision
+      || !sameConnectionGrant(current.grant, reviewed.grant))
+    throw new Error('连接授权已变化，尚未登记。请关闭本窗口，刷新连接后重新审阅。');
+  return install(current.grant.host_identity, browser, current.grant.capture_scopes.includes(scope));
+}
 export const connectionLabel = (state: ConnectionEntry['state']) => ({ configured_unverified: '已配置 · 尚未验证', reachable: '本机可达', read_succeeded: '最近读取成功', failed: '最近操作未完成', revoked: '已撤销', needs_setup: '需要重新设置' })[state];
 export function parseConnectionCode(code: string): { host_identity: string; installation_id: string } | null {
   const match = /^recallcard-connect\/1:([a-p]{32}):([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i.exec(code.trim());

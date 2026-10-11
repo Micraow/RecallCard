@@ -46,7 +46,7 @@ fn bootstrap_reports_raw_sources_without_claiming_they_are_memories() {
     assert_eq!(before["coverage"]["captured_events"], 1);
     assert_eq!(
         before["activity_text"],
-        "原文 1 条 / 1 个会话；当前记忆 0 条。先 search，再 read/sources。"
+        "原文 1 条 / 1 个会话；当前记忆 0 条。先 read 目录，再核对原文。"
     );
     assert!(before["stable_text"]
         .as_str()

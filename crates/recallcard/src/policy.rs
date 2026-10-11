@@ -104,18 +104,24 @@ impl Vault {
     }
     pub fn suppressed_ids(&self) -> Result<BTreeSet<String>> {
         self.ensure_no_pending_dream()?;
-        self.suppressed_ids_impl(false)
+        self.suppressed_ids_impl()
     }
     /// 仅限持有 Vault 写锁的 Dream 事务验证；绝不用于普通检索或模型读取。
-    pub(crate) fn suppressed_ids_for_dream_recovery(&self) -> Result<BTreeSet<String>> {
+    pub(crate) fn suppressed_ids_for_dream_recovery<'a>(
+        &self,
+        events: impl Iterator<Item = &'a Event> + Clone,
+    ) -> Result<BTreeSet<String>> {
+        self.check_dream_recovery_barrier()?;
+        self.suppressed_ids_from_event_iter_unchecked(events)
+    }
+    pub(crate) fn check_dream_recovery_barrier(&self) -> Result<()> {
         if self.state_dir()?.join("event-transaction.json").exists() {
             return Err("存在未恢复的事件事务，不能恢复 Dream".into());
         }
-        self.suppressed_ids_impl(true)
+        Ok(())
     }
-    fn suppressed_ids_impl(&self, dream_recovery: bool) -> Result<BTreeSet<String>> {
-        let mut ids = BTreeSet::new();
-        let mut source_hashes = BTreeSet::new();
+    fn suppression_rules(&self) -> Result<Vec<Suppression>> {
+        let mut rules = Vec::new();
         for path in files_recursive(&self.root().join("control/suppressions"), "json")? {
             let s: Suppression = read_json(&path)?;
             validate_record_id(&s.id)?;
@@ -133,6 +139,107 @@ impl Vault {
                     return Err("抑制规则来源摘要无效".into());
                 }
             }
+            rules.push(s);
+        }
+        Ok(rules)
+    }
+    pub(crate) fn directly_suppressed_ids(&self) -> Result<BTreeSet<String>> {
+        let mut ids = BTreeSet::new();
+        for rule in self
+            .suppression_rules()?
+            .into_iter()
+            .filter(|rule| rule.active)
+        {
+            ids.insert(rule.id);
+            ids.extend(rule.source_refs);
+        }
+        Ok(ids)
+    }
+    /// 只扩展本次确实要读的来源；规则每次重读，身份来自已验证的当前 Event，非缓存字段。
+    pub(crate) fn suppressed_ids_for_sources(
+        &self,
+        sources: &BTreeSet<String>,
+        events: &mut crate::vault::EventSnapshot<'_>,
+    ) -> Result<BTreeSet<String>> {
+        self.ensure_no_pending_dream()?;
+        let mut ids = BTreeSet::new();
+        let mut hashes = BTreeSet::new();
+        for rule in self
+            .suppression_rules()?
+            .into_iter()
+            .filter(|rule| rule.active)
+        {
+            ids.insert(rule.id);
+            ids.extend(rule.source_refs);
+            hashes.extend(rule.source_hashes);
+        }
+        for id in ids.iter().filter(|id| id.starts_with("evt_")) {
+            match events.event(id) {
+                Ok(event) => {
+                    hashes.insert(suppression_source_hash(&event));
+                }
+                Err(error) if error == format!("找不到原始事件 {id}") => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if !hashes.is_empty() {
+            for id in sources {
+                if ids.contains(id) {
+                    continue;
+                }
+                let event = events.event(id)?;
+                if hashes.contains(&suppression_source_hash(&event)) {
+                    ids.insert(id.clone());
+                }
+            }
+        }
+        Ok(ids)
+    }
+    /// 调用方已经在同一锁内读取并验证了完整 Event 快照；不重复扫描，也不跨请求保存身份。
+    pub(crate) fn suppressed_ids_from_events(&self, events: &[Event]) -> Result<BTreeSet<String>> {
+        self.suppressed_ids_from_event_iter(events.iter())
+    }
+    pub(crate) fn suppressed_ids_from_event_iter<'a>(
+        &self,
+        events: impl Iterator<Item = &'a Event> + Clone,
+    ) -> Result<BTreeSet<String>> {
+        self.ensure_no_pending_dream()?;
+        self.suppressed_ids_from_event_iter_unchecked(events)
+    }
+    // 仅供已检查相应事务屏障的同锁快照调用，不用于绕过公共读取屏障。
+    fn suppressed_ids_from_event_iter_unchecked<'a>(
+        &self,
+        events: impl Iterator<Item = &'a Event> + Clone,
+    ) -> Result<BTreeSet<String>> {
+        let mut ids = BTreeSet::new();
+        let mut source_hashes = BTreeSet::new();
+        for rule in self
+            .suppression_rules()?
+            .into_iter()
+            .filter(|rule| rule.active)
+        {
+            ids.insert(rule.id);
+            ids.extend(rule.source_refs);
+            source_hashes.extend(rule.source_hashes);
+        }
+        if !ids.is_empty() {
+            for event in events.clone() {
+                if ids.contains(&event.id) {
+                    source_hashes.insert(suppression_source_hash(event));
+                }
+            }
+            for event in events {
+                if source_hashes.contains(&suppression_source_hash(event)) {
+                    ids.insert(event.id.clone());
+                }
+            }
+        }
+        Ok(ids)
+    }
+    fn suppressed_ids_impl(&self) -> Result<BTreeSet<String>> {
+        let mut ids = BTreeSet::new();
+        let mut source_hashes = BTreeSet::new();
+        for s in self.suppression_rules()? {
             if s.active {
                 ids.insert(s.id);
                 source_hashes.extend(s.source_hashes);
@@ -150,22 +257,14 @@ impl Vault {
                 }
                 Ok(())
             };
-            if dream_recovery {
-                self.visit_events_unchecked(collect_hashes)?;
-            } else {
-                self.visit_events(collect_hashes)?;
-            }
+            self.visit_events(collect_hashes)?;
             let expand_revisions = |event: Event| {
                 if source_hashes.contains(&suppression_source_hash(&event)) {
                     ids.insert(event.id);
                 }
                 Ok(())
             };
-            if dream_recovery {
-                self.visit_events_unchecked(expand_revisions)?;
-            } else {
-                self.visit_events(expand_revisions)?;
-            }
+            self.visit_events(expand_revisions)?;
         }
         Ok(ids)
     }

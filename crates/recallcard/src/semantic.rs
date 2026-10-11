@@ -20,6 +20,14 @@ use tokio::{
     process::{Child, ChildStdin, ChildStdout, Command},
 };
 
+pub(crate) mod local_index;
+mod local_query;
+pub(crate) mod managed_cloud;
+pub(crate) mod setup;
+pub use local_index::LocalIndexConfig;
+pub use local_query::LocalQueryConfig;
+pub use setup::LocalSemanticSetup;
+
 const MAX_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -52,6 +60,10 @@ pub struct SemanticConfig {
     pub query_cache_path: Option<PathBuf>,
     #[serde(default)]
     pub cloud_query: Option<CloudQueryApproval>,
+    #[serde(default)]
+    pub local_query: Option<LocalQueryConfig>,
+    #[serde(default)]
+    pub local_index: Option<LocalIndexConfig>,
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
 }
@@ -90,7 +102,7 @@ struct Space {
     normalization: String,
     preprocessing_version: String,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IndexDocument {
     #[serde(rename = "ref")]
@@ -100,7 +112,7 @@ struct IndexDocument {
     scope: String,
     vector: Vec<f64>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Index {
     schema: String,
@@ -115,14 +127,14 @@ struct Index {
 fn complete() -> bool {
     true
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueryCache {
     schema: String,
     space_signature: String,
     queries: Vec<CachedQuery>,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CachedQuery {
     query_hash: String,
@@ -138,6 +150,12 @@ struct Row {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EncodedQuery {
+    input_hash: String,
+    vector: Vec<f64>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchResult {
     results: Vec<Row>,
     ranking: String,
@@ -145,6 +163,8 @@ struct SearchResult {
     generation: String,
     #[serde(default)]
     query_cache_hit: Option<bool>,
+    #[serde(default)]
+    encoded_query: Option<EncodedQuery>,
     #[serde(default)]
     diagnostics: Option<Value>,
 }
@@ -196,7 +216,8 @@ fn read_local<T: serde::de::DeserializeOwned>(path: &Path) -> SResult<T> {
     if !metadata.file_type().is_file() || metadata.len() > MAX_CACHE_BYTES {
         return failure("invalid_cache");
     }
-    let file = File::open(path).map_err(|_| SemanticError("cache_unavailable"))?;
+    let file =
+        crate::filesystem::open_local_file(path).map_err(|_| SemanticError("cache_unavailable"))?;
     if !file
         .metadata()
         .map_err(|_| SemanticError("cache_unavailable"))?
@@ -230,8 +251,11 @@ fn corpus_generation(documents: &[Value]) -> String {
 
 impl Index {
     fn validate(&self, expected: &str) -> SResult<()> {
+        self.validate_shape(expected, true)
+    }
+    fn validate_shape(&self, expected: &str, require_complete: bool) -> SResult<()> {
         let space = &self.space;
-        if self.schema != "recallcard.embedding-index/1" || !self.complete {
+        if self.schema != "recallcard.embedding-index/1" || (require_complete && !self.complete) {
             return failure(if self.complete {
                 "invalid_cache"
             } else {
@@ -331,6 +355,7 @@ impl Index {
 pub(crate) struct Candidates {
     index: Index,
     pub references: Vec<String>,
+    pub query_mode: &'static str,
 }
 impl Candidates {
     pub(crate) fn revalidate(
@@ -346,6 +371,7 @@ impl Candidates {
 /// 全进程只持有一个 worker；损坏、超时或输出越界后停用，避免重启重置联网预算。
 pub struct SemanticSearch {
     config: SemanticConfig,
+    managed: Option<std::sync::Arc<managed_cloud::ManagedCloud>>,
     supervisor: Mutex<Supervisor>,
 }
 struct Supervisor {
@@ -359,9 +385,35 @@ struct Job {
 }
 
 impl SemanticSearch {
+    pub(crate) fn authorization_current(&self) -> bool {
+        self.managed.as_ref().is_none_or(|m| m.current())
+    }
+    pub(crate) fn config_fingerprint(&self) -> Result<String> {
+        if let Some(managed) = &self.managed {
+            return Ok(managed.fingerprint().to_owned());
+        }
+        serde_json::to_vec(&self.config)
+            .map(|bytes| hash(&bytes))
+            .map_err(|_| "语义启动配置不可核验".into())
+    }
     pub fn from_config_file(path: &Path) -> Result<Self> {
         let config = read_local(path)
             .map_err(|_| "无法读取语义检索启动配置；需使用可信本机普通文件".to_owned())?;
+        Self::new(config)
+    }
+    /// 浏览器宿主不继承 CLI 的 query 外发批准；即使查询已缓存也拒绝云配置。
+    pub fn from_offline_config_file(path: &Path) -> Result<Self> {
+        let config: SemanticConfig = read_local(path)
+            .map_err(|_| "无法读取离线语义检索启动配置；需使用可信本机普通文件".to_owned())?;
+        Self::from_offline_config(config)
+    }
+    pub(crate) fn from_offline_config(config: SemanticConfig) -> Result<Self> {
+        if config.cloud_query.is_some() {
+            return Err(
+                "当前格式仅接受离线配置，不能继承 cloud_query 外发批准；请使用独立审阅的普通云设置"
+                    .into(),
+            );
+        }
         Self::new(config)
     }
     pub fn new(config: SemanticConfig) -> Result<Self> {
@@ -378,6 +430,18 @@ impl SemanticSearch {
             return Err(
                 "语义检索启动配置无效：需可信解释器、绝对路径、空间签名及 10–120000ms 超时".into(),
             );
+        }
+        if let Some(local) = &config.local_query {
+            if !local.valid() || config.cloud_query.is_some() || config.query_cache_path.is_none() {
+                return Err("本机 query-only 配置需数字回环端点、范围、有限预算与查询缓存，不能与云授权混用".into());
+            }
+        }
+        if let Some(local) = &config.local_index {
+            if !local.valid() || config.cloud_query.is_some() {
+                return Err(
+                    "本机语料索引维护需独立数字回环目的地、范围与有限批次；不能继承云授权".into(),
+                );
+            }
         }
         if let Some(approval) = &config.cloud_query {
             if approval.scopes.is_empty()
@@ -402,6 +466,7 @@ impl SemanticSearch {
         }
         Ok(Self {
             config,
+            managed: None,
             supervisor: Mutex::new(Supervisor {
                 sender: None,
                 next_id: 0,
@@ -418,6 +483,9 @@ impl SemanticSearch {
         scopes: &[String],
         time: DateTime<Utc>,
     ) -> SResult<Candidates> {
+        if self.managed.as_ref().is_some_and(|cloud| !cloud.current()) {
+            return failure("cloud_approval_changed");
+        }
         let index: Index = read_local(&self.config.index_path)?;
         index.validate(&self.config.expected_space_signature)?;
         index.check_current(documents, scopes, time)?;
@@ -443,20 +511,28 @@ impl SemanticSearch {
             .collect();
         let query_vector = self.cached_query(&index.space, query)?;
         let mut request = json!({"index":index,"allowed_scopes":allowed_scopes,"allowed_refs":allowed_refs,"limit":MAX_RESULTS,"expected_generation":index.generation});
+        let was_cached = query_vector.is_some();
         if let Some(vector) = query_vector {
             request["op"] = json!("query_vector");
             request["query_vector"] = json!(vector);
             request["space_signature"] = json!(self.config.expected_space_signature);
         } else {
-            let Some(approval) = &self.config.cloud_query else {
+            let (endpoint, approved_scopes) = if let Some(local) = &self.config.local_query {
+                (&local.endpoint, &local.scopes)
+            } else if let Some(cloud) = &self.config.cloud_query {
+                (&cloud.endpoint, &cloud.scopes)
+            } else {
                 return failure("query_not_cached");
             };
-            if approval.endpoint != index.space.endpoint
+            if endpoint != &index.space.endpoint
                 || allowed_scopes
                     .iter()
-                    .any(|scope| !approval.scopes.contains(scope))
+                    .any(|scope| !approved_scopes.contains(scope))
             {
                 return failure("query_not_approved");
+            }
+            if (self.config.local_query.is_some() || self.managed.is_some()) && query.len() > 4096 {
+                return failure("query_size_exceeded");
             }
             request["op"] = json!("query");
             request["query"] = json!(query);
@@ -482,8 +558,27 @@ impl SemanticSearch {
                 return failure("malformed_response");
             }
         }
+        if !was_cached && (self.config.local_query.is_some() || self.managed.is_some()) {
+            let encoded = result
+                .encoded_query
+                .as_ref()
+                .ok_or(SemanticError("malformed_response"))?;
+            self.persist_local_query(&index.space, query, encoded)?;
+        } else if result.encoded_query.is_some() {
+            self.invalidate();
+            return failure("malformed_response");
+        }
         // 分数只用于排序，不作为来源可信度；Rust 再融合完整文本候选，保留未 Dream 的 Event。
         Ok(Candidates {
+            query_mode: if was_cached {
+                "cached"
+            } else if self.config.local_query.is_some() && result.query_cache_hit == Some(true) {
+                "local_worker_cached"
+            } else if self.config.local_query.is_some() {
+                "local_encoded"
+            } else {
+                "cloud_encoded"
+            },
             index,
             references: result
                 .results
@@ -497,25 +592,18 @@ impl SemanticSearch {
         let Some(path) = &self.config.query_cache_path else {
             return Ok(None);
         };
-        let cache: QueryCache = read_local(path)?;
-        if cache.schema != "recallcard.embedding-query-cache/1"
-            || cache.space_signature != self.config.expected_space_signature
-            || cache.queries.len() > 32
+        if self.config.local_query.is_some()
+            && std::fs::symlink_metadata(path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
         {
-            return failure("query_cache_incompatible");
+            return Ok(None);
         }
+        let cache: QueryCache = read_local(path)?;
+        self.validate_query_cache(&cache, space)?;
         let query_hash = hash(query.as_bytes());
         let input_hash = prepared_hash(&space.query_instruction, query);
-        let mut seen = BTreeSet::new();
         let mut found = None;
         for item in cache.queries {
-            if !digest(&item.query_hash)
-                || !digest(&item.input_hash)
-                || !seen.insert(item.query_hash.clone())
-            {
-                return failure("invalid_cache");
-            }
-            validate_vector(&item.vector, space.dimensions, false)?;
             if item.query_hash == query_hash {
                 if item.input_hash != input_hash {
                     return failure("query_cache_incompatible");
@@ -543,7 +631,10 @@ impl SemanticSearch {
         }
         if supervisor.sender.is_none() {
             let (sender, receiver) = mpsc::channel();
-            let config = self.config.clone();
+            let mut config = self.config.clone();
+            if self.managed.is_some() {
+                config.cloud_query = None;
+            }
             std::thread::Builder::new()
                 .name("recallcard-semantic".into())
                 .spawn(move || supervise(config, receiver))
@@ -559,25 +650,31 @@ impl SemanticSearch {
             return failure("input_limit");
         }
         let (reply, receiver) = mpsc::sync_channel(1);
-        let received = if supervisor
-            .sender
-            .as_ref()
-            .unwrap()
-            .send(Job {
-                request: encoded,
-                reply,
-            })
-            .is_err()
-        {
-            failure("worker_unavailable")
-        } else {
-            receiver
-                .recv_timeout(Duration::from_millis(self.config.timeout_ms + 500))
-                .unwrap_or_else(|_| failure("worker_timeout"))
-        };
+        let received =
+            if let Some(cloud) = self.managed.as_ref().filter(|_| request["op"] == "query") {
+                cloud.exchange(&self.config, &request)
+            } else if supervisor
+                .sender
+                .as_ref()
+                .unwrap()
+                .send(Job {
+                    request: encoded,
+                    reply,
+                })
+                .is_err()
+            {
+                failure("worker_unavailable")
+            } else {
+                receiver
+                    .recv_timeout(Duration::from_millis(self.config.timeout_ms + 500))
+                    .unwrap_or_else(|_| failure("worker_timeout"))
+            };
         let bytes = match received {
             Ok(bytes) => bytes,
             Err(error) => {
+                if self.managed.is_some() {
+                    return Err(error);
+                }
                 supervisor.disabled = Some(error);
                 supervisor.sender = None;
                 return Err(error);
@@ -629,6 +726,10 @@ impl SemanticSearch {
                 "rate_limited" => "rate_limited",
                 "redirect_blocked" => "redirect_blocked",
                 "model_mismatch" => "model_mismatch",
+                "local_provider_unavailable" => "local_provider_unavailable",
+                "local_provider_error" => "local_provider_error",
+                "local_budget_exhausted" => "local_budget_exhausted",
+                "query_not_approved" => "query_not_approved",
                 _ => "worker_error",
             };
             return failure(code);
@@ -644,16 +745,11 @@ struct Process {
 }
 impl Process {
     fn start(config: &SemanticConfig) -> SResult<Self> {
-        let mut command = Command::new(&config.python);
-        // -I/-S 拒绝当前目录、用户 site 和 PYTHON* 环境注入；只载入启动者指定的模块根目录。
-        command.args(["-I", "-S", "-c", "import sys; sys.path.insert(0, sys.argv[1]); from recallcard_worker.__main__ import main; raise SystemExit(main(sys.argv[2:]))"])
-            .arg(&config.python_path).arg("--stdio").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).env_clear();
-        for name in ["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"] {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
-        if let Some(approval) = &config.cloud_query {
+        Self::start_mode(config, false)
+    }
+    fn start_mode(config: &SemanticConfig, index_only: bool) -> SResult<Self> {
+        let mut command = Self::command(config);
+        if let Some(approval) = config.cloud_query.as_ref().filter(|_| !index_only) {
             command
                 .args([
                     "--allow-network",
@@ -678,6 +774,52 @@ impl Process {
                 command.env(&approval.key_env, value);
             }
         }
+        if let Some(local) = config.local_query.as_ref().filter(|_| !index_only) {
+            command
+                .arg("--local-query-endpoint")
+                .arg(&local.endpoint)
+                .arg("--max-local-calls")
+                .arg(local.max_local_calls.to_string())
+                .arg("--max-local-bytes")
+                .arg(local.max_input_bytes.to_string())
+                .arg("--timeout")
+                .arg((config.timeout_ms as f64 / 1000.0).to_string());
+            for scope in &local.scopes {
+                command.arg("--local-query-scope").arg(scope);
+            }
+        }
+        if index_only {
+            let local = config
+                .local_index
+                .as_ref()
+                .ok_or(SemanticError("index_not_approved"))?;
+            command
+                .arg("--local-index-endpoint")
+                .arg(&local.endpoint)
+                .args(["--max-local-calls", "1"])
+                .arg("--max-local-bytes")
+                .arg(local.max_input_bytes.to_string())
+                .arg("--timeout")
+                .arg((config.timeout_ms as f64 / 1000.0).to_string());
+            for scope in &local.scopes {
+                command.arg("--local-index-scope").arg(scope);
+            }
+        }
+        Self::spawn(command)
+    }
+    fn command(config: &SemanticConfig) -> Command {
+        let mut command = Command::new(&config.python);
+        // -I/-S 拒绝当前目录、用户 site 和 PYTHON* 环境注入；只载入启动者指定的模块根目录。
+        command.args(["-I", "-S", "-c", "import sys; sys.path.insert(0, sys.argv[1]); from recallcard_worker.__main__ import main; raise SystemExit(main(sys.argv[2:]))"])
+            .arg(&config.python_path).arg("--stdio").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).env_clear();
+        for name in ["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        command
+    }
+    fn spawn(mut command: Command) -> SResult<Self> {
         let mut child = command
             .spawn()
             .map_err(|_| SemanticError("worker_unavailable"))?;
@@ -695,7 +837,36 @@ impl Process {
             stdout,
         })
     }
+    fn start_managed(
+        config: &SemanticConfig,
+        endpoint: &str,
+        scope: &str,
+        index_only: bool,
+        key: &str,
+    ) -> SResult<Self> {
+        let mut command = Self::command(config);
+        command
+            .args([
+                "--managed-cloud-once",
+                "--allow-network",
+                "--approve-endpoint",
+                endpoint,
+                "--approve-scope",
+                scope,
+                "--approve-data",
+                if index_only { "corpus" } else { "query" },
+                "--key-env",
+                "RECALLCARD_MANAGED_EMBEDDING_KEY",
+            ])
+            .arg("--timeout")
+            .arg((config.timeout_ms as f64 / 1000.0).to_string())
+            .env("RECALLCARD_MANAGED_EMBEDDING_KEY", key);
+        Self::spawn(command)
+    }
     async fn exchange(&mut self, request: &[u8]) -> SResult<Vec<u8>> {
+        self.exchange_limit(request, MAX_RESPONSE_BYTES).await
+    }
+    async fn exchange_limit(&mut self, request: &[u8], limit: usize) -> SResult<Vec<u8>> {
         self.stdin
             .write_all(request)
             .await
@@ -716,7 +887,7 @@ impl Process {
                 return failure("worker_exited");
             }
             response.extend_from_slice(&buffer[..count]);
-            if response.len() > MAX_RESPONSE_BYTES {
+            if response.len() > limit {
                 return failure("output_limit");
             }
             if let Some(newline) = response.iter().position(|byte| *byte == b'\n') {
