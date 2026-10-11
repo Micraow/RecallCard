@@ -1,7 +1,7 @@
 //! 显式请求的有界来源导航；不按时间猜关系，不合并并行回答。
 use super::*;
 
-fn graph(event: &Event) -> Option<&Value> {
+pub(super) fn graph(event: &Event) -> Option<&Value> {
     ["qwen", "deepseek", "chatgpt"].into_iter().find_map(|key| {
         event
             .data
@@ -10,7 +10,13 @@ fn graph(event: &Event) -> Option<&Value> {
             .filter(|value| value.is_object())
     })
 }
-fn source_parent(event: &Event) -> Option<&str> {
+pub(super) fn source_node_id(event: &Event) -> &str {
+    graph(event)
+        .and_then(|graph| graph.get("node_id"))
+        .and_then(Value::as_str)
+        .unwrap_or(&event.data.source.message_id)
+}
+pub(super) fn source_parent(event: &Event) -> Option<&str> {
     if let Some(graph) = graph(event) {
         // 显式 null 是已知无可见父节点，不能退回另一条猜测关系。
         if let Some(parent) = graph.get("nearest_visible_parent_id") {
@@ -29,7 +35,7 @@ fn source_parent(event: &Event) -> Option<&str> {
         .get("previous_message_id")
         .and_then(Value::as_str)
 }
-fn current(event: &Event) -> Option<bool> {
+pub(super) fn current(event: &Event) -> Option<bool> {
     graph(event)
         .and_then(|value| value.get("on_current_path"))
         .and_then(Value::as_bool)
@@ -95,7 +101,7 @@ impl Context<'_> {
         let mut source_ids: BTreeMap<&str, Option<&str>> = BTreeMap::new();
         for candidate in visible.values() {
             source_ids
-                .entry(&candidate.data.source.message_id)
+                .entry(source_node_id(candidate))
                 .and_modify(|value| *value = None)
                 .or_insert(Some(&candidate.id));
         }
@@ -166,7 +172,7 @@ impl Context<'_> {
                 "next_ref_count":selected.len(),"next_user_ref":next_user,"user_traversal_limited":traversal_limited,
                 "branch_choices":choices,"other_branch_count":children.len()-selected.len(),
                 "branch_choice_required":selected.len()>1 || selected.is_empty()&&!children.is_empty(),
-                "ambiguous_source_identity":source_ids[&event.data.source.message_id.as_str()].is_none(),
+                "ambiguous_source_identity":source_ids[source_node_id(event)].is_none(),
                 "relation":"authorized_source_graph_not_temporal_override"
             }),
             generation,

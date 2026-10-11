@@ -334,6 +334,22 @@ pub(super) fn response(
     Ok(result)
 }
 
+pub(super) fn term_matches_mode(field: &str, term: &str, mode: &str) -> bool {
+    if term_matches(field, term) {
+        return true;
+    }
+    if mode != "identifier_prefix"
+        || term.len() < 3
+        || !term.bytes().all(|c| c.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    let word = |c: char| (!han(c) && c.is_alphanumeric()) || c == '_';
+    field
+        .match_indices(term)
+        .any(|(at, _)| !field[..at].chars().next_back().is_some_and(word))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -56,6 +56,7 @@ Event 和 Memory 文件是事实源，索引与视图可重新生成。每个连
 - [项目接入与文件视图](docs/agent-install-v0.7.md)
 - [网页悬浮接力](extension/RELAY.md)
 - [长文读取与续页](docs/read-pages-v0.6.md)
+- [有预算的同会话双向上下文](docs/bounded-session-context.md)
 - [后台整理运行时](docs/background-memory-v0.6.md)
 - [由浅入深召回与开销实测边界](docs/recall-ux-validation-20261011.md)
 - [双阶段人工网关复验](docs/manual-staged-gateway.md)

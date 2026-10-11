@@ -202,6 +202,7 @@ impl ModelOperation {
         };
         let mut response = context
             .search(SearchArgs {
+                lexical_match: "exact".into(),
                 include_navigation: false,
                 query: query.into(),
                 target: target.into(),

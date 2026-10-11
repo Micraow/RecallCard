@@ -257,6 +257,8 @@ enum Command {
     /// 不依赖 Dream 或云 API 的中英文文本检索
     Search {
         query: String,
+        #[arg(long, default_value = "exact", value_parser = ["exact", "identifier_prefix"])]
+        lexical_match: String,
         #[arg(long, default_value = "personal")]
         scope: Vec<String>,
         #[arg(long, default_value = "all")]
@@ -753,6 +755,7 @@ fn run(cli: Cli) -> Result<Value> {
         } => Context::new(&vault, Access::new(scope)?).bootstrap(BootstrapArgs { budget_tokens }),
         Command::Search {
             query,
+            lexical_match,
             scope,
             target,
             include_navigation,
@@ -778,6 +781,7 @@ fn run(cli: Cli) -> Result<Value> {
                 None => Context::new(&vault, access),
             };
             context.search(SearchArgs {
+                lexical_match,
                 include_navigation,
                 query,
                 target,

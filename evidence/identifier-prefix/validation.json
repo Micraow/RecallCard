@@ -1,0 +1,122 @@
+{
+  "schema": "recallcard.identifier-prefix-validation/1",
+  "default": "exact",
+  "opt_in": "identifier_prefix",
+  "network_or_external_services_used": false,
+  "real_corpus_used": false,
+  "focused_suites": [
+    {
+      "suite": "context",
+      "passed": 30,
+      "failed": 0
+    },
+    {
+      "suite": "desktop",
+      "passed": 21,
+      "failed": 0
+    },
+    {
+      "suite": "identifier_prefix",
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "suite": "native",
+      "passed": 15,
+      "failed": 0
+    },
+    {
+      "suite": "search_relevance",
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "suite": "semantic",
+      "passed": 24,
+      "failed": 0
+    }
+  ],
+  "focused_exit": 0,
+  "strict_all_target_clippy_exit": 0,
+  "format_check_exit": 0,
+  "full_suite": {
+    "passed_before_stop": 499,
+    "failed_ipc_tests": 13,
+    "complete": false,
+    "limitations": [
+      "IPC failures: two Unix socket permission denials, ten configured socket-path length failures, and one missing-path setup failure; this suite did not pass.",
+      "Initial full attempt had five setup failures because temporary paths contained parent traversal; canonical paths resolved those without product changes."
+    ],
+    "failures": [
+      {
+        "test": "unix::client_has_a_total_timeout_against_unresponsive_peer",
+        "reason": "unix_socket_permission_denied"
+      },
+      {
+        "test": "controlled_shutdown_releases_endpoint_for_next_instance",
+        "reason": "socket_path_exceeds_100_bytes"
+      },
+      {
+        "test": "client_rejects_oversized_payload_before_connecting",
+        "reason": "socket_path_exceeds_100_bytes"
+      },
+      {
+        "test": "unix::bad_frames_and_slow_clients_do_not_stop_daemon",
+        "reason": "socket_path_exceeds_100_bytes"
+      },
+      {
+        "test": "unix::cleanup_does_not_remove_replaced_endpoint",
+        "reason": "socket_path_exceeds_100_bytes"
+      },
+      {
+        "test": "real_daemon_has_one_instance_and_recovers_after_process_death",
+        "reason": "socket_path_exceeds_100_bytes"
+      },
+      {
+        "test": "unix::daemon_rejects_unknown_fields_versions_and_mutation_routes",
+        "reason": "socket_path_exceeds_100_bytes"
+      },
+      {
+        "test": "real_daemon_reads_current_events_and_rechecks_suppression",
+        "reason": "socket_path_exceeds_100_bytes"
+      },
+      {
+        "test": "unix::shared_parent_and_live_foreign_socket_are_rejected",
+        "reason": "unix_socket_permission_denied"
+      },
+      {
+        "test": "unix::private_socket_permissions_and_non_socket_files_are_preserved",
+        "reason": "socket_path_exceeds_100_bytes"
+      },
+      {
+        "test": "unix::partial_body_and_slow_drip_have_a_total_deadline",
+        "reason": "socket_path_exceeds_100_bytes"
+      },
+      {
+        "test": "vault_and_scope_binding_prevents_wrong_daemon_use",
+        "reason": "socket_path_exceeds_100_bytes"
+      },
+      {
+        "test": "unix::symlink_endpoint_parent_and_lock_are_never_followed",
+        "reason": "missing_path_setup_not_found"
+      }
+    ]
+  },
+  "first_focused_attempt": {
+    "context_passed": 29,
+    "context_failed": 1,
+    "cause": "Existing bootstrap assertion expected a superseded label; updated assertion to already-published directory wording."
+  },
+  "prefix_checks": [
+    "explicit CLI and MCP schema/invoke",
+    "default exact and legacy budget alias",
+    "ASCII minimum length and left boundary",
+    "case normalization; no number/code/Chinese prefix widening",
+    "exact-mode matches first, stable ties, no duplicate refs",
+    "scope, role, time, session and suppression filters",
+    "cursor mode binding; default binding representation retained",
+    "256 expanded candidates cap, exact matches preserved",
+    "bounded response bytes"
+  ],
+  "real_cold_baseline": "Prior two-question real trial remains 1/2 and unchanged. No known-answer replay or blind improvement claim."
+}

@@ -51,7 +51,7 @@ fn bootstrap_reports_raw_sources_without_claiming_they_are_memories() {
     assert!(before["stable_text"]
         .as_str()
         .unwrap()
-        .contains("暂无记忆分类"));
+        .contains("未设置旧标签分类"));
     assert!(!before.to_string().contains("合成原始观察"));
     capture(&vault, "personal", "raw-b", "另一条合成原始观察");
     let after = context(&vault)

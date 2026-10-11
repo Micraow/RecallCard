@@ -1,0 +1,96 @@
+{
+  "schema": "recallcard.bounded-session-context-validation/1",
+  "public_fixtures": "independent_synthetic_only",
+  "mode": "search detail=session_context target=events",
+  "default_search_unchanged": true,
+  "limits": {
+    "anchors_per_session": 2,
+    "hops_per_direction": 3,
+    "messages_per_session": 12,
+    "max_result_json_utf8_bytes": 32768
+  },
+  "budget_unit": "utf8_bytes_not_tokens",
+  "focused_suites": {
+    "context": {
+      "passed": 30,
+      "failed": 0
+    },
+    "context_adjacency": {
+      "passed": 10,
+      "failed": 0
+    },
+    "context_paging": {
+      "passed": 7,
+      "failed": 0
+    },
+    "identifier_prefix": {
+      "passed": 10,
+      "failed": 0
+    },
+    "search_relevance": {
+      "passed": 10,
+      "failed": 0
+    },
+    "semantic": {
+      "passed": 24,
+      "failed": 0
+    },
+    "session_context": {
+      "passed": 13,
+      "failed": 0
+    }
+  },
+  "format_check_exit": 0,
+  "strict_all_target_clippy_exit": 0,
+  "full_rust_suite": {
+    "passed": 638,
+    "failed": 14,
+    "all_passed": false,
+    "failed_targets": {
+      "ipc": 11,
+      "ipc_bridges": 3
+    },
+    "failure_reason": "Unix domain socket bind denied by execution environment (Operation not permitted); daemon-dependent tests consequently fail."
+  },
+  "preflight": {
+    "passed": 7,
+    "failed": 4,
+    "local_gate_passed": false,
+    "failed_checks": [
+      "node_and_lockfiles",
+      "actionlint",
+      "local_dom",
+      "preflight_contracts"
+    ],
+    "blockers": [
+      "Locked Playwright/jsdom dependencies are absent; offline npm cache lacks playwright-core.",
+      "actionlint executable is absent."
+    ],
+    "browser_native_and_packaging": "not_run"
+  },
+  "recovered_validation_attempts": [
+    "Initial focused tests could not initialize the default read-only state directory; isolated writable state resolved setup without product changes.",
+    "Initial all-target debug compilation exhausted disk; reproducible low-debug build in a dedicated temporary target completed all test targets."
+  ],
+  "verified": [
+    "actual stdio MCP initialize/tool schema/search result",
+    "backward requirement and forward user correction",
+    "roles and exact original UTF-8 pieces",
+    "snapshot equality with compact read",
+    "round-robin excerpts before giant message tails",
+    "empty text and low-budget cursor progress",
+    "scope/session/source isolation and suppression",
+    "role/time filters and blocked traversal",
+    "branch choices and no sibling traversal",
+    "actual graph node IDs distinct from message IDs",
+    "export gaps and missing graph metadata disclosed",
+    "source/ranking/filter/access/mode/limit/budget cursor binding"
+  ],
+  "not_claimed": [
+    "production event embedding index integration",
+    "blind model retrieval or answer quality",
+    "full private corpus MCP evaluation",
+    "tokenizer token counts or provider charges",
+    "full desktop/IPC/package acceptance"
+  ]
+}
