@@ -141,18 +141,221 @@ pub struct EventVectorIndex {
     fingerprint: String,
     index: Index,
     query_cache: Option<PathBuf>,
+    query_profile: Option<QueryCacheProfile>,
     ranking: String,
 }
 
-/// Explicit query-vector import into the selected local cache; no provider calls.
-#[derive(Serialize, Deserialize)]
+const LEGACY_QUERY_PROFILE: &str = "legacy_raw_provider_preprocessing_unverified";
+
+/// Exact caller-side input construction. This does not attest to provider-side preprocessing.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+enum QueryEncodingProfile {
+    #[serde(rename = "raw/1")]
+    Raw {},
+    #[serde(rename = "instruct_query/1")]
+    Instruct { instruction: String },
+}
+impl QueryEncodingProfile {
+    fn encoded_input(&self, query: &str) -> Result<String> {
+        match self {
+            Self::Raw {} => Ok(query.to_owned()),
+            Self::Instruct { instruction } => {
+                if instruction.trim().is_empty()
+                    || instruction.len() > 4096
+                    || instruction.chars().any(char::is_control)
+                {
+                    return Err("event_query_encoding_profile_invalid".into());
+                }
+                Ok(format!("Instruct: {instruction}\nQuery: {query}"))
+            }
+        }
+    }
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Raw {} => "raw/1",
+            Self::Instruct { .. } => "instruct_query/1",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct QueryVector {
+struct QueryCacheProfile {
     schema: String,
     space: Space,
-    query_sha256: String,
-    vector: Vec<f64>,
+    encoding_profile: QueryEncodingProfile,
 }
+impl QueryCacheProfile {
+    fn new(space: &Space, encoding_profile: &QueryEncodingProfile) -> Self {
+        Self {
+            schema: "recallcard.query-cache-profile/1".into(),
+            space: space.clone(),
+            encoding_profile: encoding_profile.clone(),
+        }
+    }
+    fn binding(&self) -> String {
+        // Fixed Rust struct field ordering; no untrusted JSON serialization order is used.
+        hash(&serde_json::to_vec(self).expect("query profile serialization"))
+    }
+}
+
+/// Version 1 remains byte-compatible with the original raw cache writer. Version 2
+/// stores a self-contained JSON entry so its input/profile binding is committed atomically.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "schema", deny_unknown_fields)]
+enum QueryVector {
+    #[serde(rename = "recallcard.query-vector/1")]
+    Legacy {
+        space: Space,
+        query_sha256: String,
+        vector: Vec<f64>,
+    },
+    #[serde(rename = "recallcard.query-vector/2")]
+    Profiled {
+        space: Space,
+        query_sha256: String,
+        encoded_input_sha256: String,
+        encoding_profile: QueryEncodingProfile,
+        vector: Vec<f64>,
+    },
+}
+impl QueryVector {
+    fn parts(&self) -> (&Space, &str, &[f64]) {
+        match self {
+            Self::Legacy {
+                space,
+                query_sha256,
+                vector,
+            }
+            | Self::Profiled {
+                space,
+                query_sha256,
+                vector,
+                ..
+            } => (space, query_sha256, vector),
+        }
+    }
+    fn profile(&self) -> Option<QueryCacheProfile> {
+        match self {
+            Self::Legacy { .. } => None,
+            Self::Profiled {
+                space,
+                encoding_profile,
+                ..
+            } => Some(QueryCacheProfile::new(space, encoding_profile)),
+        }
+    }
+    fn validate(&self, query: &str) -> Result<()> {
+        let (space, query_sha256, vector) = self.parts();
+        space.validate()?;
+        let norm = vector.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if query_sha256 != hash(query.as_bytes())
+            || vector.len() != space.dimensions
+            || !vector.iter().all(|v| v.is_finite())
+            || !norm.is_finite()
+            || (norm - 1.0).abs() > 1e-6
+        {
+            return Err("event_query_vector_binding_or_norm_invalid".into());
+        }
+        if let Self::Profiled {
+            encoded_input_sha256,
+            encoding_profile,
+            ..
+        } = self
+        {
+            let encoded = encoding_profile.encoded_input(query)?;
+            if *encoded_input_sha256 != hash(encoded.as_bytes()) {
+                return Err("event_query_encoded_input_hash_mismatch".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn cache_query_profile(cache_dir: &Path) -> Result<Option<QueryCacheProfile>> {
+    safe_path(cache_dir)?;
+    let path = cache_dir.join("profile.json");
+    // symlink_metadata notices broken symlinks too, so they cannot look like legacy caches.
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut entries =
+                std::fs::read_dir(cache_dir).map_err(|_| "event_query_cache_unavailable")?;
+            if entries.any(|entry| {
+                entry.map_or(true, |entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".query-v2.json")
+                })
+            }) {
+                return Err("event_query_cache_profile_missing".into());
+            }
+            return Ok(None);
+        }
+        Err(_) => return Err("event_query_cache_unavailable".into()),
+        Ok(_) => {}
+    }
+    let profile: QueryCacheProfile = serde_json::from_slice(&read(&path, 16 * 1024)?)
+        .map_err(|_| "event_query_cache_profile_invalid")?;
+    if profile.schema != "recallcard.query-cache-profile/1" {
+        return Err("event_query_cache_profile_invalid".into());
+    }
+    profile.space.validate()?;
+    profile.encoding_profile.encoded_input("")?;
+    Ok(Some(profile))
+}
+
+fn write_query_file(path: &Path, bytes: &[u8], failure: &'static str) -> Result<()> {
+    let parent = path.parent().ok_or("event_query_write_failed")?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|_| failure)?;
+    temp.write_all(bytes).map_err(|_| failure)?;
+    temp.as_file().sync_all().map_err(|_| failure)?;
+    temp.persist_noclobber(path).map_err(|_| failure)?;
+    crate::vault::sync_parent(path)?;
+    Ok(())
+}
+
+struct QueryImportGuard(std::fs::File);
+impl Drop for QueryImportGuard {
+    fn drop(&mut self) {
+        // Explicitly release even if a concurrent fork temporarily retained the fd.
+        let _ = self.0.unlock();
+    }
+}
+fn query_import_lock(cache_dir: &Path) -> Result<QueryImportGuard> {
+    let path = cache_dir.join(".query-import.lock");
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if !meta.is_file() || meta.is_symlink() {
+            return Err("event_query_import_lock_invalid".into());
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(&path)
+        .map_err(|_| "event_query_import_lock_unavailable")?;
+    let meta = file
+        .metadata()
+        .map_err(|_| "event_query_import_lock_unavailable")?;
+    if !meta.is_file() || meta.is_symlink() {
+        return Err("event_query_import_lock_invalid".into());
+    }
+    file.try_lock().map_err(|_| "event_query_import_busy")?;
+    Ok(QueryImportGuard(file))
+}
+
+/// Explicit query-vector import into the selected local cache; no provider calls.
 pub fn import_query(query_file: &Path, vector_file: &Path, cache_dir: &Path) -> Result<Value> {
     let query = read(query_file, 4096)?;
     let query = std::str::from_utf8(&query).map_err(|_| "event_query_not_utf8")?;
@@ -161,62 +364,87 @@ pub fn import_query(query_file: &Path, vector_file: &Path, cache_dir: &Path) -> 
     }
     let input: QueryVector = serde_json::from_slice(&read(vector_file, 1024 * 1024)?)
         .map_err(|_| "event_query_vector_invalid")?;
-    input.space.validate()?;
-    let norm = input.vector.iter().map(|v| v * v).sum::<f64>().sqrt();
-    if input.schema != "recallcard.query-vector/1"
-        || input.query_sha256 != hash(query.as_bytes())
-        || input.vector.len() != input.space.dimensions
-        || !input.vector.iter().all(|v| v.is_finite())
-        || !norm.is_finite()
-        || (norm - 1.0).abs() > 1e-6
-    {
-        return Err("event_query_vector_binding_or_norm_invalid".into());
-    }
+    input.validate(query)?;
+    let (space, query_sha256, vector) = input.parts();
     safe_path(cache_dir)?;
+    // Serialize cooperating v1/v2 writers across the declaration and entry transaction.
+    // The zero-byte lock is retained; closing this handle releases it, even on failure.
+    let _cache_lock = query_import_lock(cache_dir)?;
+    let profile = input.profile();
+    let existing_profile = cache_query_profile(cache_dir)?;
+    if existing_profile.is_some() && existing_profile != profile {
+        return Err("event_query_cache_profile_mismatch".into());
+    }
+    if profile.is_some() && existing_profile.is_none() {
+        // Never silently relabel legacy/source vectors as verified raw or instructed queries.
+        let mut entries =
+            std::fs::read_dir(cache_dir).map_err(|_| "event_query_cache_unavailable")?;
+        if entries.any(|entry| {
+            entry.map_or(true, |entry| {
+                entry.file_name() != "metadata.json" && entry.file_name() != ".query-import.lock"
+            })
+        }) {
+            return Err("event_query_profile_requires_empty_cache".into());
+        }
+    }
     let metadata = cache_dir.join("metadata.json");
     if metadata
         .try_exists()
         .map_err(|_| "event_query_cache_unavailable")?
+        && cache_space(cache_dir)? != *space
     {
-        if cache_space(cache_dir)? != input.space {
-            return Err("event_vector_space_mismatch".into());
-        }
+        return Err("event_vector_space_mismatch".into());
+    }
+    if let Some(profile) = profile.as_ref().filter(|_| existing_profile.is_none()) {
+        write_query_file(
+            &cache_dir.join("profile.json"),
+            &serde_json::to_vec(profile).map_err(|_| "event_query_write_failed")?,
+            "event_query_profile_exists_or_failed",
+        )?;
+    }
+    if !metadata
+        .try_exists()
+        .map_err(|_| "event_query_cache_unavailable")?
+    {
+        write_query_file(
+            &metadata,
+            json!(space).to_string().as_bytes(),
+            "event_query_metadata_exists_or_failed",
+        )?;
+    }
+    if cache_space(cache_dir)? != *space {
+        return Err("event_vector_space_mismatch".into());
+    }
+    if cache_query_profile(cache_dir)? != profile {
+        return Err("event_query_cache_profile_mismatch".into());
+    }
+    let output;
+    let raw;
+    if profile.is_some() {
+        output = cache_dir.join(format!("{query_sha256}.query-v2.json"));
+        raw = serde_json::to_vec(&input).map_err(|_| "event_query_write_failed")?;
     } else {
-        let mut temp =
-            tempfile::NamedTempFile::new_in(cache_dir).map_err(|_| "event_query_write_failed")?;
-        temp.write_all(json!(input.space).to_string().as_bytes())
-            .map_err(|_| "event_query_write_failed")?;
-        temp.as_file()
-            .sync_all()
-            .map_err(|_| "event_query_write_failed")?;
-        temp.persist_noclobber(&metadata)
-            .map_err(|_| "event_query_metadata_exists_or_failed")?;
+        let decode = |hex: &str| -> Vec<u8> {
+            (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                .collect()
+        };
+        let mut bytes = b"RCVEC001".to_vec();
+        bytes.extend(decode(&space.binding()));
+        bytes.extend(decode(query_sha256));
+        for value in vector {
+            bytes.extend(value.to_le_bytes());
+        }
+        output = cache_dir.join(format!("{query_sha256}.bin"));
+        raw = bytes;
     }
-    let decode = |hex: &str| -> Vec<u8> {
-        (0..hex.len())
-            .step_by(2)
-            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
-            .collect()
-    };
-    let mut raw = b"RCVEC001".to_vec();
-    raw.extend(decode(&input.space.binding()));
-    raw.extend(decode(&input.query_sha256));
-    for value in input.vector {
-        raw.extend(value.to_le_bytes());
-    }
-    let output = cache_dir.join(format!("{}.bin", input.query_sha256));
-    let mut temp =
-        tempfile::NamedTempFile::new_in(cache_dir).map_err(|_| "event_query_write_failed")?;
-    temp.write_all(&raw)
-        .map_err(|_| "event_query_write_failed")?;
-    temp.as_file()
-        .sync_all()
-        .map_err(|_| "event_query_write_failed")?;
-    temp.persist_noclobber(&output)
-        .map_err(|_| "event_query_vector_exists_or_failed")?;
-    crate::vault::sync_parent(&output)?;
+    write_query_file(&output, &raw, "event_query_vector_exists_or_failed")?;
     Ok(
-        json!({"status":"query_vector_imported","model":input.space.model,"dimensions":input.space.dimensions,"network_requests":0,"cache_write":"explicit_query_destination_only"}),
+        json!({"status":"query_vector_imported","model":space.model,"dimensions":space.dimensions,"network_requests":0,"cache_write":"explicit_query_destination_only",
+            "query_encoding_profile":profile.as_ref().map_or(LEGACY_QUERY_PROFILE, |p| p.encoding_profile.name()),
+            "query_encoding_profile_sha256":profile.as_ref().map(QueryCacheProfile::binding),
+            "provider_preprocessing":"unverified"}),
     )
 }
 pub(crate) struct Hits {
@@ -480,6 +708,7 @@ impl EventVectorIndex {
             fingerprint: hash(&bytes),
             index,
             query_cache: None,
+            query_profile: None,
             ranking: "hybrid".into(),
         })
     }
@@ -499,9 +728,34 @@ impl EventVectorIndex {
             if cache_space(cache)? != self.index.space {
                 return Err("event_vector_space_mismatch".into());
             }
+            let profile = cache_query_profile(cache)?;
+            if profile
+                .as_ref()
+                .is_some_and(|p| p.space != self.index.space)
+            {
+                return Err("event_vector_space_mismatch".into());
+            }
             self.query_cache = Some(cache.to_owned());
+            self.query_profile = profile;
+        } else {
+            self.query_cache = None;
+            self.query_profile = None;
         }
         Ok(self)
+    }
+    /// Binds cursors even when two profiles happen to produce the same ranking.
+    pub(crate) fn query_encoding_binding(&self) -> String {
+        hash(
+            json!({
+                "space":self.index.space,
+                "query_cache":self.query_cache,
+                "source_cache":self.index.cache_dir,
+                "profile":self.query_profile,
+                "legacy":LEGACY_QUERY_PROFILE,
+            })
+            .to_string()
+            .as_bytes(),
+        )
     }
     fn unchanged(&self) -> Result<()> {
         if hash(&read(&self.path, MAX_INDEX_BYTES)?) != self.fingerprint
@@ -515,18 +769,36 @@ impl EventVectorIndex {
         {
             return Err("event_vector_index_changed_restart_required".into());
         }
+        if let Some(cache) = &self.query_cache {
+            if cache_query_profile(cache)? != self.query_profile {
+                return Err("event_query_cache_profile_changed_restart_required".into());
+            }
+        }
         Ok(())
     }
     pub(crate) fn candidates(&self, query: &str, documents: &[Document]) -> Result<Hits> {
+        self.candidates_internal(query, documents, false)
+    }
+    /// Discovery groups by full authorized source identity before its own session cap.
+    pub(crate) fn discovery_candidates(&self, query: &str, documents: &[Document]) -> Result<Hits> {
+        self.candidates_internal(query, documents, true)
+    }
+    fn candidates_internal(
+        &self,
+        query: &str,
+        documents: &[Document],
+        discovery: bool,
+    ) -> Result<Hits> {
         let began = std::time::Instant::now();
         self.unchanged()?;
         let index_ms = began.elapsed().as_millis();
         let query_hash = hash(query.as_bytes());
         let query_directory = if let Some(cache) = &self.query_cache {
-            if cache
-                .join(format!("{query_hash}.bin"))
-                .try_exists()
-                .map_err(|_| "event_query_cache_unavailable")?
+            if self.query_profile.is_some()
+                || cache
+                    .join(format!("{query_hash}.bin"))
+                    .try_exists()
+                    .map_err(|_| "event_query_cache_unavailable")?
             {
                 cache
             } else {
@@ -535,14 +807,39 @@ impl EventVectorIndex {
         } else {
             &self.index.cache_dir
         };
-        if !query_directory
-            .join(format!("{query_hash}.bin"))
+        let query_filename = if self.query_profile.is_some() {
+            format!("{query_hash}.query-v2.json")
+        } else {
+            format!("{query_hash}.bin")
+        };
+        let query_path = query_directory.join(query_filename);
+        if !query_path
             .try_exists()
             .map_err(|_| "event_query_cache_unavailable")?
         {
             return Err("event_query_not_cached_no_network_attempted".into());
         }
-        let query_vector = read_vector(query_directory, &self.index.space, &query_hash)?;
+        let (query_vector, encoded_input_hash) = if let Some(profile) = &self.query_profile {
+            let input: QueryVector = serde_json::from_slice(&read(&query_path, 1024 * 1024)?)
+                .map_err(|_| "event_query_vector_invalid")?;
+            input.validate(query)?;
+            if input.profile().as_ref() != Some(profile) {
+                return Err("event_query_cache_profile_mismatch".into());
+            }
+            match input {
+                QueryVector::Profiled {
+                    vector,
+                    encoded_input_sha256,
+                    ..
+                } => (vector, Some(encoded_input_sha256)),
+                QueryVector::Legacy { .. } => unreachable!(),
+            }
+        } else {
+            (
+                read_vector(query_directory, &self.index.space, &query_hash)?,
+                None,
+            )
+        };
         let query_ms = began.elapsed().as_millis() - index_ms;
         let scan = std::time::Instant::now();
         let docs = event_documents(documents);
@@ -592,7 +889,12 @@ impl EventVectorIndex {
         let total_events = best.len();
         let mut ranked: Vec<_> = best.into_iter().collect();
         ranked.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0).then(a.0.cmp(&b.0)));
-        ranked.truncate(MAX_CANDIDATES);
+        let limit = if discovery {
+            MAX_CHUNKS
+        } else {
+            MAX_CANDIDATES
+        };
+        ranked.truncate(limit);
         let references = ranked
             .iter()
             .map(|(reference, _)| reference.clone())
@@ -613,8 +915,31 @@ impl EventVectorIndex {
             chunks,
             coverage: json!({"status":"available","model":self.index.space.model,"dimensions":self.index.space.dimensions,
             "query_encoding":"existing_cache_only","network_requests":0,"eligible_chunks":eligible_chunks,"eligible_events":total_events,
-            "storage":if self.index.pack.is_some() { "validated_contiguous_pack" } else { "source_cache_files" },"candidate_limit":MAX_CANDIDATES,"candidates_truncated":total_events>MAX_CANDIDATES,"index_fingerprint":self.fingerprint,
+            "query_encoding_profile":self.query_profile.as_ref().map_or(LEGACY_QUERY_PROFILE, |p| p.encoding_profile.name()),
+            "query_encoding_profile_sha256":self.query_profile.as_ref().map(QueryCacheProfile::binding),
+            "query_input_binding":if self.query_profile.is_some() { "declared_input_hashes_validated_provider_preprocessing_unverified" } else { LEGACY_QUERY_PROFILE },
+            "query_sha256":query_hash,"encoded_input_sha256":encoded_input_hash,
+            "query_cache_selection":if query_directory == &self.index.cache_dir { "source_cache_legacy" } else { "explicit_query_cache" },
+            "storage":if self.index.pack.is_some() { "validated_contiguous_pack" } else { "source_cache_files" },"candidate_limit":limit,"candidates_truncated":total_events>limit,"index_fingerprint":self.fingerprint,
             "timing_ms":{"index_check":index_ms,"query_vector":query_ms,"source_scan":scan_ms,"source_vector_load_validate":source_load.as_millis(),"dot_products":source_dot.as_millis(),"total":began.elapsed().as_millis()}}),
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod import_lock_tests {
+    use super::*;
+
+    #[test]
+    fn releasing_import_guard_unlocks_even_while_a_cloned_handle_remains() {
+        let root = tempfile::tempdir().unwrap();
+        let guard = query_import_lock(root.path()).unwrap();
+        let retained = guard.0.try_clone().unwrap();
+        assert!(query_import_lock(root.path()).is_err());
+        drop(guard);
+        let next = query_import_lock(root.path()).unwrap();
+        drop(retained);
+        drop(next);
+        assert!(query_import_lock(root.path()).is_ok());
     }
 }

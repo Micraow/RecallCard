@@ -718,6 +718,7 @@ fn run(cli: Cli) -> Result<Value> {
                         event_filter: None,
                         as_of: None,
                         context_anchor_ref: None,
+                        context_confirmation: None,
                         detail,
                     },
                 );
@@ -768,6 +769,7 @@ fn run(cli: Cli) -> Result<Value> {
                         event_filter: None,
                         as_of: None,
                         context_anchor_ref: None,
+                        context_confirmation: None,
                         detail,
                     },
                 );

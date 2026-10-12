@@ -233,3 +233,13 @@ measure embedding quality. Evaluating previously known fixture questions must
 be labeled known-source evaluation, never blind validation. Keep real chats,
 source exports, vector caches, query files and detailed traces outside public
 repositories; publish only approved aggregate results and methods.
+
+
+### Explicit query encoding profiles
+
+Legacy query caches retain their existing query-cache-then-source-cache lookup.
+An explicitly selected versioned profile directory instead only reads its own
+profile-bound v2 entries and never falls back to legacy vectors. See
+[offline query encoding profiles](query-encoding-profiles.md).
+For independent bounded lexical/semantic candidate discovery before caller
+assessment and source reading, see [session discovery](session-discovery.md).

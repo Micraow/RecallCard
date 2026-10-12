@@ -25,6 +25,9 @@ pub struct ReadPageArgs {
     /// Original search anchor; constrain all graph steps to one monotonic direction.
     #[serde(default)]
     pub context_anchor_ref: Option<String>,
+    /// Optional caller-assessed discovery workflow; never a new authorization grant.
+    #[serde(default)]
+    pub context_confirmation: Option<ContextConfirmation>,
     #[serde(default = "read_detail")]
     pub detail: String,
 }
@@ -138,6 +141,14 @@ impl Context<'_> {
         if args.refs.is_empty() || args.refs.len() > 32 {
             return Err("refs 必须包含 1–32 个引用".into());
         }
+        if let Some(confirmation) = &args.context_confirmation {
+            if sources || args.refs.len() != 1 || !args.refs[0].starts_with("event:") {
+                return Err("context_confirmation 仅用于单个 Event read".into());
+            }
+            if let Some(reason) = confirmation.pending() {
+                return Ok(confirmation::uncertain(reason));
+            }
+        }
         if args.cursor.is_some() && args.offset_bytes.is_some() {
             return Err("cursor 与 offset_bytes 不能同时使用".into());
         }
@@ -202,6 +213,9 @@ impl Context<'_> {
         let _read_guard = self.vault.read_guard()?;
         let mut events = crate::vault::EventSnapshot::new(self.vault, &_read_guard);
         let suppressed = self.vault.suppressed_ids()?;
+        if let Err(reason) = self.verify_confirmation(&args, &mut events, &suppressed) {
+            return Ok(confirmation::uncertain(reason));
+        }
         let mut adjacency = None;
         let mut source_generation = None;
         // 每一页重新检查授权和抑制；不得凭游标绕过。
@@ -324,6 +338,11 @@ impl Context<'_> {
         } else {
             mode
         };
+        let mode = if let Some(confirmation) = &args.context_confirmation {
+            json!([mode, confirmation]).to_string()
+        } else {
+            mode
+        };
         let binding = page_binding(reference, &binding_snapshot, &self.access.scopes(), &mode);
         let offset = page_position(&args, &binding)?;
         if offset > text.len() || !text.is_char_boundary(offset) {
@@ -353,6 +372,11 @@ impl Context<'_> {
             }
             let next_cursor = (end < text.len()).then(|| format!("p1:{binding}:{end}"));
             let mut response = json!({"results":[{"ref":reference,"metadata":metadata,"text":&text[offset..end],"text_range":{"start_byte":offset,"end_byte":end,"total_bytes":text.len(),"projection":projection},"snapshot":snapshot,"record_complete":false}],"truncated":end<text.len(),"pending_refs":[],"next_cursor":next_cursor,"status":if end<text.len(){"partial"}else{"complete"},"budget_unit":"utf8_bytes"});
+            if args.context_confirmation.is_some() {
+                response["relevance"] = json!("caller_assessed");
+                response["evidence_binding"] = json!("verified");
+                response["assessment_note"] = json!("Source consistency is verified, not semantic relevance; retain the same confirmation on every page and graph step.");
+            }
             if args.detail == "compact" {
                 response["detail"] = json!("compact");
             }

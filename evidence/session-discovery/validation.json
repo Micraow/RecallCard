@@ -1,0 +1,54 @@
+{
+  "schema": "recallcard.public-engineering-validation/1",
+  "scope": "Original synthetic fixtures and artificial vectors only; no private conversations, questions, source identities, embeddings, or private evaluation metrics.",
+  "feature": "Independent bounded source-session discovery, optional caller-assessed source-bound reads, and explicit offline query encoding profiles.",
+  "new_synthetic_regressions": 28,
+  "focused_integration_suites": [
+    "session_discovery",
+    "query_encoding_profile",
+    "event_vectors",
+    "session_candidates",
+    "session_context",
+    "context_progressive",
+    "context_paging",
+    "context_adjacency"
+  ],
+  "focused_integration_passed": 91,
+  "focused_integration_failed": 0,
+  "additional_unit_regression": "Import guard releases its lock even while a cloned file handle remains alive.",
+  "covered_contracts": [
+    "Independent authorized semantic and lexical channels deduplicate full source identities before the per-channel 256-session cap; deterministic round-robin exposes original scores and ranks without a confidence threshold.",
+    "Each candidate carries at most three original UTF-8 slices with roles, snapshots and byte ranges. Filters, suppression, source identity, branch constraints and source revisions remain enforced.",
+    "Preview shrink preserves late lexical matches and byte offsets. Small budgets return explicit same-offset retry cursors bound to the new budget; candidate pages do not repeat groups.",
+    "An unverifiable candidate graph does not hide other source sessions. Default assessment returns uncertain and zero source text.",
+    "Optional confirmed reads validate source/evidence/graph/filter/scope bindings and every selected path step. A checksum is not a relevance proof, authorization grant or signed receipt.",
+    "Actual MCP stdio synthetic discovery, explicit automatic caller assessment and guarded read execute end to end; absent or ambiguous toy identifiers abstain.",
+    "Offline v2 query vectors bind the exact raw or Instruct/Query input bytes, profile, source model space and query hash. Profiled caches never fall back to legacy vectors.",
+    "Legacy query imports and explicit source-cache fallback remain compatible and visibly unverified; profile changes invalidate cursors even with identical rankings.",
+    "Concurrent imports cannot mix model spaces/profiles; atomic no-clobber entries, declaration validation, symlink rejection and explicit RAII lock release are covered."
+  ],
+  "gates": {
+    "fmt": "passed",
+    "clippy_all_targets": "passed with -D warnings",
+    "full_rust_suite": {
+      "passed": 700,
+      "failed": 14,
+      "environment_blocked_targets": {
+        "ipc": 11,
+        "ipc_bridges": 3
+      },
+      "reason": "Existing environment restriction: Unix socket binding returns Operation not permitted. Full suite therefore is not reported as all passed."
+    },
+    "release_build": "passed offline, one job, opt-level=3, lto=false, debug=0",
+    "release_test_fixture": "Original tracked Python worker packages were staged beside release test binaries, matching their installed-resource lookup; no model weights, private data or credentials were added.",
+    "independent_source_review": "Import transaction, source-session cap, graph-error isolation, lexical shrink offsets and later-page budget continuation findings were addressed with synthetic regressions."
+  },
+  "evaluated_binary_sha256": "f4abce24296d9541afd39270ac9ec83694b4698ab98e3a7a6b370193e0d24690",
+  "limitations": [
+    "This is an explicit new session_discovery workflow. Legacy modes and ordinary unconfirmed reads remain available; existing clients are not globally forced through an assessor.",
+    "Caller-assessed means source consistency is checked. Automatic relevance selection, a production reranker, complete evidence coverage and answer quality are not established by these synthetic tests.",
+    "Query input declarations cannot attest provider-side preprocessing or prove which text produced a separately supplied vector.",
+    "Per-call UTF-8 byte budgets are not tokenizer token limits or end-to-end cost caps. Callers must count all candidate, assessment and read calls and bytes.",
+    "No external embedding/reranking service, private corpus, desktop GUI, installer acceptance or blind retrieval quality was evaluated by this public validation."
+  ]
+}
