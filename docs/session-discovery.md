@@ -129,3 +129,9 @@ reranker's relevance accuracy or an answer-quality improvement.
 Count all discovery, assessment-input and subsequent read output bytes and
 calls. UTF-8 bytes are not tokenizer tokens; the consuming model's actual
 input/history/output and tokenizer are needed for token/cost measurement.
+
+## Compact inspection workflow
+
+For shared metadata, text-first byte allocation and a separate unresolved inspection
+stage before relevance selection, see [compact candidate review](compact-candidate-review.md).
+The original mode and its count-first preview fitting remain compatible.

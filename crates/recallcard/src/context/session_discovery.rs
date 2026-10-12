@@ -22,6 +22,8 @@ impl Context<'_> {
         guard: &crate::vault::WriteGuard,
         vector_coverage: Value,
     ) -> Result<Value> {
+        let compact = args.detail == "session_discovery_compact";
+        let preview_bytes = args.preview_min_bytes.unwrap_or(512);
         let mut snapshot = crate::vault::EventSnapshot::new(self.vault, guard);
         let events = snapshot.all()?.clone();
         let docs: BTreeMap<_, _> = filtered.iter().map(|d| (d.reference.as_str(), d)).collect();
@@ -95,6 +97,8 @@ impl Context<'_> {
                     "session_discovery_v1",
                     search_binding,
                     generation,
+                    args.detail,
+                    args.preview_min_bytes,
                     args.limit,
                     budget,
                     source_ranks,
@@ -141,6 +145,7 @@ impl Context<'_> {
                 as_of: args.as_of,
                 context_anchor_ref: Some(doc.reference.clone()),
                 context_confirmation: None,
+                context_review: None,
                 detail: "compact".into(),
             };
             let (links, graph_generation) =
@@ -252,10 +257,14 @@ impl Context<'_> {
                 .iter()
                 .filter(|r| r["confirmation_available"] == false)
                 .count());
-            json!({"results":results,"candidate_count":ordered.len(),
+            let mut page = json!({"results":results,"candidate_count":ordered.len(),
             "status":if ordered.is_empty(){"no_matches"}else if next<ordered.len(){"partial"}else{"complete"},"status_scope":"discovery_candidates",
             "relevance":"unassessed","selection_required":!ordered.is_empty(),"budget_unit":"utf8_bytes","coverage":coverage,
-            "next_cursor":(next<ordered.len()&&next>offset).then(||format!("sd1:{binding}:{next}")),"truncated":next<ordered.len()})
+            "next_cursor":(next<ordered.len()&&next>offset).then(||format!("sd1:{binding}:{next}")),"truncated":next<ordered.len()});
+            if compact {
+                candidate_review::compact_page(&mut page, args, &scope_hash);
+            }
+            page
         };
         let shrink = |original: &Value, bytes: usize| -> Result<Value> {
             let mut item = original.clone();
@@ -309,7 +318,11 @@ impl Context<'_> {
         }
         let mut minimum = 512;
         for count in (1..=drafts.len()).rev() {
-            for bytes in [512, 256, 128, 64] {
+            for bytes in if compact {
+                vec![preview_bytes]
+            } else {
+                vec![512, 256, 128, 64]
+            } {
                 let page = envelope(
                     drafts[..count]
                         .iter()

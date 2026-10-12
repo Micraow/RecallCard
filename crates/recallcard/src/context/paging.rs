@@ -28,6 +28,8 @@ pub struct ReadPageArgs {
     /// Optional caller-assessed discovery workflow; never a new authorization grant.
     #[serde(default)]
     pub context_confirmation: Option<ContextConfirmation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_review: Option<ContextReview>,
     #[serde(default = "read_detail")]
     pub detail: String,
 }
@@ -140,6 +142,12 @@ impl Context<'_> {
         }
         if args.refs.is_empty() || args.refs.len() > 32 {
             return Err("refs 必须包含 1–32 个引用".into());
+        }
+        if args.context_review.is_some() {
+            if sources {
+                return Err("context_review only supports Event read".into());
+            }
+            return self.candidate_review(args);
         }
         if let Some(confirmation) = &args.context_confirmation {
             if sources || args.refs.len() != 1 || !args.refs[0].starts_with("event:") {

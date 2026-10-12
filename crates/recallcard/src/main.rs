@@ -719,6 +719,7 @@ fn run(cli: Cli) -> Result<Value> {
                         as_of: None,
                         context_anchor_ref: None,
                         context_confirmation: None,
+                        context_review: None,
                         detail,
                     },
                 );
@@ -770,6 +771,7 @@ fn run(cli: Cli) -> Result<Value> {
                         as_of: None,
                         context_anchor_ref: None,
                         context_confirmation: None,
+                        context_review: None,
                         detail,
                     },
                 );
@@ -840,6 +842,7 @@ fn run(cli: Cli) -> Result<Value> {
             context
                 .with_event_vectors(event_index.as_ref())
                 .search(SearchArgs {
+                    preview_min_bytes: None,
                     lexical_match,
                     include_navigation,
                     query,
