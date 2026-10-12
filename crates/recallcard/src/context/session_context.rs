@@ -20,7 +20,7 @@ pub(super) fn graph_key(event: &Event) -> String {
 
 struct Group<'a> {
     anchors: Vec<&'a str>,
-    anchor_count: usize,
+    matching_hits: Vec<&'a search::Match<'a>>,
     score: f64,
     nodes: BTreeMap<&'a str, &'a Event>,
 }
@@ -68,14 +68,14 @@ impl Context<'_> {
             let index = *indices.entry(key).or_insert_with(|| {
                 groups.push(Group {
                     anchors: vec![],
-                    anchor_count: 0,
+                    matching_hits: vec![],
                     score: hit.score,
                     nodes: BTreeMap::new(),
                 });
                 groups.len() - 1
             });
             let group = &mut groups[index];
-            group.anchor_count += 1;
+            group.matching_hits.push(hit);
             if group.anchors.len() < MAX_ANCHORS {
                 group.anchors.push(reference);
             }
@@ -110,8 +110,12 @@ impl Context<'_> {
         let mut summaries = Vec::new();
         for (index, group) in groups.iter().enumerate() {
             let mut reasons = BTreeSet::new();
-            if group.anchor_count > MAX_ANCHORS {
-                reasons.insert("anchor_limit");
+            if group.matching_hits.len() > MAX_ANCHORS {
+                reasons.insert(if discovery_sources.is_some() {
+                    "graph_anchor_limit"
+                } else {
+                    "anchor_limit"
+                });
             }
             let mut source_ids: BTreeMap<&str, Option<&str>> = BTreeMap::new();
             for event in group.nodes.values() {
@@ -245,6 +249,34 @@ impl Context<'_> {
                     queue.push_back((next, anchor, "next", distance + 1));
                 }
             }
+            if discovery_sources.is_some() {
+                // Retrieval locations and graph seeds are different units. Keep every
+                // eligible independent hit; the old bounded graph window adds neighbors.
+                let graph_messages = messages.split_off(before);
+                let hit_refs: BTreeSet<_> = group
+                    .matching_hits
+                    .iter()
+                    .map(|hit| hit.document.reference.as_str())
+                    .collect();
+                for hit in &group.matching_hits {
+                    let reference = hit.document.reference.as_str();
+                    let event = &events[reference.trim_start_matches("event:")];
+                    messages.push(Message {
+                        document: hit.document,
+                        snapshot: hash(json!(event).to_string().as_bytes()),
+                        group: index,
+                        anchor: reference,
+                        relation: "anchor",
+                        distance: 0,
+                        hit_range: hit.hit_range,
+                    });
+                }
+                messages.extend(
+                    graph_messages
+                        .into_iter()
+                        .filter(|message| !hit_refs.contains(message.document.reference.as_str())),
+                );
+            }
             let mut frontiers = BTreeMap::new();
             if reasons.contains("hop_limit") || reasons.contains("message_limit") {
                 for message in &messages[before..] {
@@ -267,7 +299,7 @@ impl Context<'_> {
             let anchor = allowed[group.anchors[0]];
             let mut summary = json!({
                 "group":index,"session_ref":anchor.session_ref,"scope":anchor.scope,
-                "anchor_refs":group.anchors,"matching_anchor_count":group.anchor_count,
+                "anchor_refs":group.anchors,"matching_anchor_count":group.matching_hits.len(),
                 "score":group.score,"selected_message_count":messages.len()-before,
                 "window_limited":!reasons.is_empty(),"limit_reasons":reasons,
                 "continuation_candidates":continuation_candidates
@@ -279,6 +311,8 @@ impl Context<'_> {
                     .ok_or("discovery source identity changed")?;
                 let object = summary.as_object_mut().unwrap();
                 object.remove("score");
+                object.insert("graph_anchor_refs".into(), json!(group.anchors));
+                object.insert("anchor_refs_scope".into(), json!("this_page"));
                 object.extend(
                     source
                         .as_object()
@@ -300,12 +334,21 @@ impl Context<'_> {
                 .map(|(index, message)| {
                     (
                         index,
-                        text_pieces(
-                            &message.document.text,
-                            &args.query,
-                            message.relation == "anchor",
-                            message.hit_range,
-                        ),
+                        if discovery_sources.is_some() {
+                            VecDeque::from([first_text_piece(
+                                &message.document.text,
+                                &args.query,
+                                message.relation == "anchor",
+                                message.hit_range,
+                            )])
+                        } else {
+                            text_pieces(
+                                &message.document.text,
+                                &args.query,
+                                message.relation == "anchor",
+                                message.hit_range,
+                            )
+                        },
                     )
                 })
                 .collect();
@@ -324,18 +367,32 @@ impl Context<'_> {
         }
         let mut pieces = Vec::new();
         if discovery_sources.is_some() {
-            // Keep the existing candidate breadth; within each page-sized source
-            // batch, give every source its next fair message slice before tails.
-            for batch in by_group.chunks_mut(args.limit) {
-                loop {
-                    let before = pieces.len();
-                    for group in batch.iter_mut() {
-                        if let Some(piece) = group.pop_front() {
-                            pieces.push(piece);
+            // Source fairness applies within each phase: all direct-hit previews
+            // precede graph-only neighbors, including across asymmetric sources.
+            for batch in by_group.chunks(args.limit) {
+                for anchors in [true, false] {
+                    let mut queues: Vec<VecDeque<_>> = batch
+                        .iter()
+                        .map(|group| {
+                            group
+                                .iter()
+                                .copied()
+                                .filter(|(index, _, _)| {
+                                    (messages[*index].relation == "anchor") == anchors
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    loop {
+                        let before = pieces.len();
+                        for group in &mut queues {
+                            if let Some(piece) = group.pop_front() {
+                                pieces.push(piece);
+                            }
                         }
-                    }
-                    if before == pieces.len() {
-                        break;
+                        if before == pieces.len() {
+                            break;
+                        }
                     }
                 }
             }
@@ -380,9 +437,18 @@ impl Context<'_> {
             coverage["ordering"] =
                 json!("independent_session_dedup_then_semantic_lexical_round_robin");
             coverage["text_order"] =
-                json!("source_round_robin_within_limit_then_fair_message_slices");
-            coverage["anchor_policy"] =
-                json!("first_channel_then_distinct_other_channel_else_next_same_channel_event");
+                json!("source_round_robin_hit_previews_then_graph_neighbor_previews");
+            coverage["anchor_policy"] = json!("independent_channel_round_robin_distinct_events");
+            coverage["preview_only"] = json!(true);
+            coverage["continuation"]["cursor_scope"] = json!("selected_evidence_previews");
+            coverage["visibility_note"] = json!("隐藏、修订或未授权节点不披露；未返回邻居不证明没有其他消息。next_cursor只分页记录预览，完整原文按需read。");
+            coverage["completeness"] = json!("retrieved_record_previews_only");
+            coverage["context_window"] = json!({"max_graph_anchors":MAX_ANCHORS,
+                "max_hops_each_direction":MAX_HOPS,"max_graph_messages_per_session":MAX_MESSAGES});
+            coverage["record_read"] = json!({"tool":"read","refs":"copy results.ref",
+                "offset_bytes":"copy results.text_range.start_byte or end_byte",
+                "event_filter":args.event_filter,"as_of":args.as_of,
+                "note":"预览未包含整条原文；按需读取已选记录。next_cursor遍历更多记录预览，不读取长尾。"});
             coverage["relevance"] = json!("unassessed");
             coverage["selection"] = json!("bounded_evidence_without_single_source_commitment");
             coverage["score_units"] = session_discovery::score_units();
@@ -470,13 +536,13 @@ impl Context<'_> {
     }
 }
 
-fn text_pieces(
+fn first_text_piece(
     text: &str,
     query: &str,
     anchor: bool,
     hit_range: Option<(usize, usize)>,
-) -> VecDeque<(usize, usize)> {
-    let (from, until) = if let Some((start, end)) = hit_range.filter(|_| anchor) {
+) -> (usize, usize) {
+    if let Some((start, end)) = hit_range.filter(|_| anchor) {
         let mut until = (start + TEXT_SLICE_BYTES).min(end);
         while !text.is_char_boundary(until) {
             until -= 1;
@@ -484,7 +550,16 @@ fn text_pieces(
         (start, until)
     } else {
         matching_window(text, if anchor { query } else { "" }, TEXT_SLICE_BYTES)
-    };
+    }
+}
+
+fn text_pieces(
+    text: &str,
+    query: &str,
+    anchor: bool,
+    hit_range: Option<(usize, usize)>,
+) -> VecDeque<(usize, usize)> {
+    let (from, until) = first_text_piece(text, query, anchor, hit_range);
     let mut pieces = VecDeque::from([(from, until)]);
     for (mut start, stop) in [(0, from), (until, text.len())] {
         while start < stop {
@@ -526,8 +601,23 @@ fn envelope(
 ) -> Value {
     let (position, start) = cursor;
     let partial = position < total;
-    json!({"results":items,"sessions":selected.iter().map(|index| &summaries[*index]).collect::<Vec<_>>(),
-        "coverage":coverage,"status_scope":"selected_context_window","status":if total==0{"no_matches"}else if partial{"partial"}else{"complete"},
+    let preview_only = coverage["preview_only"] == true;
+    let sessions: Vec<_> = selected
+        .iter()
+        .map(|index| {
+            let mut summary = summaries[*index].clone();
+            if preview_only {
+                summary["anchor_refs"] = json!(items
+                    .iter()
+                    .filter(|item| item["group"] == *index && item["relation"] == "anchor")
+                    .map(|item| &item["ref"])
+                    .collect::<Vec<_>>());
+            }
+            summary
+        })
+        .collect();
+    json!({"results":items,"sessions":sessions,
+        "coverage":coverage,"status_scope":if preview_only{"selected_evidence_previews"}else{"selected_context_window"},"status":if total==0{"no_matches"}else if partial{"partial"}else{"complete"},
         "selected_slice_count":total,"session_count":summaries.len(),"truncated":partial,
         "next_cursor":partial.then(||format!("sc1:{binding}:{position}:{start}")),"budget_unit":"utf8_bytes"})
 }

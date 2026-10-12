@@ -11,8 +11,8 @@ pub(super) fn score_units() -> Value {
 struct Channels<'a> {
     semantic: Option<(usize, f64, &'a Document)>,
     lexical: Option<(usize, f64, &'a Document)>,
-    semantic_second: Option<(f64, &'a Document)>,
-    lexical_second: Option<(f64, &'a Document)>,
+    semantic_hits: Vec<(f64, &'a Document)>,
+    lexical_hits: Vec<(f64, &'a Document)>,
 }
 
 impl Context<'_> {
@@ -53,16 +53,13 @@ impl Context<'_> {
                 let k = key(doc)?;
                 if semantic_seen.insert(k.clone()) && semantic_groups.len() < MAX_CHANNEL_SESSIONS {
                     let entry = channels.entry(k.clone()).or_default();
-                    semantic_groups.push(k);
+                    semantic_groups.push(k.clone());
                     entry.semantic = Some((semantic_groups.len(), vectors.scores[reference], doc));
-                } else if assembled {
+                }
+                if assembled {
                     if let Some(entry) = channels.get_mut(&k) {
-                        if entry
-                            .semantic
-                            .is_some_and(|(_, _, first)| first.reference != doc.reference)
-                            && entry.semantic_second.is_none()
-                        {
-                            entry.semantic_second = Some((vectors.scores[reference], doc));
+                        if entry.semantic.is_some() {
+                            entry.semantic_hits.push((vectors.scores[reference], doc));
                         }
                     }
                 }
@@ -72,16 +69,13 @@ impl Context<'_> {
             let k = key(doc)?;
             if lexical_seen.insert(k.clone()) && lexical_groups.len() < MAX_CHANNEL_SESSIONS {
                 let entry = channels.entry(k.clone()).or_default();
-                lexical_groups.push(k);
+                lexical_groups.push(k.clone());
                 entry.lexical = Some((lexical_groups.len(), *score, doc));
-            } else if assembled {
+            }
+            if assembled {
                 if let Some(entry) = channels.get_mut(&k) {
-                    if entry
-                        .lexical
-                        .is_some_and(|(_, _, first)| first.reference != doc.reference)
-                        && entry.lexical_second.is_none()
-                    {
-                        entry.lexical_second = Some((*score, doc));
+                    if entry.lexical.is_some() {
+                        entry.lexical_hits.push((*score, doc));
                     }
                 }
             }
@@ -104,39 +98,33 @@ impl Context<'_> {
             let mut sources = BTreeMap::new();
             for (position, (k, first_channel)) in ordered.iter().enumerate() {
                 let c = &channels[k];
-                let semantic = c.semantic.map(|(_, s, d)| (s, d, "semantic"));
-                let lexical = c.lexical.map(|(_, s, d)| (s, d, "lexical"));
-                let (first, other, fallback) = if *first_channel == "semantic" {
-                    (
-                        semantic,
-                        lexical,
-                        c.semantic_second.map(|(s, d)| (s, d, "semantic")),
-                    )
+                let (first, other) = if *first_channel == "semantic" {
+                    (("semantic", &c.semantic_hits), ("lexical", &c.lexical_hits))
                 } else {
-                    (
-                        lexical,
-                        semantic,
-                        c.lexical_second.map(|(s, d)| (s, d, "lexical")),
-                    )
+                    (("lexical", &c.lexical_hits), ("semantic", &c.semantic_hits))
                 };
-                let first = first.ok_or("发现通道缺少命中锚点")?;
-                let second = other
-                    .filter(|(_, d, _)| d.reference != first.1.reference)
-                    .or(fallback);
-                for (score, doc, channel) in std::iter::once(first).chain(second) {
-                    ranked.push(search::Match {
-                        score,
-                        document: doc,
-                        related_refs: vec![],
-                        score_source_ref: None,
-                        hit_range: if channel == "semantic" {
-                            vectors.and_then(|v| v.ranges.get(&doc.reference)).copied()
-                        } else {
-                            None
-                        },
-                    });
+                let mut seen_events = BTreeSet::new();
+                for n in 0..first.1.len().max(other.1.len()) {
+                    for (channel, hits) in [first, other] {
+                        if let Some((score, doc)) = hits.get(n) {
+                            if seen_events.insert(doc.reference.as_str()) {
+                                ranked.push(search::Match {
+                                    score: *score,
+                                    document: doc,
+                                    related_refs: vec![],
+                                    score_source_ref: None,
+                                    hit_range: if channel == "semantic" {
+                                        vectors.and_then(|v| v.ranges.get(&doc.reference)).copied()
+                                    } else {
+                                        None
+                                    },
+                                });
+                            }
+                        }
+                    }
                 }
-                let event = &events[first.1.reference.trim_start_matches("event:")];
+                let anchor = first.1.first().ok_or("发现通道缺少命中锚点")?.1;
+                let event = &events[anchor.reference.trim_start_matches("event:")];
                 let source = &event.data.source;
                 let channel_value = |value: Option<(usize, f64, &Document)>| {
                     value.map(|(rank, score, doc)| json!({"session_rank":rank,"raw_score":score,"anchor_ref":doc.reference}))
@@ -152,7 +140,7 @@ impl Context<'_> {
             let binding = hash(
                 json!([
                     search_binding,
-                    "session_evidence_v1",
+                    "session_evidence_v2_record_previews",
                     &sources,
                     ranked
                         .iter()

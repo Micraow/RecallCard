@@ -1,7 +1,11 @@
 //! Opt-in evidence assembly tests. Invented originals and vectors, no model/gold tuning.
 use recallcard::{context::Context, event_vectors, model::hash, policy::Access, transport, Vault};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 fn event(
     v: &Vault,
@@ -259,16 +263,33 @@ fn long_first_source_does_not_starve_other_sources_or_short_correction() {
         assert!(refs(&p).contains(&r.as_str()));
     }
     assert_eq!(p["sessions"].as_array().unwrap().len(), 3);
-    assert_eq!(p["status"], "partial");
+    assert_eq!(p["status"], "complete");
+    assert_eq!(p["status_scope"], "selected_evidence_previews");
+    assert!(p["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["ref"] == giant && r["text_truncated"] == true));
     assert!(p.to_string().len() <= 16384);
 }
 
 #[test]
-fn cursor_reconstructs_utf8_without_duplicate_spans_and_remains_bound_to_mode_and_budget() {
+fn cursor_visits_all_record_previews_once_and_binds_mode_budget_filter_and_revision() {
     let d = tempfile::tempdir().unwrap();
     let v = Vault::init(d.path()).unwrap();
-    let text = format!("beacon {}", "甲乙丙丁修正。".repeat(1000));
-    let reference = event(&v, "long", "one", None, &text, json!({}));
+    let mut originals = BTreeMap::new();
+    for n in 0..19 {
+        let text = format!("beacon {n} {}", "甲乙丙丁修正🙂。".repeat(200));
+        let reference = event(
+            &v,
+            &format!("m{n}"),
+            "one",
+            None,
+            &text,
+            json!({"metadata":{}}),
+        );
+        originals.insert(reference, text);
+    }
     let mut a = args(8192);
     let first = call(&v, a.clone()).unwrap();
     let cursor = first["next_cursor"].clone();
@@ -284,25 +305,57 @@ fn cursor_reconstructs_utf8_without_duplicate_spans_and_remains_bound_to_mode_an
         changed[key] = value;
         assert!(call(&v, changed).is_err());
     }
-    let mut ranges = BTreeMap::new();
-    let mut p = first;
+    let mut seen = BTreeMap::new();
+    let mut page = first;
     for _ in 0..30 {
-        assert!(p.to_string().len() <= 8192);
-        for item in p["results"].as_array().unwrap() {
-            assert_eq!(item["ref"], reference);
+        assert!(page.to_string().len() <= 8192);
+        assert_eq!(page["status_scope"], "selected_evidence_previews");
+        assert_eq!(page["coverage"]["preview_only"], true);
+        for item in page["results"].as_array().unwrap() {
+            let reference = item["ref"].as_str().unwrap();
             let start = item["text_range"]["start_byte"].as_u64().unwrap() as usize;
-            assert!(ranges
-                .insert(start, item["text"].as_str().unwrap().to_owned())
-                .is_none());
+            let end = item["text_range"]["end_byte"].as_u64().unwrap() as usize;
+            assert_eq!(item["text"], originals[reference][start..end]);
+            assert!(end - start <= 1024);
+            assert_eq!(item["relation"], "anchor");
+            assert!(seen.insert(reference.to_owned(), (start, end)).is_none());
         }
-        if p["next_cursor"].is_null() {
+        assert!(page["sessions"][0]["limit_reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("source_graph_unavailable")));
+        assert_eq!(
+            page["sessions"][0]["anchor_refs"].as_array().unwrap().len(),
+            page["results"].as_array().unwrap().len()
+        );
+        if page["next_cursor"].is_null() {
             break;
         }
-        a["cursor"] = p["next_cursor"].clone();
-        p = call(&v, a.clone()).unwrap();
+        a["cursor"] = page["next_cursor"].clone();
+        page = call(&v, a.clone()).unwrap();
     }
-    assert!(p["next_cursor"].is_null());
-    assert_eq!(ranges.into_values().collect::<String>(), text);
+    assert_eq!(page["status"], "complete");
+    assert_eq!(seen.len(), originals.len());
+    // A complete preview stream still omits long tails. The existing reader owns them.
+    let reference = originals.keys().next().unwrap();
+    let read = transport::invoke(
+        &ctx(&v),
+        "read",
+        json!({"refs":[reference],
+        "detail":"compact","offset_bytes":1024,"budget_bytes":8192}),
+    )
+    .unwrap();
+    assert!(read.to_string().contains("甲乙丙丁"));
+    event(
+        &v,
+        "new",
+        "one",
+        None,
+        "beacon later revision",
+        json!({"metadata":{}}),
+    );
+    a["cursor"] = cursor;
+    assert!(call(&v, a).is_err());
 }
 
 #[test]
@@ -477,4 +530,153 @@ fn cyclic_source_keeps_only_retrieved_anchors_without_erasing_healthy_sources() 
     assert_eq!(only_broken["results"].as_array().unwrap().len(), 2);
     request["detail"] = json!("session_context");
     assert!(call(&v, request).unwrap_err().contains("循环"));
+}
+
+#[test]
+fn independent_hits_are_not_capped_by_graph_seeds_and_cross_channel_duplicates_are_removed() {
+    for count in [3, 7, 17] {
+        let d = tempfile::tempdir().unwrap();
+        let v = Vault::init(&d.path().join("vault")).unwrap();
+        let mut originals = BTreeMap::new();
+        let mut vectors = Vec::new();
+        for n in 0..count {
+            let text = if n % 2 == 0 {
+                format!("beacon record {n} {}", "large body ".repeat(700))
+            } else {
+                format!("independent short record {n}")
+            };
+            let reference = event(
+                &v,
+                &format!("m{n}"),
+                "one",
+                None,
+                &text,
+                json!({"metadata":{}}),
+            );
+            originals.insert(reference.clone(), text.clone());
+            vectors.push((reference, text, [1., 0., 0.]));
+        }
+        let idx = index(&v, d.path(), &vectors, "beacon");
+        let context = ctx(&v).with_event_vectors(Some(&idx));
+        let mut request = args(8192);
+        let mut seen = BTreeSet::new();
+        for _ in 0..count + 1 {
+            let page = transport::invoke(&context, "search", request.clone()).unwrap();
+            assert!(page.to_string().len() <= 8192);
+            assert_eq!(page["sessions"][0]["matching_anchor_count"], count);
+            assert_eq!(
+                page["sessions"][0]["graph_anchor_refs"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+            for item in page["results"].as_array().unwrap() {
+                let r = item["ref"].as_str().unwrap();
+                assert!(seen.insert(r.to_owned()), "cross-channel duplicate {r}");
+                let lo = item["text_range"]["start_byte"].as_u64().unwrap() as usize;
+                let hi = item["text_range"]["end_byte"].as_u64().unwrap() as usize;
+                assert_eq!(item["text"], originals[r][lo..hi]);
+                assert!(hi - lo <= 1024);
+                assert_eq!(item["relation"], "anchor");
+                assert_eq!(item["distance"], 0);
+            }
+            if page["next_cursor"].is_null() {
+                break;
+            }
+            request["cursor"] = page["next_cursor"].clone();
+        }
+        assert_eq!(seen.len(), count);
+    }
+}
+
+#[test]
+fn record_previews_share_bytes_across_sources_before_any_long_tail() {
+    let d = tempfile::tempdir().unwrap();
+    let v = Vault::init(d.path()).unwrap();
+    let mut expected = BTreeSet::new();
+    for source in ["one", "two", "three"] {
+        for n in 0..5 {
+            let text = if n == 0 {
+                format!("beacon {source} {}", "huge ".repeat(8000))
+            } else {
+                format!("beacon {source} short independent correction {n}")
+            };
+            expected.insert(event(
+                &v,
+                &format!("{source}-{n}"),
+                source,
+                None,
+                &text,
+                json!({"metadata":{}}),
+            ));
+        }
+    }
+    let page = call(&v, args(16384)).unwrap();
+    assert_eq!(page["sessions"].as_array().unwrap().len(), 3);
+    assert!(page.to_string().len() <= 16384);
+    let mut counts = BTreeMap::new();
+    let mut refs_seen = BTreeSet::new();
+    for item in page["results"].as_array().unwrap() {
+        assert!(expected.contains(item["ref"].as_str().unwrap()));
+        assert!(refs_seen.insert(item["ref"].as_str().unwrap()));
+        assert!(item["text"].as_str().unwrap().len() <= 1024);
+        *counts
+            .entry(item["group"].as_u64().unwrap())
+            .or_insert(0usize) += 1;
+    }
+    assert_eq!(counts.len(), 3);
+    assert!(counts.values().max().unwrap() - counts.values().min().unwrap() <= 1);
+}
+
+#[test]
+fn asymmetric_sources_finish_all_independent_previews_before_graph_only_neighbors() {
+    let d = tempfile::tempdir().unwrap();
+    let v = Vault::init(d.path()).unwrap();
+    let mut independent = BTreeSet::new();
+    for n in 0..13 {
+        independent.insert(event(
+            &v,
+            &format!("a{n}"),
+            "many",
+            None,
+            &format!("beacon direct record {n}"),
+            json!({"metadata":{}}),
+        ));
+    }
+    independent.insert(event(
+        &v,
+        "b0",
+        "single",
+        None,
+        "beacon single hit",
+        json!({}),
+    ));
+    let neighbor = event(
+        &v,
+        "b1",
+        "single",
+        Some("b0"),
+        "The follow-up has no matching search term.",
+        json!({}),
+    );
+    let mut request = args(8192);
+    let mut order = Vec::new();
+    for _ in 0..20 {
+        let page = call(&v, request.clone()).unwrap();
+        order.extend(refs(&page).into_iter().map(str::to_owned));
+        assert_eq!(
+            page["coverage"]["continuation"]["cursor_scope"],
+            "selected_evidence_previews"
+        );
+        if page["next_cursor"].is_null() {
+            break;
+        }
+        request["cursor"] = page["next_cursor"].clone();
+    }
+    assert_eq!(order.len(), independent.len() + 1);
+    assert_eq!(order.last(), Some(&neighbor));
+    assert!(order[..independent.len()]
+        .iter()
+        .all(|r| independent.contains(r)));
 }
