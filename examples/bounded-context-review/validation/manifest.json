@@ -1,0 +1,23 @@
+{
+  "schema": "recallcard.experimental-caller-validation/1",
+  "utc": "2026-10-12T06:51:30Z",
+  "product_api_base": "db02aa36bd4d9412fc58c1983842d569244d7528",
+  "optional_experimental_caller_adapter": true,
+  "default_changed": false,
+  "rust_builds": 0,
+  "synthetic_tests_passed": 63,
+  "real_query_quality_evaluated": false,
+  "model_or_provider_api_calls": 0,
+  "data": "Invented synthetic source only; no private conversations, queries, vectors or model responses.",
+  "files": {
+    "README.md": "31ffd592d95797658631b149ad86c1df73407f0873efc137dd7e8905ba295a00",
+    "bounded_span_adapter.py": "9fe667a762533685cf9e2c9fc51168d02c5b1534031edb9eb4a47c50c05b7ea2",
+    "judgment_contract.py": "6540ce5d1b622f4a67ab808142933153c4d1bddd42599af1bb03e982e253b94d",
+    "smoke_existing_mcp.py": "031018d48d9c7299722e638a101ad37d8e0fae3dba98a494a9d1ffb44043f211",
+    "test_bounded_span_adapter.py": "10660f92c6a73fbed9bc4eb02df828291ce1cd28d6a9b720e9f3f8bfc1d85f11",
+    "test_judgment_contract.py": "61e461846d0729c271e26fc40333b8dd542bc20b5cbc14ae221b82cc247a5450",
+    "validation/handshake-failure.json": "5046c2970a79d70ab33d0132715451e8b96d94e13a7dcf1ca93a373c7bd6d216",
+    "validation/synthetic-mcp.json": "8c047f7bee365f7db2524ec1f9d5e0179eba3d4a5d01c163b58c419aefa821c2",
+    "validation/tests.txt": "cad5690a25e6d07429125665b04faafefbf9ff29a750f52e92c8788b3199eeea"
+  }
+}
