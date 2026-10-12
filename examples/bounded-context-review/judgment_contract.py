@@ -34,7 +34,7 @@ COVERAGE = frozenset({"not_checked", "partial", "sufficient", "conflicting"})
 AMBIGUITIES = frozenset({"source_identity", "branch"})
 AMBIGUOUS_STOPS = frozenset({"source_ambiguous", "ambiguous_source_identity",
     "source_identity_ambiguous", "source_identity", "branch_ambiguous",
-    "ambiguous_branch", "branch_ambiguity", "branch"})
+    "ambiguous_branch", "branch_ambiguity", "branch", "branch_choice_required"})
 STOPS = frozenset({"selected", "need_inspection", "source_uncertain",
                    "unsupported", "source_ambiguity", "budget_exhausted"})
 INSTRUCTIONS = (

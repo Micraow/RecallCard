@@ -90,3 +90,10 @@ and `extra_reads_for_full_original_verification` to avoid that ambiguity.
 No private corpus, query, vector or gold is included. The scripted synthetic
 judgments do not measure model selection quality, actual model tokens, latency
 improvement, or generalization. The earlier real regression is unchanged.
+
+## Optional native file controller
+
+The experimental [native controller](CONTROLLER.md) now connects these bounded
+spans to explicit native judgment files, finite navigation, a shared cost ledger
+and create-only recovery journals. It remains opt-in and does not invoke a model.
+Its tests and scripted real-MCP smoke do not establish improved real-query quality.
