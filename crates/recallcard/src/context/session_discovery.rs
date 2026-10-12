@@ -3,6 +3,10 @@ use super::*;
 use confirmation::{CallerAssessment, ConfirmationBinding, EvidenceSpan};
 const MAX_CHANNEL_SESSIONS: usize = 256;
 
+pub(super) fn score_units() -> Value {
+    json!({"semantic":"cosine","lexical":"existing_lexical_score"})
+}
+
 #[derive(Default)]
 struct Channels<'a> {
     semantic: Option<(usize, f64, &'a Document)>,
@@ -238,7 +242,7 @@ impl Context<'_> {
                 "conversation_id":truncate_utf8(&source.conversation_id,256),"group_key":hash(k.as_bytes()),
                 "truncated":source.platform.len()>128||source.account_namespace.len()>128||source.conversation_id.len()>256||doc.session_ref.as_ref().is_some_and(|s|s.len()>256)},
                 "channels":{"semantic":channel_value(c.semantic),"lexical":channel_value(c.lexical)},
-                "first_channel":first_channel,"score_units":{"semantic":"cosine","lexical":"existing_lexical_score"},
+                "first_channel":first_channel,"score_units":score_units(),
                 "relevance":"unassessed","confirmation_available":confirmation_available,"context":context,"context_complete":false,
                 "context_limits":{"max_messages":3,"max_each_utf8_bytes":512,"graph_stop_reasons":links["constraints"]["stop_reasons"],"further_context_requires_assessed_read":true},
                 "read_args":read}));

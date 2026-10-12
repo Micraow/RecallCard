@@ -130,6 +130,7 @@ pub(super) fn compact_page(page: &mut Value, args: &SearchArgs, scopes_hash: &st
         object.insert("context_stop_reasons".into(), stop_reasons);
         object.insert("review_candidate".into(), json!(candidate));
     }
+    page["score_units"] = session_discovery::score_units();
     page["review_template"] = json!(template);
     page["review_instructions"] = json!({"read_argument":"context_review","stages":["inspect","read"],
         "copy":"template=review_template; candidate=one review_candidate; assessment defaults uncertain with null selected_anchor_ref and [] evidence_indices",

@@ -11,6 +11,12 @@ Use `search` with `target="events"`, `detail="session_discovery_compact"`,
 `budget_bytes`, and `limit`. Optional `preview_min_bytes` is one of 64, 128, 256,
 512 (default 512). Independent semantic/lexical channel deduplication, source
 identity, raw scores, and fixed round-robin order are unchanged.
+The shared top-level `score_units` applies to every candidate channel:
+`semantic="cosine"`, `lexical="existing_lexical_score"`. Units are also present
+on empty pages. Raw channel scores are not probabilities or relevance decisions;
+legacy discovery retains its per-candidate units.
+Shared units count toward the page byte budget, so a page already at its limit
+may fit fewer candidates after adding the metadata.
 
 The result contains one `review_template` and each candidate has one
 `review_candidate.evidence` array. Original text, speaker, time, snapshot, UTF-8

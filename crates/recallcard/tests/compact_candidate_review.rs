@@ -1053,3 +1053,31 @@ fn compact_packet_keeps_filtered_neighbor_stop_reasons_next_to_evidence() {
     assert!(!page.to_string().contains("Earlier assistant proposal"));
     assert!(!page.to_string().contains(&previous));
 }
+
+#[test]
+fn compact_shared_score_units_preserve_legacy_scores_and_empty_page_meaning() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::init(dir.path()).unwrap();
+    event(&v, "units", "units-session", "beacon evidence", json!({}));
+    let units = json!({"semantic":"cosine","lexical":"existing_lexical_score"});
+    for query in ["beacon", "absent-term"] {
+        let mut args = search_args();
+        args["query"] = json!(query);
+        args["budget_bytes"] = json!(8192);
+        let compact = discover(&v, args.clone());
+        args["detail"] = json!("session_discovery");
+        let legacy = discover(&v, args);
+        assert_eq!(compact["score_units"], units);
+        assert_eq!(compact["relevance"], "unassessed");
+        assert!(serde_json::to_vec(&compact).unwrap().len() <= 8192);
+        let compact_items = compact["results"].as_array().unwrap();
+        let legacy_items = legacy["results"].as_array().unwrap();
+        assert_eq!(compact_items.len(), usize::from(query == "beacon"));
+        assert_eq!(compact_items.len(), legacy_items.len());
+        for (current, previous) in compact_items.iter().zip(legacy_items) {
+            assert_eq!(current["channels"], previous["channels"]);
+            assert_eq!(previous["score_units"], units);
+            assert!(current.get("score_units").is_none());
+        }
+    }
+}
