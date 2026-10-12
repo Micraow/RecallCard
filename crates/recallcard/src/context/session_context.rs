@@ -45,6 +45,7 @@ impl Context<'_> {
         search_binding: &str,
         guard: &crate::vault::WriteGuard,
         mut event_vector_coverage: Value,
+        discovery_sources: Option<&BTreeMap<String, Value>>,
     ) -> Result<Value> {
         let began = std::time::Instant::now();
         let mut snapshot = crate::vault::EventSnapshot::new(self.vault, guard);
@@ -133,15 +134,24 @@ impl Context<'_> {
                     children.entry(parent).or_default().push(*id);
                 }
             }
-            for anchor in &group.anchors {
+            let cyclic = group.anchors.iter().any(|anchor| {
                 let mut path = BTreeSet::new();
                 let mut at = Some(anchor.trim_start_matches("event:"));
                 while let Some(id) = at {
                     if !path.insert(id) {
-                        return Err("来源关系包含循环，请核对导出后重新导入".into());
+                        return true;
                     }
                     at = parents[id];
                 }
+                false
+            });
+            if cyclic {
+                if discovery_sources.is_none() {
+                    return Err("来源关系包含循环，请核对导出后重新导入".into());
+                }
+                // Discovery sources are independent. A broken graph cannot erase
+                // healthy sources or invalidate an independently retrieved original.
+                reasons.insert("source_graph_cycle");
             }
             let mut queue = VecDeque::new();
             for anchor in &group.anchors {
@@ -180,6 +190,9 @@ impl Context<'_> {
                         .find(|entry| entry.document.reference == reference)
                         .and_then(|entry| entry.hit_range),
                 });
+                if cyclic {
+                    continue;
+                }
                 if source_ids[adjacency::source_node_id(event)].is_none() {
                     reasons.insert("ambiguous_source_identity");
                     continue;
@@ -252,18 +265,34 @@ impl Context<'_> {
                 })
                 .collect();
             let anchor = allowed[group.anchors[0]];
-            summaries.push(json!({
+            let mut summary = json!({
                 "group":index,"session_ref":anchor.session_ref,"scope":anchor.scope,
                 "anchor_refs":group.anchors,"matching_anchor_count":group.anchor_count,
                 "score":group.score,"selected_message_count":messages.len()-before,
                 "window_limited":!reasons.is_empty(),"limit_reasons":reasons,
                 "continuation_candidates":continuation_candidates
-            }));
+            });
+            if let Some(sources) = discovery_sources {
+                let event = &events[anchor.reference.trim_start_matches("event:")];
+                let source = sources
+                    .get(&graph_key(event))
+                    .ok_or("discovery source identity changed")?;
+                let object = summary.as_object_mut().unwrap();
+                object.remove("score");
+                object.extend(
+                    source
+                        .as_object()
+                        .ok_or("invalid discovery source")?
+                        .clone(),
+                );
+            }
+            summaries.push(summary);
         }
         // First give every selected message one real excerpt, then round-robin its tails.
         // A giant assistant answer must not consume the budget before a short user correction.
-        let mut pieces = Vec::new();
+        let mut by_group = Vec::new();
         for group in 0..groups.len() {
+            let mut pieces = VecDeque::new();
             let mut remaining: Vec<_> = messages
                 .iter()
                 .enumerate()
@@ -284,12 +313,35 @@ impl Context<'_> {
                 let before = pieces.len();
                 for (index, ranges) in &mut remaining {
                     if let Some((from, until)) = ranges.pop_front() {
-                        pieces.push((*index, from, until));
+                        pieces.push_back((*index, from, until));
                     }
                 }
                 if before == pieces.len() {
                     break;
                 }
+            }
+            by_group.push(pieces);
+        }
+        let mut pieces = Vec::new();
+        if discovery_sources.is_some() {
+            // Keep the existing candidate breadth; within each page-sized source
+            // batch, give every source its next fair message slice before tails.
+            for batch in by_group.chunks_mut(args.limit) {
+                loop {
+                    let before = pieces.len();
+                    for group in batch.iter_mut() {
+                        if let Some(piece) = group.pop_front() {
+                            pieces.push(piece);
+                        }
+                    }
+                    if before == pieces.len() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            for group in by_group {
+                pieces.extend(group);
             }
         }
         if position > pieces.len()
@@ -307,7 +359,7 @@ impl Context<'_> {
         if event_vector_coverage["status"] == "available" {
             event_vector_coverage["timing_ms"]["graph_window"] = json!(began.elapsed().as_millis());
         }
-        let coverage = json!({
+        let mut coverage = json!({
             "source_grouping":"same_scope_session_and_official_source_graph",
             "ordering":"ranked_sessions_then_anchors_then_bidirectional_distance",
             "scope_filtered":true,"event_filter":args.event_filter,"as_of":args.as_of,
@@ -324,6 +376,17 @@ impl Context<'_> {
             "event_vectors":event_vector_coverage,
             "selected_message_count":messages.len(),"text_order":"one_excerpt_per_message_then_round_robin_remaining_ranges"
         });
+        if discovery_sources.is_some() {
+            coverage["ordering"] =
+                json!("independent_session_dedup_then_semantic_lexical_round_robin");
+            coverage["text_order"] =
+                json!("source_round_robin_within_limit_then_fair_message_slices");
+            coverage["anchor_policy"] =
+                json!("first_channel_then_distinct_other_channel_else_next_same_channel_event");
+            coverage["relevance"] = json!("unassessed");
+            coverage["selection"] = json!("bounded_evidence_without_single_source_commitment");
+            coverage["score_units"] = session_discovery::score_units();
+        }
         let mut items = Vec::new();
         let mut page_groups = BTreeSet::new();
         let mut required = 512;

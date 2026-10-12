@@ -474,6 +474,7 @@ impl<'a> Context<'a> {
                 "session_candidates",
                 "session_discovery",
                 "session_discovery_compact",
+                "session_evidence",
             ]
             .contains(&args.detail.as_str())
         {
@@ -485,9 +486,10 @@ impl<'a> Context<'a> {
                 | "session_candidates"
                 | "session_discovery"
                 | "session_discovery_compact"
+                | "session_evidence"
         ) && (args.target != "events" || args.include_navigation)
         {
-            return Err("session_context/session_candidates/session_discovery 仅用于 target=events 且 include_navigation=false；Memory 请先 sources 再读取原文".into());
+            return Err("会话上下文与候选模式仅用于 target=events 且 include_navigation=false；Memory 请先 sources 再读取原文".into());
         }
         let event_ranking = self
             .event_vectors
@@ -534,7 +536,7 @@ impl<'a> Context<'a> {
             Some(
                 if matches!(
                     args.detail.as_str(),
-                    "session_discovery" | "session_discovery_compact"
+                    "session_discovery" | "session_discovery_compact" | "session_evidence"
                 ) {
                     index.discovery_candidates(&args.query, &eligible)
                 } else {
@@ -777,7 +779,7 @@ impl<'a> Context<'a> {
         );
         if matches!(
             args.detail.as_str(),
-            "session_discovery" | "session_discovery_compact"
+            "session_discovery" | "session_discovery_compact" | "session_evidence"
         ) {
             return self.session_discovery_response(
                 &lexical_candidates,
@@ -809,6 +811,7 @@ impl<'a> Context<'a> {
                 &binding,
                 &_final_read_guard,
                 event_vector_coverage,
+                None,
             );
         }
         let offset = if let Some(cursor) = &args.cursor {

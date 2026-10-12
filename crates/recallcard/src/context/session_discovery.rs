@@ -11,6 +11,8 @@ pub(super) fn score_units() -> Value {
 struct Channels<'a> {
     semantic: Option<(usize, f64, &'a Document)>,
     lexical: Option<(usize, f64, &'a Document)>,
+    semantic_second: Option<(f64, &'a Document)>,
+    lexical_second: Option<(f64, &'a Document)>,
 }
 
 impl Context<'_> {
@@ -27,6 +29,7 @@ impl Context<'_> {
         vector_coverage: Value,
     ) -> Result<Value> {
         let compact = args.detail == "session_discovery_compact";
+        let assembled = args.detail == "session_evidence";
         let preview_bytes = args.preview_min_bytes.unwrap_or(512);
         let mut snapshot = crate::vault::EventSnapshot::new(self.vault, guard);
         let events = snapshot.all()?.clone();
@@ -52,6 +55,16 @@ impl Context<'_> {
                     let entry = channels.entry(k.clone()).or_default();
                     semantic_groups.push(k);
                     entry.semantic = Some((semantic_groups.len(), vectors.scores[reference], doc));
+                } else if assembled {
+                    if let Some(entry) = channels.get_mut(&k) {
+                        if entry
+                            .semantic
+                            .is_some_and(|(_, _, first)| first.reference != doc.reference)
+                            && entry.semantic_second.is_none()
+                        {
+                            entry.semantic_second = Some((vectors.scores[reference], doc));
+                        }
+                    }
                 }
             }
         }
@@ -61,6 +74,16 @@ impl Context<'_> {
                 let entry = channels.entry(k.clone()).or_default();
                 lexical_groups.push(k);
                 entry.lexical = Some((lexical_groups.len(), *score, doc));
+            } else if assembled {
+                if let Some(entry) = channels.get_mut(&k) {
+                    if entry
+                        .lexical
+                        .is_some_and(|(_, _, first)| first.reference != doc.reference)
+                        && entry.lexical_second.is_none()
+                    {
+                        entry.lexical_second = Some((*score, doc));
+                    }
+                }
             }
         }
         // Source-session deduplication occurs independently, before fixed round-robin.
@@ -75,6 +98,82 @@ impl Context<'_> {
                     }
                 }
             }
+        }
+        if assembled {
+            let mut ranked = Vec::new();
+            let mut sources = BTreeMap::new();
+            for (position, (k, first_channel)) in ordered.iter().enumerate() {
+                let c = &channels[k];
+                let semantic = c.semantic.map(|(_, s, d)| (s, d, "semantic"));
+                let lexical = c.lexical.map(|(_, s, d)| (s, d, "lexical"));
+                let (first, other, fallback) = if *first_channel == "semantic" {
+                    (
+                        semantic,
+                        lexical,
+                        c.semantic_second.map(|(s, d)| (s, d, "semantic")),
+                    )
+                } else {
+                    (
+                        lexical,
+                        semantic,
+                        c.lexical_second.map(|(s, d)| (s, d, "lexical")),
+                    )
+                };
+                let first = first.ok_or("发现通道缺少命中锚点")?;
+                let second = other
+                    .filter(|(_, d, _)| d.reference != first.1.reference)
+                    .or(fallback);
+                for (score, doc, channel) in std::iter::once(first).chain(second) {
+                    ranked.push(search::Match {
+                        score,
+                        document: doc,
+                        related_refs: vec![],
+                        score_source_ref: None,
+                        hit_range: if channel == "semantic" {
+                            vectors.and_then(|v| v.ranges.get(&doc.reference)).copied()
+                        } else {
+                            None
+                        },
+                    });
+                }
+                let event = &events[first.1.reference.trim_start_matches("event:")];
+                let source = &event.data.source;
+                let channel_value = |value: Option<(usize, f64, &Document)>| {
+                    value.map(|(rank, score, doc)| json!({"session_rank":rank,"raw_score":score,"anchor_ref":doc.reference}))
+                };
+                sources.insert(k.clone(), json!({"discovery_position":position+1,
+                    "source_identity":{"platform":truncate_utf8(&source.platform,128),
+                        "account_namespace":truncate_utf8(&source.account_namespace,128),
+                        "conversation_id":truncate_utf8(&source.conversation_id,256),"group_key":hash(k.as_bytes()),
+                        "truncated":source.platform.len()>128||source.account_namespace.len()>128||source.conversation_id.len()>256},
+                    "channels":{"semantic":channel_value(c.semantic),"lexical":channel_value(c.lexical)},
+                    "first_channel":first_channel}));
+            }
+            let binding = hash(
+                json!([
+                    search_binding,
+                    "session_evidence_v1",
+                    &sources,
+                    ranked
+                        .iter()
+                        .map(|m| (&m.document.reference, m.hit_range))
+                        .collect::<Vec<_>>()
+                ])
+                .to_string()
+                .as_bytes(),
+            );
+            drop(events);
+            drop(snapshot);
+            return self.session_context_response(
+                &ranked,
+                current,
+                filtered,
+                args,
+                &binding,
+                guard,
+                vector_coverage,
+                Some(&sources),
+            );
         }
         let scope_hash = hash(json!(self.access.scopes()).to_string().as_bytes());
         let suppressed = self.vault.suppressed_ids()?;
