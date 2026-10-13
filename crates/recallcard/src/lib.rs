@@ -22,6 +22,7 @@ pub mod native;
 pub mod agent_hook;
 pub mod event_vectors;
 pub mod ipc;
+pub mod local_events;
 pub mod semantic;
 pub mod sync;
 

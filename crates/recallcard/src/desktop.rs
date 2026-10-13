@@ -1322,6 +1322,7 @@ fn archive_error() -> String {
 
 mod application_model;
 mod cloud_semantic;
+mod local_events;
 mod semantic_setup;
 pub use application_model::{ModelOperation, ModelSetupStatus};
 pub use cloud_semantic::{CloudSemanticSetup, CloudSemanticStatus};

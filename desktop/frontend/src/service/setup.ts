@@ -107,9 +107,27 @@ export function validCloudSemanticSettings(value:CloudEmbeddingSettings):boolean
 }
 
 export function recallCoverageNotes(page: SearchPage): string[] {
+  if(page.coverage?.local_event_semantic) return [
+    page.coverage.semantic_query_encoding==='cache'?'本次使用已缓存的本机问题向量。':'本次问题已发送到你批准的本机编码服务。',
+    '普通对话已直接参与本机语义检索，无需先整理成 Memory；记忆条目按词法补充，此入口没有云回退。',
+    '每条原话展示得分最高的一处片段。角色、时间、否定与后续纠正仍需回到来源核对。',
+    ...(page.truncated?['候选或片段达到数量/文字上限，未展示的来源不代表不存在。']:[])];
   const notes = [semanticSearchNote(page.coverage) || "本次未提供语义检索状态，不能据此确认语义覆盖。"];
   if (page.coverage?.lexical_match === "natural_question") notes.push("按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。");
   notes.push("当前入口的语义候选只覆盖已建索引的记忆；原始聊天仍通过词法查找，尚不保证换个说法也能找到。");
   if (page.truncated) notes.push("本次结果达到数量或文字预算上限，未展示的来源并不代表不存在；可换用更具体的关键词继续找。");
   return notes;
+}
+
+export interface LocalEventSetup {
+ endpoint:string; model:string; revision:string; tokenizer:string; dimensions:number;
+ query_instruction:string; document_instruction:string; events_approved:boolean; query_approved:boolean;
+ chunk_bytes:number; disk_cap_mib:number;
+}
+export interface LocalEventStatus {state:string;message:string;settings:LocalEventSetup|null;index_state?:string;source_count?:number;chunk_count?:number;database_bytes?:number;pending_sources?:number;}
+export interface LocalEventProgress {state:string;complete:boolean;processed_sources:number;total_sources:number;}
+export function validLocalEventSettings(value:LocalEventSetup):boolean {
+ return validLocalSemanticTarget(value) && !!value.tokenizer.trim() && value.tokenizer.length<=256 && !/[\x00-\x1f\x7f]/.test(value.tokenizer)
+ && Number.isInteger(value.chunk_bytes) && value.chunk_bytes>=256 && value.chunk_bytes<=8192
+ && Number.isInteger(value.disk_cap_mib) && value.disk_cap_mib>=16 && value.disk_cap_mib<=512 && (value.events_approved||value.query_approved);
 }

@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 import traceback
 import zipfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import urlopen
 
 from first_use_native import FirstUseJourney, JourneyDriver, DIALOG, ORIGINAL, UPDATE
@@ -48,6 +50,68 @@ class ConnectedJourney(FirstUseJourney):
                 archive.writestr(name, json.dumps(value, ensure_ascii=False))
             archive.writestr(present["id"] + ".dat", payload)
         return path
+
+    def check_local_event_index(self):
+        """真实UI/回环传输合同；固定合成向量，不是实际模型语义质量。"""
+        requests = []
+        class Encoder(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+            def do_POST(self):
+                value = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                requests.extend(value["input"])
+                vectors = [[1.0, 0.0] if text == "synthetic-vector-query" or text == UPDATE else [0.0, 1.0] for text in value["input"]]
+                payload = json.dumps({"model": "native-synthetic-contract", "data": [{"index": i, "embedding": v} for i, v in enumerate(vectors)]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+        server = HTTPServer(("127.0.0.1", 0), Encoder)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            browser = self.driver
+            before = self.events()
+            browser.button("设置")
+            browser.button("配置普通对话本机索引")
+            assert not browser.observe("return document.querySelector('#event-corpus').checked || document.querySelector('#event-query').checked")
+            for key, value in {"endpoint": f"http://127.0.0.1:{server.server_port}/v1/embeddings", "model": "native-synthetic-contract", "revision": "fake-vector-contract-v1", "tokenizer": "no-real-tokenizer-test-only", "dimensions": "2"}.items():
+                browser.type("#event-" + key, value)
+            browser.click("#event-corpus")
+            browser.click("#event-query")
+            browser.button("核对普通对话范围", "//dialog")
+            assert not requests, "查看范围不能提前编码"
+            browser.click("#event-confirm")
+            browser.button("确认保存普通对话配置", "//dialog")
+            wait_for(lambda: not browser.observe("return Boolean(document.querySelector('dialog[open]'))"), "本机配置保存")
+            assert not requests, "保存配置不能暗中编码整个聊天库"
+            browser.button("更新普通对话索引")
+            wait_for(lambda: self.content("本轮索引完成"), "分批普通Event索引完成", timeout=90)
+            assert not self.memories() and self.events() == before
+            assert UPDATE in requests and all(isinstance(text, str) for text in requests)
+            self.checkpoint("独立选择普通对话本机范围后分批索引且原话不变")
+            browser.button("首页")
+            browser.type("#recall-question", "synthetic-vector-query")
+            browser.button("准备这次对话")
+            wait_for(lambda: self.content("普通对话已直接参与本机语义检索"), "问题实际走本机Event链")
+            assert "synthetic-vector-query" in requests
+            assert browser.observe("return document.querySelector('dialog fieldset label')?.textContent.includes(" + json.dumps(UPDATE) + ")") is True
+            assert self.content("此入口没有云回退")
+            browser.button("预览将复制的内容", "//dialog")
+            wait_for(lambda: bool(browser.observe("return document.querySelector('#portable-preview')?.value")), "本机Event命中可进入原上下文预览")
+            assert UPDATE in browser.observe("return document.querySelector('#portable-preview').value")
+            assert self.events() == before and not self.memories()
+            self.local_event_acceptance = {"fake_encoder_contract_only": True, "actual_model_quality_verified": False, "actual_loopback_http": True, "raw_event_without_memory": True, "separate_explicit_approval": True, "no_calls_before_index_request": True, "canonical_unchanged": True, "new_query_local_encoded": True, "same_source_in_context_preview": True, "cloud_fallback": False}
+            self.checkpoint("本机新问题返回原Event并接入复制预览而不冒充真实模型质量")
+            browser.button("关闭", "//dialog//div[contains(@class,'modal-footer')]")
+            browser.button("设置")
+            browser.button("停用普通对话索引")
+            wait_for(lambda: not self.content("停用普通对话索引"), "本机Event配置可单独停用")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def capture(self, name, webview=True):
         if self.driver and webview:
@@ -299,6 +363,7 @@ class ConnectedJourney(FirstUseJourney):
             "automatic_memory":False,"reply_searchable":True,"external_site_used":False,
             "search_dom_exact_visible":True,"source_dom_exact_visible":True,"search_webdriver_rendered_exact":rendered_exact}
 
+        self.check_local_event_index()
         browser.close()
         self.driver = None
         wait_for(ready, "窗口关闭后可重新启动")
@@ -362,7 +427,7 @@ def main():
                 except Exception: pass
             raise
         finally:
-            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.7-connected-context-native", "passed_steps": smoke.steps, "application": str(smoke.application), "cli": str(smoke.cli), "build": getattr(smoke, "build_identity", None), "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False, "external_agents_executed": False, "canonical": smoke.canonical_summary(), "attachment_acceptance": getattr(smoke, "attachment_acceptance", None), "portable_acceptance": getattr(smoke, "portable_acceptance", None)}, ensure_ascii=False, indent=2))
+            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.7-connected-context-native", "passed_steps": smoke.steps, "application": str(smoke.application), "cli": str(smoke.cli), "build": getattr(smoke, "build_identity", None), "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False, "external_agents_executed": False, "canonical": smoke.canonical_summary(), "attachment_acceptance": getattr(smoke, "attachment_acceptance", None), "portable_acceptance": getattr(smoke, "portable_acceptance", None), "local_event_acceptance": getattr(smoke, "local_event_acceptance", None)}, ensure_ascii=False, indent=2))
             try:
                 if smoke.vault.exists():
                     subprocess.run([str(smoke.cli), "--vault", str(smoke.vault), "--json", "service", "stop"], timeout=15, capture_output=True)

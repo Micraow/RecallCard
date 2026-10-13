@@ -182,6 +182,11 @@ impl ModelOperation {
         if query.trim().is_empty() || query.len() > 4096 {
             return Err(invalid("请输入1–4096字节的检索词"));
         }
+        if mode == "natural_question" {
+            if let Some(page) = self.local_question_search(query, target)? {
+                return Ok(page);
+            }
+        }
         let vault = self.vault()?;
         let cfg = MemoryRuntime::new(&vault).configuration()?;
         let mut error = None;
