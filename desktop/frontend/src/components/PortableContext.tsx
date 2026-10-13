@@ -58,7 +58,7 @@ export function PortableContextDialog({ service, initialResults, initialGoal, cl
   };
   return <Dialog title="带到任意 AI" close={close} busy={busy} wide>
     <div className="modal-body portable-context">
-      <p>在 {scopeLabel(service.scope)} 按当前问题找资料，再核对复制。使用现有检索配置；若你已批准云向量，问题会按既有批准交给该服务编码。</p>
+      <p>在 {scopeLabel(service.scope)} 按当前问题找资料，再核对复制。问题仅使用你单独批准的本机普通对话索引；未配置时只做本地关键词查找。此入口不会改用云编码。</p>
       <label className="field-label" htmlFor="portable-goal">这次想问什么</label>
       <textarea id="portable-goal" className="text-area" value={goal} disabled={busy} onChange={e => { setGoal(e.target.value); invalidate(); }} />
       {utf8Bytes(goal.trim()) > 4096 && <p role="alert">问题最多 4,096 字节，请缩短后再准备。</p>}

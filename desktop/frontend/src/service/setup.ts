@@ -107,11 +107,16 @@ export function validCloudSemanticSettings(value:CloudEmbeddingSettings):boolean
 }
 
 export function recallCoverageNotes(page: SearchPage): string[] {
+  const readyScopes=page.coverage?.scopes?.filter(scope=>scope.state==='ready')||[];
   if(page.coverage?.local_event_semantic) return [
-    page.coverage.semantic_query_encoding==='cache'?'本次使用已缓存的本机问题向量。':'本次问题已发送到你批准的本机编码服务。',
+    (page.coverage.semantic_query_encoding==='cache'||readyScopes.length>0&&readyScopes.every(scope=>scope.query_encoding==='cache'))?'本次使用已缓存的本机问题向量。':'本次问题已发送到你批准的本机编码服务。',
     '普通对话已直接参与本机语义检索，无需先整理成 Memory；记忆条目按词法补充，此入口没有云回退。',
     '每条原话展示得分最高的一处片段。角色、时间、否定与后续纠正仍需回到来源核对。',
     ...(page.truncated?['候选或片段达到数量/文字上限，未展示的来源不代表不存在。']:[])];
+  if(page.coverage?.cloud_fallback===false) return [
+    page.coverage.event_search==='local_only'?'本机普通对话索引尚未可用或未覆盖全部范围；现有 Memory 仅按词法补充。':'尚未配置普通对话本机索引，本次只在本地按关键词寻找原话和记忆。',
+    '此入口不会改用云编码；未命中或未覆盖不表示没有相关历史。',
+    ...(page.truncated?['候选、覆盖或文字预算有限，请核对状态并回到来源。']:[])];
   const notes = [semanticSearchNote(page.coverage) || "本次未提供语义检索状态，不能据此确认语义覆盖。"];
   if (page.coverage?.lexical_match === "natural_question") notes.push("按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。");
   notes.push("当前入口的语义候选只覆盖已建索引的记忆；原始聊天仍通过词法查找，尚不保证换个说法也能找到。");

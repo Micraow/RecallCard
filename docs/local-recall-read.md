@@ -16,6 +16,6 @@
 
 ## 后续修补检查点（仍待新提交 CI）
 
-配置变更和停用改用 Vault 独占锁，与最终来源/配置读锁互斥。Rust worker 实际取出排队任务后重查固定 host 和 worker 配置，status 返回后再次核验，Python 在处理每个请求与开始新编码前重读固定启动配置；已经开始的本机 HTTP 请求无法撤回，返回仍重验。固定配置撤销后的 execute/_encode 零新增编码调用已通过纯合成测试；真实 Rust 阻塞队列撤权→零新增 POST 仍须专项实测，不以静态审查替代。
+配置变更和停用改用 Vault 独占锁，与最终来源/配置读锁互斥。Rust worker 实际取出排队任务后重查固定 host 和 worker 配置，status 返回后再次核验，Python 在处理每个请求与开始新编码前重读固定启动配置；已经开始的本机 HTTP 请求无法撤回，返回仍重验。固定配置撤销后的 execute/_encode 零新增编码调用已通过纯合成测试；已新增真实 Rust worker 状态响应阻塞、并行待执行读取、撤销批准后释放、零新增 embedding POST 的专项合成测试；尚待 CI 实测，不以静态审查替代。
 
 Native 同进程重试与扩展指纹统一，仅忽略 local→cache 运行诊断；来源/正文/版本变化仍拒绝。Memory 子阶段预算空保留 budget_exhausted 与覆盖状态，最终整包裁剪也标 budget_limited。源码独审已确认修补方向，完整新 SHA 验证尚未完成。

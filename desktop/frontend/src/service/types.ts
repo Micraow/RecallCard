@@ -198,7 +198,7 @@ export interface SearchRow {
   };
 }
 export interface SearchPage {
-  coverage?: {local_event_semantic?: boolean; memory_search?: string; chunk_selection?: string; semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string; semantic_coverage?: string; lexical_matching?: string; lexical_match?: string};
+  coverage?: {event_search?: string; cloud_fallback?: boolean; scopes?: {scope:string;state:string;query_encoding?:string}[]; local_event_semantic?: boolean; memory_search?: string; chunk_selection?: string; semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string; semantic_coverage?: string; lexical_matching?: string; lexical_match?: string};
   results: SearchRow[];
   truncated?: boolean;
 }

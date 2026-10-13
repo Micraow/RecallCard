@@ -219,12 +219,26 @@ fn managed_read_cursor_does_not_outlive_revocation_and_schema_names_bytes() {
         json!({"refs":[reference],"cursor":r["next_cursor"],"budget_bytes":3000})
     )
     .is_err());
-    for definition in transport::tool_definitions().as_array().unwrap() {
-        assert!(definition["inputSchema"]["properties"]["budget_bytes"].is_object());
-        assert_eq!(
-            definition["inputSchema"]["properties"]["budget_tokens"]["deprecated"],
-            true
-        );
+    let definitions = transport::tool_definitions();
+    assert_eq!(definitions.as_array().unwrap().len(), 6);
+    for definition in definitions.as_array().unwrap() {
+        let name = definition["name"].as_str().unwrap();
+        let properties = definition["inputSchema"]["properties"].as_object().unwrap();
+        if matches!(name, "recall_search" | "recall_fetch") {
+            let field = if name == "recall_search" {
+                "query"
+            } else {
+                "id"
+            };
+            assert_eq!(properties.len(), 1);
+            assert!(properties[field].is_object());
+            assert_eq!(definition["inputSchema"]["required"], json!([field]));
+            assert_eq!(definition["inputSchema"]["additionalProperties"], false);
+        } else {
+            assert!(["bootstrap", "search", "read", "sources"].contains(&name));
+            assert!(properties["budget_bytes"].is_object());
+            assert_eq!(properties["budget_tokens"]["deprecated"], true);
+        }
     }
     assert!(transport::invoke(
         &context(&v),

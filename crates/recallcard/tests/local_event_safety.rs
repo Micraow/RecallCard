@@ -240,3 +240,80 @@ fn idle_worker_restarts_within_the_first_request() {
     std::thread::sleep(Duration::from_secs(31));
     assert_eq!(index.status().unwrap()["state"], "configured");
 }
+
+#[test]
+fn revocation_while_worker_is_blocked_prevents_followup_query_posts() {
+    let _serial = SERIAL.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("synthetic-provider-inputs.jsonl");
+    let (_server, endpoint) = server(&log);
+    let vault = Vault::init(&temp.path().join("vault")).unwrap();
+    event(&vault, "personal", "synthetic-alpha queue source");
+    let initial = configure(&vault, endpoint.clone());
+    refresh(&initial);
+    // 使用实际 Python EventIndex；只在测试包装层阻塞 status，编码仍走真实回环HTTP。
+    let path = temp.path().join("queued-python");
+    let package = path.join("recallcard_worker");
+    fs::create_dir_all(&package).unwrap();
+    let real = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../python/recallcard_worker")
+        .canonicalize()
+        .unwrap();
+    fs::write(
+        package.join("__init__.py"),
+        format!("__path__.append({})\n", json!(real.to_string_lossy())),
+    )
+    .unwrap();
+    fs::copy(real.join("event_index.py"), package.join("queue_actual.py")).unwrap();
+    let entered = temp.path().join("status-entered");
+    let release = temp.path().join("status-release");
+    fs::write(
+        package.join("event_index.py"),
+        format!(
+            r#"from . import queue_actual as real
+from pathlib import Path
+import time
+entered=Path({entered})
+release=Path({release})
+original=real.EventIndex.status
+def held(self,request):
+    entered.write_text('status reached')
+    until=time.monotonic()+12
+    while not release.exists() and time.monotonic()<until:
+        time.sleep(.01)
+    if not release.exists():
+        raise RuntimeError('synthetic gate timeout')
+    return original(self,request)
+real.EventIndex.status=held
+main=real.main
+"#,
+            entered = json!(entered.to_string_lossy()),
+            release = json!(release.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    let settings: Setup =
+        serde_json::from_value(initial.status().unwrap()["settings"].clone()).unwrap();
+    let index =
+        LocalEvents::configure(&vault, "personal", settings, "python3".into(), path).unwrap();
+    let before = fs::read_to_string(&log).unwrap();
+    std::thread::scope(|threads| {
+        let active = threads.spawn(|| index.search("synthetic pending first query", 10));
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while !entered.exists() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(entered.exists(), "生产worker的status须实际到达阻塞点");
+        let waiting = threads.spawn(|| index.search("synthetic pending second query", 10));
+        std::thread::sleep(Duration::from_millis(100));
+        LocalEvents::disable(&vault, "personal").unwrap();
+        fs::write(&release, "release after revocation").unwrap();
+        assert!(active.join().unwrap().is_err());
+        assert!(waiting.join().unwrap().is_err());
+    });
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        before,
+        "撤权后不能开始任何新的embedding POST"
+    );
+}
