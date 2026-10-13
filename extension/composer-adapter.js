@@ -2,7 +2,7 @@
 (() => {
   'use strict';
   class ComposerAdapter {
-    constructor(doc, location = doc.location) { this.doc = doc; this.location = location; this.receipts = new Map(); }
+    constructor(doc, location = doc.location) { this.doc = doc; this.location = location; this.receipts = new Map(); this.verifying = false; this.verificationFailed = false; }
     find() {
       const site = globalThis.RecallCardSites.forUrl(this.location?.href);
       const nodes = [...this.doc.querySelectorAll(site.selector)].filter((node) => {
@@ -48,10 +48,65 @@
       }
       // Save ownership before informing the editor, so even a re-render cannot
       // cause a second insertion to be mistaken for the first.
-      this.receipts.set(capsule.id, { node, block, insertedNode, marker, markup: insertedNode?.innerHTML });
+      this.receipts.set(capsule.id, { node, block, before, expected: before + block, insertedNode, marker, markup: insertedNode?.innerHTML });
       this.notify(node);
       if (!this.text(node).includes(block)) throw new Error('网页编辑器改变了插入内容；请人工检查草稿，不会再次自动插入');
       return { status: 'draft', id: capsule.id };
+    }
+    unobscured(node) {
+      const view = this.doc.defaultView;
+      if (this.doc.visibilityState === 'hidden' || typeof this.doc.elementFromPoint !== 'function' || typeof node.getBoundingClientRect !== 'function') throw new Error('无法核验当前可见输入框；请手动复制预览');
+      const r = node.getBoundingClientRect();
+      const left = Math.max(0, r.left), right = Math.min(view.innerWidth, r.right);
+      const top = Math.max(0, r.top), bottom = Math.min(view.innerHeight, r.bottom);
+      if (!(right > left && bottom > top)) throw new Error('输入框不在可见区域；请手动复制预览');
+      const hit = this.doc.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+      if (hit !== node && !node.contains?.(hit)) throw new Error('输入框被其他内容遮挡；请手动复制预览');
+    }
+    editorFlush() {
+      const view = this.doc.defaultView;
+      return new Promise((resolve, reject) => {
+        if (typeof view.requestAnimationFrame !== 'function' || typeof view.setTimeout !== 'function') { reject(new Error('网页编辑器无法完成绘制核验；请手动复制')); return; }
+        let done = false, first = null, second = null, quiet = null;
+        const finish = error => {
+          if (done) return;
+          done = true; view.clearTimeout(timeout); view.clearTimeout(quiet);
+          if (first !== null) view.cancelAnimationFrame?.(first);
+          if (second !== null) view.cancelAnimationFrame?.(second);
+          if (error) reject(error); else resolve();
+        };
+        const timeout = view.setTimeout(() => finish(new Error('网页编辑器核验超时；请检查草稿并手动复制')), 1500);
+        first = view.requestAnimationFrame(() => { second = view.requestAnimationFrame(() => {
+          quiet = view.setTimeout(() => finish(), 50);
+        }); });
+      });
+    }
+    // 只确认完整规范化文本；不使用前缀/关键词命中，也不回滚或再次覆盖用户草稿。
+    async insertVerified(capsule, isCurrent = () => true) {
+      if (this.verifying) throw new Error('正在核验上一次填框，不会重复追加');
+      if (this.verificationFailed) throw new Error('此前填框无法确认；请人工检查草稿并手动复制，刷新页面前不会再自动写入');
+      if (!isCurrent()) throw new Error('当前会话已变化，请手动复制预览');
+      const node = this.find();
+      this.unobscured(node);
+      const url = this.location?.href;
+      let receipt = null;
+      const previousReceipt = this.receipts.get(capsule?.id);
+      this.verifying = true;
+      try {
+        this.insert(capsule);
+        receipt = this.receipts.get(capsule.id);
+        await this.editorFlush();
+        if (!isCurrent() || this.location?.href !== url || !node.isConnected || this.find() !== node) throw new Error('填框期间会话或输入框已变化；请人工检查草稿并手动复制');
+        this.unobscured(node);
+        const normalize = text => text.replace(/\r\n?/gu, '\n');
+        if (!receipt || normalize(this.text(node)) !== normalize(receipt.expected)) throw new Error('完整草稿读回不一致；可能被编辑器截断或改写，请人工检查，不会重试覆盖');
+        return { status: 'draft', id: capsule.id, full_text_verified: true, existing_draft_preserved: true };
+      } catch (error) {
+        // 写入后结果不明，不让 SPA 重建/自动重试绕过失败。只有页面重新加载才重置。
+        const written = this.receipts.get(capsule?.id);
+        if (written && written !== previousReceipt) this.verificationFailed = true;
+        throw error;
+      } finally { this.verifying = false; }
     }
     remove(id) {
       const receipt = this.receipts.get(id);

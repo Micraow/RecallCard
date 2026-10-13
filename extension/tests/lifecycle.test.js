@@ -13,14 +13,14 @@ function setup(url='https://chatgpt.com/c/first'){
   const parsed=new URL(url);
   const location={origin:parsed.origin,pathname:parsed.pathname,get href(){return this.origin+this.pathname;}};
   let editor={};
-  let bindHook=async()=>{};
+  let bindHook=async()=>{}, insertHook=async()=>{};
   const window={addEventListener:(kind,fn)=>handlers[kind]=fn};window.top=window;
-  class Adapter{find(){if(!editor)throw new Error("输入框不可用");return editor;}reset(){resets++;return[];}status(){return[];}insert(){inserts++;return{status:'draft'};}}
+  class Adapter{find(){if(!editor)throw new Error("输入框不可用");return editor;}reset(){resets++;return[];}status(){return[];}async insertVerified(capsule,isCurrent){inserts++;await insertHook(capsule);if(!isCurrent())throw new Error('会话已变化');return{status:'draft',full_text_verified:true};}}
   const chrome={runtime:{id:extensionId,getURL:(path)=>`chrome-extension://${extensionId}/${path}`,onMessage:{addListener:(fn)=>listener=fn},sendMessage:async(msg)=>{messages.push(msg);await bindHook(msg);return{ok:true,result:{route:msg.route,nonce:'a'.repeat(48),session_ref:globalThis.RecallCardSites.forUrl(msg.route).id+':'+msg.token}};}}};
   vm.runInNewContext(contentSource,{RecallCardSites:globalThis.RecallCardSites,window,document:{},location,crypto:webcrypto,chrome,RecallCardComposerAdapter:Adapter,setInterval:(fn)=>interval=fn});
   const sender={id:extensionId,url:chrome.runtime.getURL('background.js')};
   const send=(msg,who=sender)=>new Promise(resolve=>{const pending=listener(msg,who,resolve);if(!pending)resolve(undefined);});
-  return{send,location,interval,handlers,messages,delayBind:(fn)=>{bindHook=fn;},replaceEditor:(node={})=>{editor=node;},counts:()=>({resets,inserts})};
+  return{send,location,interval,handlers,messages,delayBind:(fn)=>{bindHook=fn;},delayInsert:(fn)=>{insertHook=fn;},replaceEditor:(node={})=>{editor=node;},counts:()=>({resets,inserts})};
 }
 test('真正 content 脚本的 SPA 路由变化使旧 nonce 操作失效',async()=>{
   const h=setup();const first=(await h.send({kind:'describe'})).result;
@@ -102,5 +102,24 @@ test('实验平台同 URL 同节点无法自行判断换会话，用户重置确
     assert.notEqual(next.session_ref,first.session_ref);
     assert.equal((await h.send({kind:'insert',...first,capsule:{id:'old',...first,text:'旧资料'}})).ok,false);
     assert.equal(h.counts().inserts,0);
+  }
+});
+
+
+test('真正 content 等待完整填框核验回执，不能提前显示成功',async()=>{
+  const h=setup();const first=(await h.send({kind:'describe'})).result;
+  let finish;h.delayInsert(()=>new Promise(resolve=>{finish=resolve;}));
+  let settled=false;const pending=h.send({kind:'insert',...first,capsule:{id:'verified',...first,text:'合成资料'}}).then(result=>{settled=true;return result;});
+  await new Promise(resolve=>setTimeout(resolve,0));assert.equal(settled,false);finish();
+  const result=await pending;assert.equal(result.ok,true);assert.equal(result.result.full_text_verified,true);
+});
+test('核验等待期间逻辑相同的重绑定不算换会话，真正切页仍拒绝旧成功',async()=>{
+  for(const changed of [false,true]){
+    const h=setup();const first=(await h.send({kind:'describe'})).result;
+    let finish;h.delayInsert(()=>new Promise(resolve=>{finish=resolve;}));
+    const pending=h.send({kind:'insert',...first,capsule:{id:'waiting',...first,text:'合成资料'}});
+    await new Promise(resolve=>setTimeout(resolve,0));
+    if(changed){h.location.pathname='/c/next';h.interval();}else await h.send({kind:'describe'});
+    finish();assert.equal((await pending).ok,!changed);
   }
 });
