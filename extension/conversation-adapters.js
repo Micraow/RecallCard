@@ -61,6 +61,32 @@
       const selector = site.id === 'chatgpt' ? 'button[data-testid="copy-turn-action-button"]' : '.ds-icon-button[aria-label="复制"], button[data-testid="copy-message"]';
       return [...scope.querySelectorAll(selector)].some(button => visible(button, this.doc));
     }
+    // 接力只接受整条普通文本。代码围栏/引用的原始边界无法从所有网站
+    // DOM 无损恢复时，保守回退到用户粘贴；不能把示例剥成可执行请求。
+    protocolText(node) {
+      if (!node || !visible(node, this.doc)) return null;
+      if ([...node.querySelectorAll('pre, blockquote, code')].some(part => visible(part, this.doc))) return null;
+      let text = '';
+      let generatedTail = 0;
+      const boundary = count => {
+        if (!text) return;
+        const tail = /\n*$/u.exec(text)[0].length;
+        if (tail < count) { const added = count - tail; text += '\n'.repeat(added); generatedTail += added; }
+      };
+      const walk = (part, root = false) => {
+        if (part.nodeType === 3) { text += part.nodeValue || ''; generatedTail = 0; return; }
+        if (part.nodeType !== 1 || part.matches(SKIP) || !visible(part, this.doc)) return;
+        if (part.tagName === 'BR') { text += '\n'; generatedTail = 0; return; }
+        const block = !root && BLOCK.has(part.tagName);
+        if (block) boundary(part.tagName === 'P' ? 2 : 1);
+        for (const child of part.childNodes) walk(child);
+        if (block) boundary(part.tagName === 'P' ? 2 : 1);
+      };
+      walk(node, true);
+      if (generatedTail) text = text.slice(0, -generatedTail);
+      text = text.replace(/\r\n/gu, '\n');
+      return new TextEncoder().encode(text).length <= 72 * 1024 ? text : null;
+    }
     read(captureId, capturedAt) {
       const site = this.site();
       if (!SELECTORS[site.id]) throw new Error(`${site.name} 暂未验证会话读取。仍可使用高级资料与草稿功能；请用网站官方导出或手动复制会话。`);

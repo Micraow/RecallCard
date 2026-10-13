@@ -79,6 +79,48 @@
       if (!binding || message.nonce !== binding.nonce || message.session_ref !== binding.session_ref || message.route !== route) throw new Error('页面或会话已变化；请重新打开扩展');
       if (message.kind === 'check') return { status: 'current' };
       if (message.kind === 'clipboard_capability') return globalThis.RecallCardClipboard?.capability(document, navigator) || { write: false, read: 'paste_only' };
+      if (message.kind === 'text_snapshot') {
+        if (locallyPaused) return { status: 'paused' };
+        if (!conversation?.protocolText || !format || !['chatgpt', 'deepseek'].includes(globalThis.RecallCardSites.forUrl(location.href).id)) return { status: 'manual_fallback' };
+        automationObserved = true;
+        if (navigationIdentity) return { status: 'manual_fallback' };
+        if (document.visibilityState === 'hidden' || conversation.streaming() || Date.now() - lastMutationAt < 1500) return { status: 'streaming' };
+        const selectedToken = token;
+        const nodes = conversation.nodes();
+        if (nodes.length > 5000) return { status: 'manual_fallback' };
+        const rows = [], ids = new Set();
+        let ambiguous = false;
+        for (const node of nodes) {
+          const id = node.getAttribute('data-message-id');
+          let role = node.getAttribute('data-message-author-role') || node.getAttribute('data-role');
+          if (!role && globalThis.RecallCardSites.forUrl(location.href).id === 'deepseek' && node.querySelector('.ds-markdown')) role = 'assistant';
+          if (!id || !/^[A-Za-z0-9_.:-]{1,192}$/u.test(id) || ids.has(id) || !['user','assistant'].includes(role)) { ambiguous = true; break; }
+          ids.add(id);
+          rows.push({ id, role, text: conversation.protocolText(node), complete: role === 'assistant' && conversation.completed(node) });
+        }
+        if (ambiguous) return { status: 'manual_fallback' };
+        const packet = message.packet;
+        let sent = null, sentIndex = -1;
+        if (packet && typeof packet.text === 'string' && /^[A-Za-z0-9_-]{1,96}$/u.test(packet.id || '') && /^[a-f0-9]{64}$/u.test(packet.hash || '')) {
+          const open = `[RecallCard ${binding.nonce}:${packet.id}]`, close = `[/RecallCard ${binding.nonce}:${packet.id}]`;
+          const exact = `${open}\n${packet.text}\n${close}`;
+          const matches = rows.flatMap((row,index) => {
+            if (row.role !== 'user' || row.text === null) return [];
+            if (row.text.split(open).length !== 2 || row.text.split(close).length !== 2 || !row.text.includes(exact)) return [];
+            return [{ row, index }];
+          });
+          // 同一包出现多次、尾部截断或字节变化均不能作为当前发送凭据。
+          if (matches.length === 1 && Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(packet.text))), byte => byte.toString(16).padStart(2, '0')).join('') === packet.hash) {
+            sentIndex = matches[0].index;
+            sent = { message_id: matches[0].row.id, packet_hash: packet.hash };
+          }
+        }
+        const last = rows.at(-1);
+        const assistant = last?.role === 'assistant' && last.complete && last.text !== null && sentIndex >= 0 && rows.length - 1 > sentIndex ? { id: last.id, text: last.text, complete: true } : null;
+        checkNavigation();
+        if (token !== selectedToken || Date.now() - lastMutationAt < 1500) throw new Error('读取期间页面已变化，请等待稳定后重试');
+        return { status: 'stable', sent, assistant, composer_fingerprint: await composerFingerprint() };
+      }
       if (message.kind === 'automatic_snapshot') {
         if (locallyPaused) return { status: 'paused' };
         if (!conversation || !format || !['chatgpt', 'deepseek'].includes(globalThis.RecallCardSites.forUrl(location.href).id)) return { status: 'manual_fallback' };
@@ -115,7 +157,7 @@
         }
         const relay_observation = { sent, last: last && !last.metadata?.weaker_identity ? { id: last.id, role: last.role, text: last.text, complete, after_sent: sentIndex >= 0 && raw.messages.length - 1 > sentIndex } : null };
         const originalCount = raw.messages.length;
-        raw.messages = raw.messages.filter(item => (item.role !== 'assistant' || conversation.completed(nodes.find(node => node.getAttribute('data-message-id') === item.id) || lastNode)) && ['user','assistant'].includes(item.role) && !item.metadata?.weaker_identity).map(item => ({ ...item, text: strip(item.text) })).filter(item => item.text && !item.text.includes('[RecallCard ') && !item.text.includes('[/RecallCard '));
+        raw.messages = raw.messages.filter(item => (item.role !== 'assistant' || conversation.completed(nodes.find(node => node.getAttribute('data-message-id') === item.id) || lastNode)) && ['user','assistant'].includes(item.role) && !item.metadata?.weaker_identity).map(item => ({ ...item, text: strip(item.text) })).filter(item => item.text && !item.text.includes('[RecallCard ') && !item.text.includes('[/RecallCard ') && !(item.role === 'assistant' && /^RECALLCARD\/2(?: |$)/u.test(item.text)));
         const skipped = originalCount - raw.messages.length;
         let capture_note = skipped ? `${skipped} 条消息因身份、角色、完成凭据或资料标记不明确而跳过` : null;
         raw.coverage.reason = '已授权后自动读取稳定完成的可见文字；未验证全部历史是否已加载。';

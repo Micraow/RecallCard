@@ -115,3 +115,21 @@ test('真实popup：本机失败后仍可导出完整JSON，取消下载不丢�
     assert.equal(await page.locator('#save-samples script').count(),0);
   }finally{await page.close();}
 });
+
+test('简洁协议只读整条普通消息：保留全文换行，引用与代码示例保守回退', async()=>{
+  const frame='RECALLCARD/2 T_abcdefghijklmnop\n{"action":"search","query":"合成问题"}\nEND RECALLCARD';
+  const page=await pageFor('<div data-message-author-role="assistant" data-message-id="a1" data-is-streaming="false"></div>');
+  try {
+    const read=()=>page.evaluate(()=>new RecallCardConversationAdapter(document).protocolText(document.querySelector('[data-message-id="a1"]')));
+    await page.locator('[data-message-id="a1"]').evaluate((node,text)=>node.textContent=text,frame);
+    assert.equal(await read(),frame);
+    await page.locator('[data-message-id="a1"]').evaluate((node,text)=>node.textContent=' '+text,frame);
+    assert.equal(await read(),' '+frame,'不可trim掉原始前导空格');
+    for(const tag of ['blockquote','pre','code']) {
+      await page.locator('[data-message-id="a1"]').evaluate((node,{tag,text})=>{node.replaceChildren();const child=document.createElement(tag);child.textContent=text;node.append(child);},{tag,text:frame});
+      assert.equal(await read(),null,'示例边界不能剥除为整帧');
+    }
+    await page.locator('[data-message-id="a1"]').evaluate(node=>{node.replaceChildren();for(const text of ['RECALLCARD/2 T_abcdefghijklmnop\n{"action":"final"}','合成最终回答 [S1]\nEND RECALLCARD']){const p=document.createElement('p');p.textContent=text;node.append(p);}});
+    assert.equal(await read(),'RECALLCARD/2 T_abcdefghijklmnop\n{"action":"final"}\n\n合成最终回答 [S1]\nEND RECALLCARD');
+  } finally { await page.close(); }
+});
