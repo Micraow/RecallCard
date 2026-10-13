@@ -35,6 +35,7 @@ class ConnectedJourney(FirstUseJourney):
         created = self.cli_command("--json", "memory", "add", "--file", str(path))
         read = lambda: self.cli_command("--json", "read", created["id"])
         before = read()
+        assert before["protected"] is True, "真实创建默认保护记忆，加入背景也必须逐次批准"
         browser.button("开局背景")
         wait_for(lambda: self.content(text), "实际Memory候选可见")
         assert text not in browser.observe("return document.querySelector('#opening-preview').value")
@@ -47,10 +48,18 @@ class ConnectedJourney(FirstUseJourney):
         assert read() == before and text not in browser.observe("return document.querySelector('#opening-preview').value")
         self.checkpoint("首页无需提问可打开开局背景且取消选择零写入")
         browser.button("加入开局背景", "//dialog")
+        wait_for(lambda: self.content("确认加入背景"), "重新审阅受保护记忆的加入选择")
+        assert browser.observe("return !document.querySelector('#opening-protected-approval').checked && [...document.querySelectorAll('dialog .modal-footer button')].find(n=>n.textContent==='确认加入背景').disabled")
+        browser.button("确认加入背景", "//dialog")
+        assert read() == before and self.events() == events, "未批准时禁用的确认不能修改记忆"
+        browser.click("#opening-protected-approval")
+        wait_for(lambda: browser.observe("return [...document.querySelectorAll('dialog .modal-footer button')].find(n=>n.textContent==='确认加入背景').disabled === false"), "明确批准后才允许确认加入")
+        assert read() == before, "勾选批准本身不能提前写入"
         browser.button("确认加入背景", "//dialog")
         candidate_selector = '[data-background-id="' + created["id"] + '"]'
         wait_for(lambda: browser.observe("return document.querySelector(" + json.dumps(candidate_selector) + ")?.textContent.includes('本次带上') && document.querySelector('#opening-preview')?.value.includes(" + json.dumps(text) + ")"), "确认已落库后使用真实bootstrap投影")
         selected = read()
+        assert selected["revision"] == before["revision"] + 1
         assert selected["protected"] is True and "bootstrap" in selected["labels"]
         assert selected["content"] == before["content"] and selected["source_refs"] == before["source_refs"]
         preview = browser.observe("return document.querySelector('#opening-preview').value")
@@ -67,10 +76,11 @@ class ConnectedJourney(FirstUseJourney):
         browser.button("确认移出背景", "//dialog")
         wait_for(lambda: self.content("加入开局背景") and browser.observe("return !document.querySelector('#opening-preview')?.value.includes(" + json.dumps(text) + ")"), "移出后真实投影不再带旧背景")
         removed = read()
+        assert removed["revision"] == selected["revision"] + 1
         assert removed["protected"] is True and "bootstrap" not in removed["labels"]
         assert removed["content"] == before["content"] and removed["source_refs"] == before["source_refs"]
         assert len(self.memories()) == 1 and self.events() == events
-        self.opening_background_acceptance = {"home_without_question": True, "empty_memory_honest": True, "cancel_zero_writes": True, "same_bootstrap_projection": True, "explicit_protected_removal": True, "clipboard_full_match": True, "memory_and_sources_preserved": True, "model_invoked": False, "external_site_used": False}
+        self.opening_background_acceptance = {"home_without_question": True, "empty_memory_honest": True, "cancel_zero_writes": True, "protected_inclusion_requires_approval": True, "same_bootstrap_projection": True, "explicit_protected_removal": True, "clipboard_full_match": True, "memory_and_sources_preserved": True, "model_invoked": False, "external_site_used": False}
         self.checkpoint("明确确认后只移出常驻选择且记忆保护与原话都保留")
         browser.button("关闭", "//dialog//div[contains(@class,'modal-footer')]")
 
