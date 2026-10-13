@@ -389,7 +389,10 @@ class ConnectedJourney(FirstUseJourney):
         # 平台无关闭环：真实 React → Tauri → 正本 → 系统剪贴板；无外部网站或模型。
         browser.type("#recall-question", "周四回访何时安排")
         browser.button("准备这次对话")
-        wait_for(lambda: self.content("用户原话") and self.content("原始聊天仍通过词法查找"), "首页问题实际检索并显示覆盖")
+        wait_for(lambda: self.content("用户原话")
+                 and self.content("尚未配置普通对话本机索引，本次只在本地按关键词寻找原话和记忆。")
+                 and self.content("此入口不会改用云编码；未命中或未覆盖不表示没有相关历史。"),
+                 "首页问题实际检索并明确未配置索引、关键词路径与无云回退")
         browser.button("预览将复制的内容", "//dialog")
         wait_for(lambda: bool(browser.observe("return document.querySelector('#portable-preview')?.value")), "问题A已有完整预览")
         assert len(self.events()) == 4 and not self.memories()
