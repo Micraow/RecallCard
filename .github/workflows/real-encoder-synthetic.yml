@@ -1,0 +1,72 @@
+name: 独立真实小编码器合成验收
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/real-encoder-ci-request.json'
+
+concurrency:
+  group: real-encoder-synthetic-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  semantic:
+    name: 固定 FastEmbed / BGE / 纯合成 / CPU
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PIP_NO_CACHE_DIR: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.12'
+      - name: 纯脚本门禁（没有模型或 HTTP 服务）
+        run: python3 -m unittest discover -s scripts/real_encoder -p 'test_*.py' -v
+      - name: 编译同一源码的独立验收驱动
+        timeout-minutes: 15
+        run: |
+          mkdir -p crates/recallcard/examples
+          test ! -e crates/recallcard/examples/real_encoder_ci.rs
+          cp scripts/real_encoder/harness.rs crates/recallcard/examples/real_encoder_ci.rs
+          cargo build --locked -p recallcard --example real_encoder_ci
+          git diff --exit-code
+      - name: 安装官方固定编码依赖（仅本独立目标）
+        timeout-minutes: 5
+        run: |
+          test "$(df --output=avail -B1 "$RUNNER_TEMP" | tail -1)" -ge 2147483648
+          python3 -m venv "$RUNNER_TEMP/real-encoder-venv"
+          "$RUNNER_TEMP/real-encoder-venv/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple --retries 1 --timeout 30 --report "$RUNNER_TEMP/real-encoder-pip-report.json" -r scripts/real_encoder/requirements.txt
+          "$RUNNER_TEMP/real-encoder-venv/bin/python" -m pip check
+          test "$(du -sb "$RUNNER_TEMP/real-encoder-venv" | cut -f1)" -le 1073741824
+      - name: 下载并验证固定官方模型（100 MiB 上限）
+        timeout-minutes: 4
+        run: python3 scripts/real_encoder/download.py --output "$RUNNER_TEMP/real-encoder-model"
+      - name: 离线模型到现有 SQLite 和只读 facade 全链验收
+        timeout-minutes: 5
+        run: |
+          timeout --kill-after=10s 260s "$RUNNER_TEMP/real-encoder-venv/bin/python" scripts/real_encoder/run.py \
+            --binary "$PWD/target/debug/examples/real_encoder_ci" \
+            --model "$RUNNER_TEMP/real-encoder-model" \
+            --output "$RUNNER_TEMP/real-encoder-summary" \
+            --pip-report "$RUNNER_TEMP/real-encoder-pip-report.json"
+      - name: 仅保存合成指标与脱敏依赖摘要
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RecallCard-real-encoder-synthetic-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/real-encoder-summary/summary.json
+            ${{ runner.temp }}/real-encoder-summary/dependency-lock.json
+          if-no-files-found: ignore
+          retention-days: 7

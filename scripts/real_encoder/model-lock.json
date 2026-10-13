@@ -1,0 +1,22 @@
+{
+  "schema": "recallcard.real-encoder-lock/1",
+  "repository": "Qdrant/bge-small-zh-v1.5",
+  "revision": "46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59",
+  "model": "BAAI/bge-small-zh-v1.5",
+  "dimensions": 512,
+  "max_tokens": 512,
+  "query_instruction": "为这个句子生成表示以用于检索相关文章：",
+  "document_instruction": "",
+  "pooling": "CLS",
+  "normalization": "l2",
+  "metadata_source": "https://huggingface.co/api/models/Qdrant/bge-small-zh-v1.5/tree/46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59",
+  "files": {
+    "config.json": {"bytes": 739, "git_blob_sha1": "60938626ad1097a0c1a14be4f8340e32c714a056"},
+    "ort_config.json": {"bytes": 1234, "git_blob_sha1": "31d3edac186bcfc7fb617662b7e0f750c7fef47a"},
+    "special_tokens_map.json": {"bytes": 125, "git_blob_sha1": "a8b3208c2884c4efb86e49300fdd3dc877220cdf"},
+    "tokenizer.json": {"bytes": 439125, "git_blob_sha1": "cdb3043fc938fc918c06e66cf704c2ba58f88747"},
+    "tokenizer_config.json": {"bytes": 367, "git_blob_sha1": "3a59388f0fd1bd22dec2ce7902c1be8e1fb84107"},
+    "vocab.txt": {"bytes": 109540, "git_blob_sha1": "ca4f9781030019ab9b253c6dcb8c7878b6dc87a5"},
+    "model_optimized.onnx": {"bytes": 94781076, "sha256": "1294ea4b6331115a353d81f96b85e8c8d7fdcc284453d5b2fab5b016230aad38"}
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "schema": "recallcard.synthetic-semantic-edge-cases/1",
+  "note": "新增独立否定/更正诊断集，不是原12源52问，也不是旧gold；只评候选来源，不评答案正确性。",
+  "corpus": [
+    {"source_id": "E01", "text": "原计划：合成项目春芽的演示在周二举行。"},
+    {"source_id": "E02", "text": "更正：合成项目春芽的演示改到周四，周二的安排已取消。"},
+    {"source_id": "E03", "text": "不要给合成盆栽小青施肥，它这周只需要浇水。"},
+    {"source_id": "E04", "text": "合成盆栽小蓝这周需要施肥，不需要额外浇水。"}
+  ],
+  "queries": [
+    {"id": "E-Q01", "category": "correction", "intent": "question", "query": "春芽演示最终改在星期几？", "expected_sources": ["E02"], "obsolete_or_conflicting_sources": ["E01"]},
+    {"id": "E-Q02", "category": "negation", "intent": "question", "query": "小青这周是不是不能施肥？", "expected_sources": ["E03"], "obsolete_or_conflicting_sources": ["E04"]},
+    {"id": "E-Q03", "category": "unrelated", "intent": "question", "query": "合成无人机电池的保修期是多少？", "expected_sources": []}
+  ]
+}

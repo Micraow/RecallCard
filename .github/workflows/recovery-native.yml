@@ -3,6 +3,12 @@ on:
   workflow_dispatch:
   push:
     branches: ["recovery/native-20261011"]
+    # 独立合成模型验收有自己的 CI；只有这些路径变化时不重复整套 GUI 构建。
+    paths-ignore:
+      - 'scripts/real_encoder/**'
+      - 'docs/real-encoder-synthetic-ci.md'
+      - '.github/workflows/real-encoder-synthetic.yml'
+      - '.github/real-encoder-ci-request.json'
 permissions:
   contents: read
 concurrency:
