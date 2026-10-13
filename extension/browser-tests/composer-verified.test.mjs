@@ -58,3 +58,32 @@ test('目标被遮挡和存在两个可见编辑器时零写入，保留手动�
     } finally {await page.close();}
   }
 });
+
+test('富文本删除BR、合并段落或改变原格式即使textContent相等也不能确认成功',async()=>{
+  for(const mode of ['br','paragraph','format']) {
+    const page=await pageFor('<div id="prompt-textarea" class="ProseMirror" contenteditable="true"><p><strong>第一行</strong><br>第二行</p><p>另一段落</p></div>');
+    try {
+      const result=await page.evaluate(async mode=>{
+        const adapter=new RecallCardComposerAdapter(document,{href:'https://chatgpt.com/'}),node=adapter.find();
+        node.addEventListener('input',()=>setTimeout(()=>{if(mode==='br')node.querySelector('br').remove();if(mode==='paragraph'){const second=node.children[1];node.firstChild.append(...second.childNodes);second.remove();}if(mode==='format'){const strong=node.querySelector('strong');strong.replaceWith(document.createTextNode(strong.textContent));}},0),{once:true});
+        let error='';try{await adapter.insertVerified({id:'rich-mutation',nonce:'a'.repeat(48),text:'合成追加资料'});}catch(e){error=e.message;}
+        return {error,latched:adapter.verificationFailed};
+      },mode);
+      assert.match(result.error,/富文本可见全文|富文本草稿结构/);assert.equal(result.latched,true);
+    } finally {await page.close();}
+  }
+});
+test('真实页面切换核验期间reset不回写草稿且阻止下一次自动填框',async()=>{
+  const page=await pageFor('<textarea id="prompt-textarea">原始草稿</textarea>');
+  try {
+    const result=await page.evaluate(async()=>{
+      const location={href:'https://chatgpt.com/c/first'},adapter=new RecallCardComposerAdapter(document,location),node=adapter.find();let inputs=0;node.addEventListener('input',()=>inputs++);
+      const pending=adapter.insertVerified({id:'old',nonce:'b'.repeat(48),text:'合成上下文'});const written=node.value;
+      location.href='https://chatgpt.com/c/next';adapter.reset();
+      let error='',retry='';try{await pending;}catch(e){error=e.message;}
+      adapter.reset();try{await adapter.insertVerified({id:'next',nonce:'b'.repeat(48),text:'不得再次自动写入'});}catch(e){retry=e.message;}
+      return{error,retry,inputs,unchanged:written===node.value};
+    });
+    assert.match(result.error,/会话或输入框已变化/);assert.match(result.retry,/不会再自动写入/);assert.equal(result.inputs,1);assert.equal(result.unchanged,true);
+  } finally {await page.close();}
+});

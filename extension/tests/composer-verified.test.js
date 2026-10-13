@@ -4,6 +4,7 @@ import { Element, setup } from './fixtures/composer.mjs';
 const capsule={id:'verified',nonce:'c'.repeat(48),text:'合成资料🙂\n完整结尾，不可丢失'};
 function fixture(tag='TEXTAREA') {
   const f=setup(tag); const {node,doc}=f;
+  if(tag==='DIV')Object.defineProperty(node,'innerText',{get:()=>node.textContent});
   node.getBoundingClientRect=()=>({left:0,top:0,right:600,bottom:120});
   doc.elementFromPoint=()=>node; doc.visibilityState='visible';
   Object.assign(doc.defaultView,{innerWidth:800,innerHeight:600,setTimeout,clearTimeout,requestAnimationFrame:fn=>setTimeout(fn,0),cancelAnimationFrame:clearTimeout});
@@ -45,4 +46,29 @@ test('已成功的相同请求拒绝重复但不污损后续新请求状态',asy
   await assert.rejects(()=>adapter.insertVerified(capsule),/已经插入/);
   adapter.remove(capsule.id);
   assert.equal((await adapter.insertVerified({...capsule,id:'next'})).full_text_verified,true);
+});
+test('核验等待时页面reset不得回滚草稿或抹掉本次写入标记，后续不能再次自动写入',async()=>{
+  const {node,adapter}=fixture();node.value='保留原草稿';let current=true;
+  const pending=adapter.insertVerified(capsule,()=>current);
+  assert.throws(()=>adapter.remove(capsule.id),/仍在核验/);
+  assert.throws(()=>adapter.confirmSent(capsule.id),/仍在核验/);
+  const filled=node.value;assert.equal(adapter.reset().length,1);assert.equal(node.value,filled);current=false;
+  await assert.rejects(()=>pending,/会话或输入框已变化/);
+  assert.equal(adapter.verificationFailed,true);
+  assert.equal(adapter.reset().length,1);assert.equal(node.value,filled);
+  await assert.rejects(()=>adapter.insertVerified({...capsule,id:'late'}),/不会再自动写入/);
+  assert.deepEqual(node.events,['input']);
+});
+
+test('原富文本节点身份或格式变动不能仅凭textContent相等报成功',async()=>{
+  const {node,doc,adapter}=fixture('DIV');const original=doc.createElement('p');original.textContent='两行草稿';node.append(original);
+  node.dispatchEvent=()=>setTimeout(()=>{const replacement=doc.createElement('p');replacement.textContent=original.textContent;replacement.parentNode=node;node.children[0]=replacement;},0);
+  await assert.rejects(()=>adapter.insertVerified(capsule),/富文本草稿结构已变化/);
+  assert.equal(adapter.verificationFailed,true);
+});
+test('最终content会话确认失效也受保护，不得由reset回滚或逃过安全停止',async()=>{
+  const {node,adapter}=fixture();await adapter.insertVerified(capsule);const filled=node.value;
+  assert.throws(()=>adapter.confirmVerifiedContext(()=>{adapter.reset();return false;}),/会话已变化/);
+  assert.equal(node.value,filled);assert.deepEqual(node.events,['input']);assert.equal(adapter.verificationFailed,true);
+  await assert.rejects(()=>adapter.insertVerified({...capsule,id:'late'}),/不会再自动写入/);
 });

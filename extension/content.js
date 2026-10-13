@@ -159,10 +159,12 @@
           if (!binding || message.nonce !== binding.nonce) throw new Error('输入框或会话在准备期间变化');
         }
         const selectedToken = token, selectedNonce = binding.nonce, selectedSession = binding.session_ref;
-        const current = () => token === selectedToken && binding?.nonce === selectedNonce && binding?.session_ref === selectedSession && (!message.automatic || !locallyPaused);
+        const current = () => {
+          checkNavigation();
+          return token === selectedToken && binding?.nonce === selectedNonce && binding?.session_ref === selectedSession && (!message.automatic || !locallyPaused);
+        };
         const result = await adapter.insertVerified(message.capsule, current);
-        checkNavigation();
-        if (!current()) throw new Error('核验期间会话已变化；请人工检查草稿，不会重复填框');
+        adapter.confirmVerifiedContext(current);
         return result;
       }
       if (message.kind === 'remove') return adapter.remove(message.id);

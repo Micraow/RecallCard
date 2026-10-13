@@ -2,7 +2,7 @@
 (() => {
   'use strict';
   class ComposerAdapter {
-    constructor(doc, location = doc.location) { this.doc = doc; this.location = location; this.receipts = new Map(); this.verifying = false; this.verificationFailed = false; }
+    constructor(doc, location = doc.location) { this.doc = doc; this.location = location; this.receipts = new Map(); this.verifying = false; this.verificationFailed = false; this.verificationWriteStarted = false; }
     find() {
       const site = globalThis.RecallCardSites.forUrl(this.location?.href);
       const nodes = [...this.doc.querySelectorAll(site.selector)].filter((node) => {
@@ -35,10 +35,12 @@
       const node = this.find();
       if (!/^[A-Za-z0-9_-]{1,96}$/u.test(capsule.id) || !/^[a-f0-9]{48}$/u.test(capsule.nonce) || typeof capsule.text !== 'string' || capsule.text.length > 65536) throw new Error('上下文标识或大小无效');
       const before = this.text(node);
+      const originalNodes = node.tagName === 'TEXTAREA' ? [] : Array.from(node.childNodes || node.children).map(child => ({ node: child, markup: child.outerHTML ?? child.textContent }));
       if (before.includes('[RecallCard ') || before.includes('[/RecallCard ')) throw new Error('草稿中已有失去归属或已编辑的上下文，请先检查；不会重复追加');
       const marker = `${capsule.nonce}:${capsule.id}`;
       const block = `\n\n[RecallCard ${marker}]\n${capsule.text}\n[/RecallCard ${marker}]`;
       let insertedNode = null;
+      if (this.verifying) this.verificationWriteStarted = true;
       if (node.tagName === 'TEXTAREA') this.setTextarea(node, before + block);
       else {
         insertedNode = this.doc.createElement('p');
@@ -48,7 +50,7 @@
       }
       // Save ownership before informing the editor, so even a re-render cannot
       // cause a second insertion to be mistaken for the first.
-      this.receipts.set(capsule.id, { node, block, before, expected: before + block, insertedNode, marker, markup: insertedNode?.innerHTML });
+      this.receipts.set(capsule.id, { node, block, before, expected: before + block, originalNodes, renderedExpected: node.tagName === 'TEXTAREA' ? null : node.innerText, insertedNode, marker, markup: insertedNode?.innerHTML });
       this.notify(node);
       if (!this.text(node).includes(block)) throw new Error('网页编辑器改变了插入内容；请人工检查草稿，不会再次自动插入');
       return { status: 'draft', id: capsule.id };
@@ -90,8 +92,8 @@
       this.unobscured(node);
       const url = this.location?.href;
       let receipt = null;
-      const previousReceipt = this.receipts.get(capsule?.id);
       this.verifying = true;
+      this.verificationWriteStarted = false;
       try {
         this.insert(capsule);
         receipt = this.receipts.get(capsule.id);
@@ -100,15 +102,29 @@
         this.unobscured(node);
         const normalize = text => text.replace(/\r\n?/gu, '\n');
         if (!receipt || normalize(this.text(node)) !== normalize(receipt.expected)) throw new Error('完整草稿读回不一致；可能被编辑器截断或改写，请人工检查，不会重试覆盖');
+        if (node.tagName !== 'TEXTAREA') {
+          if (typeof receipt.renderedExpected !== 'string' || normalize(node.innerText) !== normalize(receipt.renderedExpected)) throw new Error('富文本可见全文或换行已变化；请人工检查草稿并手动复制');
+          const children = Array.from(node.childNodes || node.children);
+          if (receipt.originalNodes.some((original, index) => children[index] !== original.node || (original.node.outerHTML ?? original.node.textContent) !== original.markup)) throw new Error('原有富文本草稿结构已变化；请人工检查，不会覆盖还原');
+        }
         return { status: 'draft', id: capsule.id, full_text_verified: true, existing_draft_preserved: true };
       } catch (error) {
         // 写入后结果不明，不让 SPA 重建/自动重试绕过失败。只有页面重新加载才重置。
-        const written = this.receipts.get(capsule?.id);
-        if (written && written !== previousReceipt) this.verificationFailed = true;
+        if (this.verificationWriteStarted) this.verificationFailed = true;
         throw error;
       } finally { this.verifying = false; }
     }
+    // content 的最终会话检查也受同一保护；检查导致的 reset 不能撤回草稿。
+    confirmVerifiedContext(isCurrent) {
+      if (this.verifying) throw new Error('其他填框仍在核验，不能确认旧结果');
+      this.verifying = true;
+      try {
+        if (!isCurrent()) throw new Error('核验期间会话已变化；请人工检查草稿，不会重复填框');
+      } catch (error) { this.verificationFailed = true; throw error; }
+      finally { this.verifying = false; }
+    }
     remove(id) {
+      if (this.verifying) throw new Error('仍在核验填框，不会并发修改草稿；请稍后人工检查');
       const receipt = this.receipts.get(id);
       if (!receipt) throw new Error('没有可安全移除的已插入上下文');
       const { node, block, insertedNode, markup } = receipt;
@@ -158,12 +174,14 @@
       return { status: 'removed', id };
     }
     confirmSent(id) {
+      if (this.verifying) throw new Error('仍在核验草稿，不能提前确认发送');
       const receipt = this.receipts.get(id);
       if (receipt?.node.isConnected && (this.text(receipt.node).includes(`[RecallCard ${receipt.marker}]`) || this.text(receipt.node).includes(`[/RecallCard ${receipt.marker}]`))) throw new Error('上下文仍在草稿里，请先自己点击网页发送');
       this.receipts.delete(id);
       return { status: 'user_confirmed_sent', id };
     }
     reset() {
+      if (this.verifying || this.verificationFailed) return ['填框结果尚未可靠确认，已停止自动修改；请人工检查草稿并手动复制'];
       this.prune();
       const warnings = [];
       for (const [id, receipt] of this.receipts) {

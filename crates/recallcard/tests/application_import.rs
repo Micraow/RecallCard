@@ -390,6 +390,24 @@ fn writer_indexes_once_and_receipts_survive_restart_without_false_duplicates() {
 #[test]
 fn parsing_checkpoint_and_commit_pause_resume_keep_counts_and_sources() {
     use std::time::{Duration, Instant};
+    // 与生产队列一致：状态轮询也可能短暂持有资料库锁，后台任务不能将可重试冲突当终态。
+    // 仍保留下面的解析/提交检查点期限，以及独立的显式锁忙和精确数量断言。
+    fn run_with_queue_retry(service: ImportService, id: String) -> JobStatus {
+        let started = Instant::now();
+        loop {
+            match service.run(&id, "project:test") {
+                Ok(status) => return status,
+                Err(error) if error.code == ErrorCode::Conflict && error.retryable => {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(30),
+                        "导入后台任务持续锁忙：{error:?}"
+                    );
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(error) => panic!("导入后台任务失败：{error:?}"),
+            }
+        }
+    }
     let (dir, vault, service) = setup();
     let path = dir.path().join("resumable.json");
     let payload = vec![b'x'; 100_000];
@@ -402,7 +420,7 @@ fn parsing_checkpoint_and_commit_pause_resume_keep_counts_and_sources() {
     let job = service.submit(request("durable-resume", path)).unwrap();
     let runner = service.clone();
     let id = job.job_id.clone();
-    let thread = std::thread::spawn(move || runner.run(&id, "project:test").unwrap());
+    let thread = std::thread::spawn(move || run_with_queue_retry(runner, id));
     let start = Instant::now();
     loop {
         let status = service.status(&job.job_id, "project:test").unwrap();
@@ -424,7 +442,7 @@ fn parsing_checkpoint_and_commit_pause_resume_keep_counts_and_sources() {
     reopened.resume(&job.job_id, "project:test").unwrap();
     let runner = reopened.clone();
     let id = job.job_id.clone();
-    let thread = std::thread::spawn(move || runner.run(&id, "project:test").unwrap());
+    let thread = std::thread::spawn(move || run_with_queue_retry(runner, id));
     let start = Instant::now();
     loop {
         let status = reopened.status(&job.job_id, "project:test").unwrap();

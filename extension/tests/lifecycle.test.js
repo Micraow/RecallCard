@@ -15,7 +15,7 @@ function setup(url='https://chatgpt.com/c/first'){
   let editor={};
   let bindHook=async()=>{}, insertHook=async()=>{};
   const window={addEventListener:(kind,fn)=>handlers[kind]=fn};window.top=window;
-  class Adapter{find(){if(!editor)throw new Error("输入框不可用");return editor;}reset(){resets++;return[];}status(){return[];}async insertVerified(capsule,isCurrent){inserts++;await insertHook(capsule);if(!isCurrent())throw new Error('会话已变化');return{status:'draft',full_text_verified:true};}}
+  class Adapter{find(){if(!editor)throw new Error("输入框不可用");return editor;}reset(){resets++;return[];}status(){return[];}async insertVerified(capsule,isCurrent){inserts++;await insertHook(capsule);if(!isCurrent())throw new Error('会话已变化');return{status:'draft',full_text_verified:true};}confirmVerifiedContext(current){if(!current())throw new Error('会话已变化');}}
   const chrome={runtime:{id:extensionId,getURL:(path)=>`chrome-extension://${extensionId}/${path}`,onMessage:{addListener:(fn)=>listener=fn},sendMessage:async(msg)=>{messages.push(msg);await bindHook(msg);return{ok:true,result:{route:msg.route,nonce:'a'.repeat(48),session_ref:globalThis.RecallCardSites.forUrl(msg.route).id+':'+msg.token}};}}};
   vm.runInNewContext(contentSource,{RecallCardSites:globalThis.RecallCardSites,window,document:{},location,crypto:webcrypto,chrome,RecallCardComposerAdapter:Adapter,setInterval:(fn)=>interval=fn});
   const sender={id:extensionId,url:chrome.runtime.getURL('background.js')};
