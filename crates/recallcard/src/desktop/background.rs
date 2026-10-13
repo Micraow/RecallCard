@@ -62,6 +62,24 @@ pub(super) struct PendingBackground {
 }
 
 impl DesktopSession {
+    /// 只撤销这一笔预览；迟到的关闭不能清除后来另一笔用户操作。
+    pub fn cancel_background_change(
+        &mut self,
+        session_id: &str,
+        scope: &str,
+        preview_id: &str,
+    ) -> Result<()> {
+        self.vault(session_id)?;
+        check_scope(scope)?;
+        if self
+            .pending_background
+            .as_ref()
+            .is_some_and(|pending| pending.scope == scope && pending.preview_id == preview_id)
+        {
+            self.pending_background = None;
+        }
+        Ok(())
+    }
     pub fn read_background(&self, session_id: &str, scope: &str) -> Result<BackgroundPage> {
         self.read_background_page(session_id, scope, 0)
     }

@@ -1,4 +1,5 @@
 import { PasteReplyDialog, PortableContextDialog } from "../components/PortableContext";
+import {OpeningBackgroundDialog} from '../components/OpeningBackground';
 import { useRef, useState } from "react";
 import type { ScopedService } from "../service/client";
 import { appError, isRunning, importRecovery, type AppError, type JobStatus } from "../service/contracts";
@@ -19,6 +20,7 @@ export function BackgroundPage({ service, refresh, changed, jobs, jobsError, imp
   const inventory = usePollingResource(() => service.connections(), [service]);
   const runtime = usePollingResource(() => service.runtime(), [service], 8000);
   const [pasting, setPasting] = useState(false);
+  const [opening,setOpening]=useState(false);
   const [question, setQuestion] = useState("");
   const [handoffQuestion, setHandoffQuestion] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -42,6 +44,8 @@ export function BackgroundPage({ service, refresh, changed, jobs, jobsError, imp
       <div className="home-heading-actions"><button className="button" onClick={() => setPasting(true)}>粘贴 AI 回答</button>
       <button className="button" onClick={() => setAdding(true)}><Icon name="plus" size={15} />补充最新情况</button></div>
     </header>
+    <section className="home-opening" aria-label="开局背景入口"><div><h2>先让 AI 了解你的背景</h2><p>选择长期有用的已确认记忆，开聊前就能带上，不必每次重新解释。</p></div><button className="button" onClick={()=>setOpening(true)}>开局背景</button></section>
+    {opening&&<OpeningBackgroundDialog key={service.workspace.session_id+service.scope} service={service} changed={changed} close={()=>setOpening(false)}/>}
     <form className="home-question" aria-label="按问题准备资料" onSubmit={event => { event.preventDefault(); if (question.trim() && new TextEncoder().encode(question.trim()).length <= 4096) setHandoffQuestion(question.trim()); }}>
       <label className="field-label" htmlFor="recall-question">这次想聊什么？</label>
       <div><input id="recall-question" className="text-input" value={question} onChange={event => setQuestion(event.target.value)} placeholder="写下当前问题，找回相关原话和记忆" />

@@ -1004,6 +1004,18 @@ async fn confirm_background_change(
     .await
 }
 #[tauri::command]
+async fn cancel_background_change(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    preview_id: String,
+) -> Result<(), String> {
+    execute(state.service.clone(), move |s| {
+        s.cancel_background_change(&session_id, &scope, &preview_id)
+    })
+    .await
+}
+#[tauri::command]
 async fn manage_memories(
     state: State<'_, AppState>,
     session_id: String,
@@ -1876,6 +1888,7 @@ fn main() {
             event_location,
             read_background,
             read_background_page,
+            cancel_background_change,
             background_memory,
             background_memory_source,
             review_background_change,

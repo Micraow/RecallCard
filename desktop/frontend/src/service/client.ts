@@ -1,4 +1,5 @@
 import { validatePortableContext, type PortableContext, type ReplyPreview } from "./portable";
+import {validateBackgroundPage,type BackgroundPage,type BackgroundReview} from './background';
 import type {
   CredentialStatus,
   ModelSetupSnapshot,
@@ -131,6 +132,18 @@ export class ScopedService {
   async prepareContext(references: string[], goal: string) {
     const result = await this.call<PortableContext>("prepare_selected_context", { references, goal, budgetTokens: 32768 });
     return validatePortableContext(result, this.scope, references);
+  }
+  async openingBackground(offset=0) {
+    return validateBackgroundPage(await this.call<BackgroundPage>('read_background_page',{offset}));
+  }
+  reviewBackground(id:string,revision:number,include:boolean) {
+    return this.call<BackgroundReview>('review_background_change',{id,revision,include});
+  }
+  confirmBackground(previewId:string,approveProtected:boolean) {
+    return this.call<{memory:Memory;copy_text:string;background:BackgroundPage['background']}>('confirm_background_change',{previewId,approveProtected});
+  }
+  cancelBackground(previewId:string) {
+    return this.call<void>('cancel_background_change',{previewId});
   }
   previewAiReply(content: string) {
     return this.call<ReplyPreview>("preview_ai_reply", { content });

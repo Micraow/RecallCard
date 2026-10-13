@@ -76,6 +76,24 @@ fn bootstrap(vault: &Vault) -> Value {
 }
 
 #[test]
+fn exact_background_cancel_is_scoped_and_cannot_cancel_newer_preview() {
+    let mut f = setup();
+    let first = review(&mut f, true);
+    let second = review(&mut f, true);
+    f.ui.cancel_background_change(&f.info.session_id, "personal", &first.preview_id)
+        .unwrap();
+    f.ui.cancel_background_change(&f.info.session_id, "project:other", &second.preview_id)
+        .unwrap();
+    confirm(&mut f, &second, false).unwrap();
+    let current = f.vault.memory(&f.memory.id).unwrap();
+    let removal = review(&mut f, false);
+    f.ui.cancel_background_change(&f.info.session_id, "personal", &removal.preview_id)
+        .unwrap();
+    assert!(confirm(&mut f, &removal, true).is_err());
+    assert_eq!(f.vault.memory(&f.memory.id).unwrap(), current);
+}
+
+#[test]
 fn choosing_existing_memory_previews_real_default_and_preserves_all_evidence() {
     let mut f = setup();
     let empty =

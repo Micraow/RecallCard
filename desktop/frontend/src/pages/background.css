@@ -4,6 +4,12 @@
 .home-heading h1 { font-size: 27px; line-height: 1.5; margin: 6px 0 8px; letter-spacing: -.45px; }
 .home-heading p { font-size: 14px; color: var(--muted); }
 .home-heading-actions { display:flex; gap:10px; flex-wrap:wrap; flex-shrink:0; }
+.home-opening {display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:18px 20px;margin-bottom:22px;border:1px solid var(--border);border-radius:10px;background:var(--surface-subtle);}
+.home-opening>div{flex:1;min-width:200px}.home-opening h2{font-size:15px}.home-opening p{font-size:13px;color:var(--muted);margin-top:6px}
+.opening-background{display:flex;flex-direction:column;gap:16px}.opening-preview h3,.opening-heading h3{font-size:15px}.opening-preview p{margin:8px 0}
+.opening-preview textarea{min-height:180px;max-height:300px;resize:vertical;font-size:12px;line-height:1.8}.opening-preview details{overflow-wrap:anywhere;font-size:12px;margin-top:10px}
+.opening-heading,.opening-pagination{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.opening-pagination{font-size:12px;color:var(--muted)}
+.opening-candidates article{border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px;overflow-wrap:anywhere}.opening-candidates .prose{margin:12px 0}
 .home-connection-panel { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .home-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 22px 24px 17px; }
 .home-panel-heading h2, .home-columns h2, .home-library h2 { font-size: 15px; font-weight: 600; }

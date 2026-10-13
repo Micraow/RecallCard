@@ -18,6 +18,62 @@ from native_smoke import ROOT, wait_for, run
 
 
 class ConnectedJourney(FirstUseJourney):
+    def check_opening_background(self):
+        """首页真实可达，选择已有合成Memory；不使用模型整理或伪造invoke。"""
+        browser = self.driver
+        browser.button("首页")
+        assert browser.observe("return document.querySelector('#recall-question').value") == ""
+        browser.button("开局背景")
+        wait_for(lambda: self.content("当前没有可选记忆"), "没有Memory时不伪造常驻事实")
+        assert self.content("不需要先输入问题")
+        browser.button("关闭", "//dialog//div[contains(@class,'modal-footer')]")
+        events = self.events()
+        source = next(event for event in events if event.get("content") == UPDATE)
+        text = "合成开局背景：琥珀报告已勘误，周四回访。"
+        path = self.temporary / "opening-memory.synthetic.json"
+        path.write_text(json.dumps({"content": text, "scope": "personal", "source_refs": [source["id"]], "evidence": "user_explicit", "labels": ["synthetic"]}, ensure_ascii=False))
+        created = self.cli_command("--json", "memory", "add", "--file", str(path))
+        read = lambda: self.cli_command("--json", "read", created["id"])
+        before = read()
+        browser.button("开局背景")
+        wait_for(lambda: self.content(text), "实际Memory候选可见")
+        assert text not in browser.observe("return document.querySelector('#opening-preview').value")
+        browser.button("加入开局背景", "//dialog")
+        wait_for(lambda: self.content("确认加入背景"), "加入先出现实际背景预览")
+        assert text in browser.observe("return document.querySelector('#opening-preview').value")
+        assert read() == before and self.events() == events
+        browser.button("取消本次选择", "//dialog")
+        wait_for(lambda: self.content("从现有记忆选择"), "取消返回背景选择")
+        assert read() == before and text not in browser.observe("return document.querySelector('#opening-preview').value")
+        self.checkpoint("首页无需提问可打开开局背景且取消选择零写入")
+        browser.button("加入开局背景", "//dialog")
+        browser.button("确认加入背景", "//dialog")
+        candidate_selector = '[data-background-id="' + created["id"] + '"]'
+        wait_for(lambda: browser.observe("return document.querySelector(" + json.dumps(candidate_selector) + ")?.textContent.includes('本次带上') && document.querySelector('#opening-preview')?.value.includes(" + json.dumps(text) + ")"), "确认已落库后使用真实bootstrap投影")
+        selected = read()
+        assert selected["protected"] is True and "bootstrap" in selected["labels"]
+        assert selected["content"] == before["content"] and selected["source_refs"] == before["source_refs"]
+        preview = browser.observe("return document.querySelector('#opening-preview').value")
+        assert "recallcard.context/1" in preview and f'memory:{created["id"]}@{selected["revision"]}' in preview
+        browser.button("核对并复制开局背景", "//dialog")
+        wait_for(lambda: self.content("开局背景已复制"), "开局背景实际写入系统剪贴板")
+        assert run("xclip", "-selection", "clipboard", "-o") == preview
+        self.checkpoint("开局背景确认后带真实记忆引用且剪贴板全文一致")
+        browser.button("移出开局背景", "//dialog")
+        wait_for(lambda: self.content("确认移出背景"), "移出受保护背景先预览")
+        assert browser.observe("return [...document.querySelectorAll('dialog .modal-footer button')].find(n=>n.textContent==='确认移出背景').disabled")
+        assert read() == selected
+        browser.click("#opening-protected-approval")
+        browser.button("确认移出背景", "//dialog")
+        wait_for(lambda: self.content("加入开局背景") and browser.observe("return !document.querySelector('#opening-preview')?.value.includes(" + json.dumps(text) + ")"), "移出后真实投影不再带旧背景")
+        removed = read()
+        assert removed["protected"] is True and "bootstrap" not in removed["labels"]
+        assert removed["content"] == before["content"] and removed["source_refs"] == before["source_refs"]
+        assert len(self.memories()) == 1 and self.events() == events
+        self.opening_background_acceptance = {"home_without_question": True, "empty_memory_honest": True, "cancel_zero_writes": True, "same_bootstrap_projection": True, "explicit_protected_removal": True, "clipboard_full_match": True, "memory_and_sources_preserved": True, "model_invoked": False, "external_site_used": False}
+        self.checkpoint("明确确认后只移出常驻选择且记忆保护与原话都保留")
+        browser.button("关闭", "//dialog//div[contains(@class,'modal-footer')]")
+
     def create_archive(self):
         """真实导入链路使用独立合成原件与缺失原件，绝不读取个人归档。"""
         path = super().create_archive()
@@ -364,6 +420,7 @@ class ConnectedJourney(FirstUseJourney):
             "search_dom_exact_visible":True,"source_dom_exact_visible":True,"search_webdriver_rendered_exact":rendered_exact}
 
         self.check_local_event_index()
+        self.check_opening_background()
         browser.close()
         self.driver = None
         wait_for(ready, "窗口关闭后可重新启动")
@@ -427,7 +484,7 @@ def main():
                 except Exception: pass
             raise
         finally:
-            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.7-connected-context-native", "passed_steps": smoke.steps, "application": str(smoke.application), "cli": str(smoke.cli), "build": getattr(smoke, "build_identity", None), "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False, "external_agents_executed": False, "canonical": smoke.canonical_summary(), "attachment_acceptance": getattr(smoke, "attachment_acceptance", None), "portable_acceptance": getattr(smoke, "portable_acceptance", None), "local_event_acceptance": getattr(smoke, "local_event_acceptance", None)}, ensure_ascii=False, indent=2))
+            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.7-connected-context-native", "passed_steps": smoke.steps, "application": str(smoke.application), "cli": str(smoke.cli), "build": getattr(smoke, "build_identity", None), "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False, "external_agents_executed": False, "canonical": smoke.canonical_summary(), "attachment_acceptance": getattr(smoke, "attachment_acceptance", None), "portable_acceptance": getattr(smoke, "portable_acceptance", None), "local_event_acceptance": getattr(smoke, "local_event_acceptance", None), "opening_background_acceptance": getattr(smoke, "opening_background_acceptance", None)}, ensure_ascii=False, indent=2))
             try:
                 if smoke.vault.exists():
                     subprocess.run([str(smoke.cli), "--vault", str(smoke.vault), "--json", "service", "stop"], timeout=15, capture_output=True)
