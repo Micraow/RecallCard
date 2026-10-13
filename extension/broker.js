@@ -1,3 +1,4 @@
+import { textCommand, textCycle, textPublic } from './text-relay-host.js';
 import { automaticCycle, prepareAutomaticRequest } from './automatic.js';
 import { parseAction, validateAction, routeFor, siteFor, newNonce, reserveRequest, makeCapsule, byteLength, fail, PROTOCOL } from './protocol.js';
 import './conversation-format.js';
@@ -22,7 +23,7 @@ export function bindSession(previous, { route, token, documentId, installationId
 }
 export function publicState(state) {
   const preview = state.preview && Object.fromEntries(Object.entries(state.preview).filter(([key]) => !['source_request', 'result_fingerprint'].includes(key)));
-  return { installation_id: state.installation_id || null, extension_id: state.extension_id || null, route: state.route, platform: siteFor(state.route).id, platform_name: siteFor(state.route).name, capabilities: siteFor(state.route).capabilities, nonce: state.nonce, session_ref: state.session_ref, preview, connection: state.connection || null, capture_confirmation_valid: !!state.capture_approval, last_capture_at: state.last_capture_at || null, last_read_at: state.last_read_at || null, auto_capture_note: state.auto_capture_note || null, automatic_status: state.automatic_status || null, automatic_error: state.automatic_error || null, relay: relayState(state) };
+  return { installation_id: state.installation_id || null, extension_id: state.extension_id || null, route: state.route, platform: siteFor(state.route).id, platform_name: siteFor(state.route).name, capabilities: siteFor(state.route).capabilities, nonce: state.nonce, session_ref: state.session_ref, preview, connection: state.connection || null, capture_confirmation_valid: !!state.capture_approval, last_capture_at: state.last_capture_at || null, last_read_at: state.last_read_at || null, auto_capture_note: state.auto_capture_note || null, automatic_status: state.automatic_status || null, automatic_error: state.automatic_error || null, relay: relayState(state), text_relay: textPublic(state) };
 }
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
@@ -155,6 +156,7 @@ export class Broker {
     let state = await this.current(tabId, message);
     const command = message.command;
     if (command === 'inspect') return publicState(state);
+    if (state.text_relay) fail('请使用本会话的简洁接力面板；不会继续处理旧协议');
     if (['pause', 'resume', 'disable', 'enable'].includes(command)) {
       const old = relayState(state);
       const paused = ['pause', 'disable'].includes(command);
@@ -226,6 +228,19 @@ export class Broker {
     return publicState(await this.current(tabId, message));
   }
   async handle(message, sender) {
+    if (message?.kind === 'text_control') {
+      const tab = await this.api.getTab(sender.tab?.id);
+      verifyContent(sender, this.api.id, tab.url, message.route);
+      const operation = async () => {
+        const state = await this.current(tab.id, message);
+        if (state.documentId !== sender.documentId) fail('简洁接力操作来自过期文档');
+        const result = await textCommand(this, tab.id, message);
+        if (message.command === 'copy') return result;
+        return publicState(await this.current(tab.id, message));
+      };
+      // 取消与暂停不可排在耗时检索之后；host 另用短写锁和 run epoch 防晚到保存。
+      return ['pause', 'cancel'].includes(message.command) ? operation() : this.serial(tab.id, operation);
+    }
     if (message?.kind === 'relay_control') {
       const tab = await this.api.getTab(sender.tab?.id);
       verifyContent(sender, this.api.id, tab.url, message.route);
@@ -241,6 +256,8 @@ export class Broker {
       return this.serial(tab.id, async () => {
         const state = await this.current(tab.id, message);
         if (state.documentId !== sender.documentId) fail('自动请求来自过期文档');
+        // text/2 自己在短写锁内维护状态；不可再用旧全对象保存覆盖并行取消。
+        if (state.text_relay) return textCycle(this, tab.id, message);
         try {
           const result = await automaticCycle(this, tab.id, message);
           const current = await this.current(tab.id, message);
@@ -264,9 +281,12 @@ export class Broker {
       const tab = await this.api.getTab(sender.tab?.id);
       const route = verifyContent(sender, this.api.id, tab.url, message.route);
       return this.serial(tab.id, async () => {
-        const state = bindSession(await this.api.load(tab.id), { route, token: message.token, documentId: sender.documentId, installationId: this.api.installationId ? await this.api.installationId() : null });
-        state.extension_id = this.api.id;
-        await this.api.save(tab.id, state);
+        const previous = await this.api.load(tab.id);
+        const state = bindSession(previous, { route, token: message.token, documentId: sender.documentId, installationId: this.api.installationId ? await this.api.installationId() : null });
+        if (state !== previous || state.extension_id !== this.api.id) {
+          state.extension_id = this.api.id;
+          await this.api.save(tab.id, state);
+        }
         const { preview: _preview, ...binding } = publicState(state);
         return binding;
       });
@@ -286,6 +306,11 @@ export class Broker {
     }
     return this.serial(tabId, async () => {
       let state = await this.current(tabId, message);
+      if (state.text_relay && !['check_state', 'connection'].includes(message.kind)) fail('本会话正在简洁接力，请使用网页面板；先重新连接结束接力，再使用旧资料或会话导出操作');
+      if (state.text_relay && message.kind === 'connection') {
+        const connection = await this.userNative(tabId, message, state, 'connection', {});
+        return { ...publicState(await this.current(tabId, message)), connection };
+      }
       if (message.kind === 'check_state') return { status: 'current' };
       if (message.kind === 'pair') {
         const pending = await this.userNative(tabId, message, state, 'request_pairing', {});

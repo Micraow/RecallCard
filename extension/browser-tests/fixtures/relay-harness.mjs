@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { Broker } from '../../broker.js';
 export const EXT = 'abcdefghijklmnopabcdefghijklmnop';
-export async function relayHarness(browser, platform = 'chatgpt') {
+export async function relayHarness(browser, platform = 'chatgpt', options = {}) {
   const origin = platform === 'deepseek' ? 'https://chat.deepseek.com' : 'https://chatgpt.com';
   const path = platform === 'deepseek' ? '/a/chat/s/relay-synthetic' : '/c/relay-synthetic';
   const page = await browser.newPage({ viewport: { width: 1080, height: 800 } });
@@ -15,11 +15,12 @@ export async function relayHarness(browser, platform = 'chatgpt') {
   const calls = [], writes = [];
   const grant = { capture: true, recall: true, provider_disclosure: true, permission_revision: 1, platform };
   const sender = () => ({ id: EXT, origin, url: page.url(), tab: { id: 1, url: page.url() }, frameId: 0, documentId: 'relay-document' });
-  const broker = new Broker({ id: EXT, installationId: async () => '11111111-1111-4111-8111-111111111111', popupUrl: `chrome-extension://${EXT}/popup.html`, getTab: async () => ({ id: 1, active: true, url: page.url() }), load: async () => structuredClone(state), save: async (_, next) => { state = structuredClone(next); }, now: () => now += 2000,
+  const broker = new Broker({ id: EXT, installationId: async () => '11111111-1111-4111-8111-111111111111', popupUrl: `chrome-extension://${EXT}/popup.html`, getTab: async () => ({ id: 1, active: true, url: page.url() }), load: async () => structuredClone(state), save: async (_, next) => { state = structuredClone(next); }, now: () => now += options.textRelay ? 1 : 2000,
     content: async (_, message) => { if (message.kind === 'insert') writes.push(message); return page.evaluate(({ message, EXT }) => new Promise(resolve => window.contentListener(message, { id: EXT, url: `chrome-extension://${EXT}/background.js` }, resolve)), { message, EXT }); },
     native: async (_, request) => {
       calls.push(request);
-      if (request.action === 'connection') return { ok: true, result: { connection_id: 'c'.repeat(64), capture_enabled: true, automation: grant, state: 'reachable' } };
+      if (options.nativeResult) { const custom = await options.nativeResult(request); if (custom !== undefined) return { ok: true, result: custom }; }
+      if (request.action === 'connection') return { ok: true, result: { connection_id: 'c'.repeat(64), capture_enabled: true, read_scopes: ['synthetic'], automation: grant, state: 'reachable' } };
       if (request.action === 'automatic_capture') return { ok: true, result: { events_added: request.arguments.conversation.messages.length, events_seen: request.arguments.conversation.messages.length } };
       if (request.action === 'authorized_read') {
         if (editDuringRead) { editDuringRead = false; await page.locator('main textarea').fill('用户在等候中修改的草稿'); }

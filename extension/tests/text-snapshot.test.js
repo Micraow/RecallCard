@@ -12,18 +12,20 @@ packet.hash=createHash('sha256').update(packet.text).digest('hex');
 const wrapped=`[RecallCard ${nonce}:${packet.id}]\n${packet.text}\n[/RecallCard ${nonce}:${packet.id}]`;
 const frame='RECALLCARD/2 T_abcdefghijklmnop\n{"action":"search","query":"合成问题"}\nEND RECALLCARD';
 const row=(role,id,text,complete=true)=>({role,id,text,complete,getAttribute(key){return key==='data-message-id'?id:key==='data-message-author-role'?role:'';},querySelector(){return null;}});
-async function harness(rows) {
-  let listener,clock=10000;
+async function harness(rows, options={}) {
+  let listener,clock=10000,overlayAction;
+  const calls=[];
   const location={href:'https://chatgpt.com/c/synthetic'},window={addEventListener(){}};window.top=window;
-  const doc={visibilityState:'visible'};
+  const doc={visibilityState:'visible',body:options.overlay?{}:null};
+  class Overlay { constructor(_doc,action){overlayAction=action;}update(value){this.state=value;}reset(){}error(){} }
   class Composer{find(){return null;}text(){return '';}reset(){return [];}status(){return [];}draftIds(){return [];} }
   class Conversation{nodes(){return rows;}protocolText(node){return node.text;}streaming(){return false;}completed(node){return node.complete;}}
-  const chrome={runtime:{id:'test-extension',getURL:path=>'chrome-extension://test-extension/'+path,onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>({ok:true,result:{route:m.route,nonce,session_ref:'chatgpt:'+m.token}})}};
+  const chrome={runtime:{id:'test-extension',getURL:path=>'chrome-extension://test-extension/'+path,onMessage:{addListener:fn=>listener=fn},sendMessage:async m=>{calls.push(m);if(options.send){const value=await options.send(m);if(value!==undefined)return value;}return{ok:true,result:{route:m.route,nonce,session_ref:'chatgpt:'+m.token,...(options.overlay?{text_relay:{phase:'waiting_reply'}}:{})}};}}};
   class Clock extends Date {static now(){return clock;}}
-  vm.runInNewContext(source,{window,document:doc,location,chrome,crypto:webcrypto,TextEncoder,Date:Clock,RecallCardSites:globalThis.RecallCardSites,RecallCardComposerAdapter:Composer,RecallCardConversationAdapter:Conversation,RecallCardConversationFormat:globalThis.RecallCardConversationFormat,setInterval(){}});
+  vm.runInNewContext(source,{window,document:doc,location,chrome,crypto:webcrypto,TextEncoder,Date:Clock,RecallCardSites:globalThis.RecallCardSites,RecallCardComposerAdapter:Composer,RecallCardConversationAdapter:Conversation,RecallCardConversationFormat:globalThis.RecallCardConversationFormat,RecallCardRelayOverlay:options.overlay?Overlay:undefined,setInterval(){}});
   const send=m=>new Promise(resolve=>listener(m,{id:'test-extension',url:chrome.runtime.getURL('background.js')},resolve));
   const binding=(await send({kind:'describe'})).result;clock+=2000;
-  return {snapshot:()=>send({kind:'text_snapshot',...binding,packet}),rows};
+  return {snapshot:()=>send({kind:'text_snapshot',...binding,packet}),rows,action:(...args)=>overlayAction(...args),calls};
 }
 test('完整唯一用户包才证明发送，整条完成助手回复关联在发送之后',async()=>{
   const h=await harness([row('user','u1','问题\n'+wrapped),row('assistant','a1',frame)]);
@@ -43,4 +45,21 @@ test('历史助手在发送之前、引用无法无损恢复时回退，不剥�
   for(const rows of [[row('assistant','a0',frame),row('user','u1',wrapped)],[row('user','u1',wrapped),row('assistant','a1',null)]]){
     const r=await (await harness(rows)).snapshot();assert.equal(r.result.assistant,null);
   }
+});
+
+test('真实content暂停不先bind排队，并阻止取消后迟到的普通操作继续',async()=>{
+  let release,waiting=false,block=false;
+  const gate=new Promise(resolve=>release=resolve);
+  const h=await harness([],{overlay:true,send:async message=>{
+    if(message.kind==='bind'&&block){waiting=true;await gate;}
+    if(message.kind==='text_control')return{ok:true,result:{text_relay:{phase:'paused'}}};
+  }});
+  block=true;
+  const pending=h.action('execute',{text:frame});
+  await new Promise(resolve=>setTimeout(resolve,0));assert.equal(waiting,true);
+  const before=h.calls.length;
+  await h.action('pause');
+  assert.equal(h.calls.length,before+1);assert.equal(h.calls.at(-1).kind,'text_control');assert.equal(h.calls.at(-1).command,'pause');
+  release();await assert.rejects(pending,/暂停|变化/);
+  assert.equal(h.calls.some(m=>m.kind==='text_control'&&m.command==='execute'),false);
 });

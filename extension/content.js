@@ -24,6 +24,7 @@
   let lastMutationAt = Date.now();
   let automaticBusy = false;
   let locallyPaused = false;
+  let relayActionEpoch = 0;
   let overlay = null;
   const composerFingerprint = async () => {
     try {
@@ -33,7 +34,7 @@
     } catch { return null; }
   };
   const invalidate = () => {
-    warnings = adapter.reset();
+    warnings = adapter.reset(); relayActionEpoch++;
     token = crypto.randomUUID(); binding = null; manualConfirmed = false; capture = null; automationObserved = false; lastMutationAt = Date.now();
     overlay?.reset();
   };
@@ -218,14 +219,26 @@
   });
   if (globalThis.RecallCardRelayOverlay && document.body) {
     overlay = new globalThis.RecallCardRelayOverlay(document, async (command, extra = {}) => {
-      if (['pause', 'disable'].includes(command)) locallyPaused = true;
-      const state = await bind(true);
-      const result = await chrome.runtime.sendMessage({ kind: 'relay_control', route, nonce: state.nonce, session_ref: state.session_ref, command, ...extra });
+      const stop = ['pause', 'cancel', 'text_pause', 'text_cancel'].includes(command);
+      if (stop) { locallyPaused = true; relayActionEpoch++; }
+      if (command === 'disable') locallyPaused = true;
+      const actionEpoch = relayActionEpoch;
       checkNavigation();
-      if (!binding || binding.nonce !== state.nonce || binding.session_ref !== state.session_ref) throw new Error('操作期间会话已变化，旧结果已废弃');
+      // 生命周期命令必须绕过 bind 的普通串行队列，才能中断正在等待本机的读取。
+      const state = stop ? binding : await bind(true);
+      if (!state) throw new Error('当前对话尚未绑定，请稍后重新连接');
+      if (!stop && actionEpoch !== relayActionEpoch) throw new Error('操作已暂停、结束或换页，旧请求不会继续');
+      const forcedText = command.startsWith('text_');
+      const textMode = forcedText || (!!state.text_relay || !!overlay?.state?.text_relay) && command !== 'inspect';
+      const normalized = command === 'text_start' ? 'start' : command.replace(/^text_/u, '');
+      const packet = state.text_relay?.packet;
+      const result = await chrome.runtime.sendMessage({ kind: textMode ? 'text_control' : 'relay_control', route, nonce: state.nonce, session_ref: state.session_ref, command: normalized, ...(textMode && normalized === 'delivered' ? { packet_id: packet?.id, packet_hash: packet?.hash, confirmed: true } : {}), ...extra });
+      checkNavigation();
+      if (!binding || binding.nonce !== state.nonce || binding.session_ref !== state.session_ref || !stop && actionEpoch !== relayActionEpoch) throw new Error('操作期间会话或接力已变化，旧结果已废弃');
       if (!result?.ok) throw new Error(result?.error || '接力操作未完成');
-      if (['resume', 'enable'].includes(command)) locallyPaused = false;
-      if (result.result?.relay) overlay.update(result.result);
+      if (['resume', 'enable', 'start'].includes(normalized)) locallyPaused = false;
+      if (normalized === 'start') automationObserved = true;
+      if (result.result?.relay || result.result?.text_relay) overlay.update(result.result);
       return result.result;
     });
   }
