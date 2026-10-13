@@ -448,15 +448,14 @@ fn parsing_checkpoint_and_commit_pause_resume_keep_counts_and_sources() {
     // 恢复时暂时锁忙不得丢掉已确认提交数量。
     let writer = EventStreamWriter::open(&vault).unwrap();
     reopened.resume(&job.job_id, "project:test").unwrap();
-    let blocked = reopened.run(&job.job_id, "project:test").unwrap();
-    assert_eq!(blocked.error.as_ref().unwrap().code, ErrorCode::Conflict);
+    let conflict = reopened.run(&job.job_id, "project:test").unwrap_err();
+    assert_eq!(conflict.code, ErrorCode::Conflict);
+    let blocked = reopened.status(&job.job_id, "project:test").unwrap();
+    assert_eq!(blocked.state, JobState::Queued);
+    assert!(blocked.error.is_none());
     assert_eq!(blocked.progress.events_added, paused.progress.events_added);
-    assert_eq!(
-        blocked.error.unwrap().committed_events,
-        paused.progress.events_added
-    );
+    assert_eq!(conflict.committed_events, paused.progress.events_added);
     drop(writer);
-    reopened.resume(&job.job_id, "project:test").unwrap();
     let complete = reopened.run(&job.job_id, "project:test").unwrap();
     assert_eq!(complete.state, JobState::Completed);
     assert_eq!(complete.progress.events_added, 480);

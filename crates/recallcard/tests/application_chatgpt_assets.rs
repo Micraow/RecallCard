@@ -56,6 +56,107 @@ fn run(bytes: Vec<u8>, id: &str) -> (tempfile::TempDir, Vault, ImportService, Jo
     (dir, vault, service, result)
 }
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\nDATA";
+
+#[test]
+fn desktop_worker_retries_transient_vault_contention_without_user_reimport() {
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let source = dir.path().join("official.zip");
+    std::fs::write(&source, zip(files(Some(PNG)))).unwrap();
+    let service = ImportService::new(&vault).unwrap();
+    let job = service
+        .submit(ImportRequest {
+            request_id: "writer-contention".into(),
+            paths: vec![source],
+            scope: "personal".into(),
+            format: "auto".into(),
+        })
+        .unwrap();
+    let writer = recallcard::EventStreamWriter::open(&vault).unwrap();
+    service.start_worker().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = service.status(&job.job_id, "personal").unwrap();
+        assert_ne!(state.state, JobState::Failed);
+        if state.state == JobState::Queued && state.phase == JobPhase::Committing {
+            assert_eq!(state.progress.events_added, 0);
+            assert!(state.error.is_none());
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(vault.events().unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_dir(vault.root().join("objects"))
+            .unwrap()
+            .count(),
+        0
+    );
+    drop(writer);
+    loop {
+        let state = service.status(&job.job_id, "personal").unwrap();
+        assert_ne!(state.state, JobState::Failed);
+        if state.state == JobState::Completed {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(vault.events().unwrap().len(), 3);
+    assert_eq!(
+        std::fs::read_dir(vault.root().join("objects"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn queued_contention_respects_pause_before_any_fact_commit() {
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let source = dir.path().join("official.zip");
+    std::fs::write(&source, zip(files(Some(PNG)))).unwrap();
+    let service = ImportService::new(&vault).unwrap();
+    let job = service
+        .submit(ImportRequest {
+            request_id: "pause-contention".into(),
+            paths: vec![source],
+            scope: "personal".into(),
+            format: "auto".into(),
+        })
+        .unwrap();
+    let writer = recallcard::EventStreamWriter::open(&vault).unwrap();
+    assert_eq!(
+        service.run(&job.job_id, "personal").unwrap_err().code,
+        ErrorCode::Conflict
+    );
+    assert_eq!(
+        service.status(&job.job_id, "personal").unwrap().state,
+        JobState::Queued
+    );
+    service.pause(&job.job_id, "personal").unwrap();
+    drop(writer);
+    service.start_worker().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        service.status(&job.job_id, "personal").unwrap().state,
+        JobState::Paused
+    );
+    assert!(vault.events().unwrap().is_empty());
+    service.resume(&job.job_id, "personal").unwrap();
+    service.start_worker().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while service.status(&job.job_id, "personal").unwrap().state != JobState::Completed {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(vault.events().unwrap().len(), 3);
+}
+
 #[test]
 fn thin_archive_preserves_attachment_only_event_and_real_topology() {
     let (_dir, vault, service, result) = run(zip(files(None)), "thin");

@@ -659,6 +659,17 @@ impl ImportService {
                 m.status.can_resume = false;
                 m.status.error = None;
             }
+            Err(mut e) if e.code == ErrorCode::Conflict && e.retryable => {
+                // 桌面读取与其他本机写入可能暂占 Vault 锁。保留同一已核验任务，
+                // 交给 worker 原有的有界间隔重试；不能把一次锁忙变成永久失败。
+                e.committed_events = m.status.progress.events_added;
+                m.status.state = JobState::Queued;
+                m.status.can_resume = false;
+                m.status.error = None;
+                m.status.updated_at = Utc::now();
+                self.save(&m)?;
+                return Err(e);
+            }
             Err(mut e) => {
                 e.committed_events = m.status.progress.events_added;
                 m.status.state = if e.code == ErrorCode::Cancelled {
