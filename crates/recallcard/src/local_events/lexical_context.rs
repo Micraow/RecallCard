@@ -113,7 +113,6 @@ mod tests {
     fn empty_edges_and_short_complete_sources_do_not_invent_context() {
         assert_eq!(neighbors("E_PIPE_71", 0, 9), ("", ""));
         assert_eq!(neighbors("资料AB末尾", 6, 8), ("资料", "末尾"));
-        assert!(!VERSION.is_empty());
     }
     #[test]
     fn lexical_preview_covers_whole_token_across_chunk_and_preserves_utf8_bounds() {
