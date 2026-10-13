@@ -24,3 +24,19 @@ test('未配置本机索引的自然问题分支仍解释否定时间与同义�
  for(const expected of ['本地按关键词','不会改用云编码','按问题寻找字面候选','否定、相对时间和同义改写','候选不等于答案'])assert.ok(notes.includes(expected),expected);
  assert.doesNotMatch(notes,/已发送到.*编码服务|已结合 Memory 语义/);
 });
+
+import { recallSupportNote } from '../src/service/portable.ts';
+test('candidate support labels never claim relevance, absence, or answerability',()=>{
+ const row={ref:'event:synthetic',kind:'event',text:'synthetic'};
+ assert.equal(recallSupportNote(row),'');
+ assert.match(recallSupportNote({...row,retrieval_support:{kind:'semantic_candidate'}}),/可能无关/);
+ assert.match(recallSupportNote({...row,retrieval_support:{kind:'semantic_candidate',protected_anchors:1}}),/不表示整个事件不含/);
+ assert.match(recallSupportNote({...row,retrieval_support:{protected:true}}),/仍未判断是否足以回答/);
+ assert.match(recallSupportNote({...row,retrieval_support:{limited:true}}),/超出.*预算/);
+ assert.match(recallSupportNote({...row,retrieval_support:{kind:'lexical_candidate'}}),/仍需核对/);
+});
+
+test('verification resource limits are not mislabeled as only a text cap',()=>{
+ const notes=recallCoverageNotes({results:[],truncated:true,coverage:{local_event_semantic:true,scopes:[{scope:'personal',state:'ready',verification_limited:true}]}}).join('\n');
+ assert.match(notes,/时间或资源门槛限制/);assert.match(notes,/部分候选尚未核验/);
+});

@@ -100,6 +100,28 @@ impl Locator {
         })
     }
 }
+fn merge_candidates(groups: &[Vec<Value>]) -> Vec<Value> {
+    let mut rows = vec![];
+    // Never compare cosine across scopes/models. Preserve order within tiers.
+    for protected in [true, false] {
+        for i in 0..20 {
+            for group in groups {
+                if let Some(row) = group
+                    .iter()
+                    .filter(|row| (row["retrieval_support"]["protected"] == true) == protected)
+                    .nth(i)
+                {
+                    if rows.len() < LIMIT {
+                        let mut row = row.clone();
+                        row["final_rank"] = json!(rows.len() + 1);
+                        rows.push(row);
+                    }
+                }
+            }
+        }
+    }
+    rows
+}
 impl Context<'_> {
     pub fn recall_search(&self, args: RecallSearchArgs) -> Result<Value> {
         self.recall_question(&args.query, "all")
@@ -182,7 +204,7 @@ impl Context<'_> {
                             row["relevance"] = json!("unassessed");
                         }
                         partial |= page["truncated"] == true;
-                        coverage.push(json!({"scope":scope,"state":"ready","candidates":rows.len(),"truncated":page["truncated"],"query_encoding":page["coverage"]["semantic_query_encoding"]}));
+                        coverage.push(json!({"scope":scope,"state":"ready","candidates":rows.len(),"truncated":page["truncated"],"query_encoding":page["coverage"]["semantic_query_encoding"],"candidate_policy":page["coverage"]["candidate_policy"],"verified_candidates":page["coverage"]["verified_candidates"],"verification_limited":page["coverage"]["candidate_verification_limited"]}));
                         bindings.push((index, epoch, config));
                         groups.push(rows);
                     }
@@ -243,24 +265,21 @@ impl Context<'_> {
                 };
                 value["id"] = json!(locator.id());
                 value["relevance"] = json!("unassessed");
+                let support = crate::local_events::ranking::assess_excerpt(
+                    query,
+                    value["text"].as_str().unwrap_or(""),
+                    value["text_range"]["start_byte"] == 0,
+                    value["text_range"]["end_byte"] == value["text_range"]["total_bytes"],
+                );
+                value["retrieval_support"] = json!({"kind":"lexical_candidate","match_scope":"returned_excerpt","protected":support.complete,"protected_anchors":support.protected_anchors,"matched_protected_anchors":support.matched_protected_anchors,"limited":support.limited});
                 rows.push(value);
             }
             groups.push(rows);
         }
         let candidate_count: usize = groups.iter().map(Vec::len).sum();
-        let mut rows = vec![];
-        // 不比较不同模型空间的 cosine；按每路原始排名稳定轮询。
-        for i in 0..20 {
-            for group in &groups {
-                if let Some(row) = group.get(i) {
-                    if rows.len() < LIMIT {
-                        rows.push(row.clone());
-                    }
-                }
-            }
-        }
+        let rows = merge_candidates(&groups);
         partial |= rows.len() < candidate_count;
-        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"budget_limited":budget_limited,"local_event_semantic":!bindings.is_empty(),"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"stable_round_robin_not_cross_model_score","note":"候选不是答案；未配置或未覆盖不表示没有历史。旧search仍可显式进行关键词检索。"}});
+        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"budget_limited":budget_limited,"local_event_semantic":!bindings.is_empty(),"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"protected_excerpt_tiers_then_stable_round_robin_not_cross_model_score","note":"候选不是答案；未配置或未覆盖不表示没有历史。精确锚点只在有界候选预览中核对，语义相近也可能完全无关；尚无经过校准的相关性或可回答性判定。旧search仍可显式进行关键词检索。"}});
         if result["results"].as_array().unwrap().is_empty() && partial {
             result["status"] = json!(if budget_limited {
                 "budget_exhausted"
@@ -340,5 +359,50 @@ impl Context<'_> {
             return Err("读取结果超过固定预算".into());
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod ranking_tests {
+    use super::*;
+    fn row(id: &str, protected: bool) -> Value {
+        json!({"ref":id,"retrieval_support":{"protected":protected}})
+    }
+    #[test]
+    fn protection_precedes_other_scopes_and_preserves_fair_ties() {
+        let rows = merge_candidates(&[
+            vec![row("a-semantic", false), row("a-exact", true)],
+            vec![row("b-exact", true), row("b-semantic", false)],
+        ]);
+        let refs: Vec<_> = rows.iter().map(|r| r["ref"].as_str().unwrap()).collect();
+        assert_eq!(refs, vec!["a-exact", "b-exact", "a-semantic", "b-semantic"]);
+        assert_eq!(rows[3]["final_rank"], 4);
+    }
+    #[test]
+    fn no_protected_anchor_retains_previous_scope_round_robin() {
+        let rows = merge_candidates(&[
+            vec![row("a1", false), row("a2", false)],
+            vec![row("b1", false)],
+        ]);
+        assert_eq!(
+            rows.iter()
+                .map(|r| r["ref"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a1", "b1", "a2"]
+        );
+    }
+    #[test]
+    fn cap_cannot_put_semantic_candidates_ahead_of_protected_candidates() {
+        let all = vec![
+            (0..20)
+                .map(|i| row(&format!("semantic-{i}"), false))
+                .collect(),
+            (0..20).map(|i| row(&format!("exact-{i}"), true)).collect(),
+        ];
+        let rows = merge_candidates(&all);
+        assert_eq!(rows.len(), LIMIT);
+        assert!(rows
+            .iter()
+            .all(|r| r["retrieval_support"]["protected"] == true));
     }
 }

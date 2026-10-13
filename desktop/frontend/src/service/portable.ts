@@ -53,7 +53,17 @@ export function recallChoices(page: SearchPage | null | undefined) {
     label: row.conversation_title || Array.from(row.text || row.content || row.snippet || row.ref).slice(0, 72).join(""),
     snippet: Array.from(row.text || row.content || row.snippet || "").slice(0, 240).join(""),
     role: row.role, evidence: row.evidence || "", kind: row.kind,
+    support_note: recallSupportNote(row),
   }));
 }
 export const currentRecallQuery = (goal: string, searched: string, page: SearchPage | null | undefined) =>
   !!page && !!goal.trim() && goal.trim() === searched.trim();
+
+export function recallSupportNote(row: import('./types').SearchRow): string {
+ const support=row.retrieval_support;
+ if(!support)return '';
+ if(support.limited)return '问题超出片段锚点核对预算，保留原候选顺序；请缩短问题或打开来源。';
+ if(support.protected)return '检索片段含区分大小写的精确锚点，已在候选窗口中优先；仍未判断是否足以回答。';
+ if(support.kind==='lexical_candidate')return '字面候选，相关性与当前是否成立仍需核对来源。';
+ return (support.protected_anchors||0)>0?'这段检索片段没有完整匹配精确锚点；只保留为语义候选，不表示整个事件不含该标识。':'仅按语义相似度入选，可能无关；请核对原文后选择。';
+}

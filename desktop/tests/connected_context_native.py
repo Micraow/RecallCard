@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import urlopen
 
 from first_use_native import FirstUseJourney, JourneyDriver, DIALOG, ORIGINAL, UPDATE
-from native_smoke import ROOT, wait_for, run
+from native_smoke import ROOT, ELEMENT, wait_for, run
 
 
 class ConnectedJourney(FirstUseJourney):
@@ -178,6 +178,13 @@ class ConnectedJourney(FirstUseJourney):
             assert "synthetic-vector-query" in requests
             assert browser.observe("return document.querySelector('dialog fieldset label')?.textContent.includes(" + json.dumps(UPDATE) + ")") is True
             assert self.content("此入口没有云回退")
+            assert self.content("相似候选可能完全无关")
+            support_selector = "dialog fieldset label small.context-note"
+            support_element = wait_for(lambda: browser.find(support_selector), "候选核对说明真实存在")
+            browser.command("POST", "/execute/sync", {"script": "arguments[0].scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});", "args": [{ELEMENT: support_element}]})
+            support_text = "这段检索片段没有完整匹配精确锚点；只保留为语义候选，不表示整个事件不含该标识。"
+            wait_for(lambda: self.exact_visible_text(support_selector, support_text), "候选不确定说明全文可见")
+            self.capture("13-candidate-support-visible")
             browser.button("预览将复制的内容", "//dialog")
             wait_for(lambda: bool(browser.observe("return document.querySelector('#portable-preview')?.value")), "本机Event命中可进入原上下文预览")
             assert UPDATE in browser.observe("return document.querySelector('#portable-preview').value")
@@ -187,12 +194,14 @@ class ConnectedJourney(FirstUseJourney):
             original = next(event for event in self.events() if event.get("content") == UPDATE)
             assert recalled["results"][0]["ref"] == "event:" + original["id"]
             assert recalled["coverage"]["cloud_fallback"] is False
+            assert recalled["results"][0]["relevance"] == "unassessed"
+            assert recalled["results"][0]["retrieval_support"]["protected"] is False
             resolved = self.mcp_tool(mcp_config, "recall_fetch", {"id": recalled["results"][0]["id"]})
             assert resolved["results"][0]["ref"] == recalled["results"][0]["ref"]
             assert resolved["results"][0]["snapshot"] == recalled["results"][0]["snapshot"]
             assert resolved["results"][0]["text"] == UPDATE
             assert self.events() == before and not self.memories()
-            self.local_event_acceptance = {"fake_encoder_contract_only": True, "actual_model_quality_verified": False, "actual_loopback_http": True, "raw_event_without_memory": True, "separate_explicit_approval": True, "no_calls_before_index_request": True, "canonical_unchanged": True, "new_query_local_encoded": True, "same_source_in_context_preview": True, "managed_mcp_same_event_and_snapshot": True, "cloud_fallback": False}
+            self.local_event_acceptance = {"fake_encoder_contract_only": True, "actual_model_quality_verified": False, "actual_loopback_http": True, "raw_event_without_memory": True, "separate_explicit_approval": True, "no_calls_before_index_request": True, "canonical_unchanged": True, "new_query_local_encoded": True, "same_source_in_context_preview": True, "managed_mcp_same_event_and_snapshot": True, "candidate_support_visible": True, "candidate_not_answerable_claim": True, "cloud_fallback": False}
             self.checkpoint("本机新问题返回原Event并接入复制预览而不冒充真实模型质量")
             browser.button("关闭", "//dialog//div[contains(@class,'modal-footer')]")
             browser.button("设置")

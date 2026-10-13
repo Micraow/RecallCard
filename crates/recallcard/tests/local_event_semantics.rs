@@ -275,3 +275,94 @@ fn shared_local_gateway_reaches_mcp_native_and_keeps_current_grants() {
     event(&vault, "personal", "synthetic-beta 新资料", "user_input");
     assert!(transport::invoke(&context, "recall_fetch", json!({"id":id})).is_err());
 }
+
+#[test]
+fn verified_identifier_beyond_twenty_semantic_candidates_is_reordered_before_budget() {
+    let (_server, endpoint) = server();
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    for n in 0..25 {
+        event(
+            &vault,
+            "personal",
+            &format!("synthetic distractor {n}, no requested code"),
+            "user_input",
+        );
+    }
+    // Deliberately less similar according to the fixed encoder, yet exact text.
+    let exact = event(
+        &vault,
+        "personal",
+        "synthetic-alpha E_PIPE_71 原始记录",
+        "user_input",
+    );
+    let python_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../python")
+        .canonicalize()
+        .unwrap();
+    let index = LocalEvents::configure(
+        &vault,
+        "personal",
+        setup(endpoint),
+        "python3".into(),
+        python_path,
+    )
+    .unwrap();
+    refresh(&index);
+    let found = index.search("E_PIPE_71", 2).unwrap();
+    assert_eq!(found["results"][0]["ref"], exact);
+    assert_eq!(found["results"][0]["semantic_rank"], 26);
+    assert_eq!(found["results"][0]["scope_rank"], 1);
+    assert_eq!(found["results"][0]["score"], 0.0);
+    assert_eq!(found["results"][0]["score_kind"], "cosine");
+    assert_eq!(found["results"][0]["retrieval_support"]["protected"], true);
+    assert_eq!(
+        found["results"][0]["retrieval_support"]["match_scope"],
+        "returned_excerpt"
+    );
+    assert_eq!(found["results"][0]["relevance"], "unassessed");
+    assert_eq!(found["coverage"]["verified_candidates"], 26);
+    assert_eq!(found["truncated"], true);
+    let unknown = index.search("E_PIPE_999", 2).unwrap();
+    assert!(unknown["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["retrieval_support"]["protected"] == false && r["relevance"] == "unassessed"));
+    assert_eq!(unknown["results"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn original_neighbor_prevents_a_chunk_boundary_from_forging_an_exact_identifier() {
+    let (_server, endpoint) = server();
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    // The first 256-byte chunk ends with E_PIPE_71, but the original continues 0.
+    let clipped = event(
+        &vault,
+        "personal",
+        &format!("{}E_PIPE_710", " ".repeat(247)),
+        "user_input",
+    );
+    let python_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../python")
+        .canonicalize()
+        .unwrap();
+    let index = LocalEvents::configure(
+        &vault,
+        "personal",
+        setup(endpoint),
+        "python3".into(),
+        python_path,
+    )
+    .unwrap();
+    refresh(&index);
+    let found = index.search("E_PIPE_71", 2).unwrap();
+    assert_eq!(found["results"][0]["ref"], clipped);
+    assert!(found["results"][0]["text"]
+        .as_str()
+        .unwrap()
+        .ends_with("E_PIPE_71"));
+    assert_eq!(found["results"][0]["retrieval_support"]["protected"], false);
+    assert_eq!(found["results"][0]["relevance"], "unassessed");
+}

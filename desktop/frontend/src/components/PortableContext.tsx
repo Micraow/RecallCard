@@ -72,7 +72,7 @@ export function PortableContextDialog({ service, initialResults, initialGoal, cl
           <input type="checkbox" checked={refs.includes(choice.ref)} disabled={!refs.includes(choice.ref) && refs.length >= 8}
             onChange={e => { setRefs(e.target.checked ? [...refs, choice.ref] : refs.filter(ref => ref !== choice.ref)); invalidate(); }} />
           <span><Badge>{choice.role === "user" ? "用户原话" : choice.role === "assistant" ? "AI 回答，非用户事实" : choice.kind === "memory" ? "记忆 · " + evidenceLabel(choice.evidence) : "原始来源"}</Badge> {choice.label}
-            <span className="portable-excerpt">{choice.snippet}</span><small>{choice.ref}</small></span>
+            <span className="portable-excerpt">{choice.snippet}</span>{choice.support_note && <small className="context-note">{choice.support_note}</small>}<small>{choice.ref}</small></span>
         </label>)}
       </fieldset>}
       <p className="context-note">默认选择前 8 条候选，可以取消后换选其他来源。不会复制：未勾选的 {Math.max(0, choices.length - refs.length)} 条结果、其他历史消息、附件原件及附件正文。稳定背景会一并带入，完整内容见下方预览；片段不代表完整会话或同一分支。</p>

@@ -11,6 +11,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
 };
+pub(crate) mod ranking;
 mod snapshot;
 mod worker;
 use snapshot::Manifest;
@@ -434,17 +435,28 @@ impl<'a> LocalEvents<'a> {
         {
             return Err("local_event_coverage_mismatch".into());
         }
-        let mut results = Vec::new();
+        let query_support = ranking::assess(query, "");
+        let reorder = !query_support.limited && query_support.protected_anchors > 0;
+        let mut verified = Vec::new();
+        let mut verified_bytes = 0usize;
         let mut seen = BTreeSet::new();
         let mut rejected = 0usize;
-        let mut bytes = 0usize;
+        let mut source_bytes = 0usize;
+        let mut verification_limited = false;
         let rows = candidates["results"]
             .as_array()
             .ok_or("local_event_response_invalid")?;
         if rows.len() > 100 {
             return Err("local_event_response_limit".into());
         }
-        for row in rows {
+        for (semantic_index, row) in rows.iter().enumerate() {
+            if !reorder && (verified.len() >= limit || verified_bytes >= 24576) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline || source_bytes >= 32 * 1024 * 1024 {
+                verification_limited = true;
+                break;
+            }
             let reference = row["ref"].as_str().ok_or("local_event_response_invalid")?;
             if !seen.insert(reference.to_owned()) {
                 continue;
@@ -463,6 +475,7 @@ impl<'a> LocalEvents<'a> {
             }
             let event = snapshot::read_source(self.vault, &manifest, source)?;
             let text = event.data.text();
+            source_bytes = source_bytes.saturating_add(text.len());
             let start = row["start_byte"]
                 .as_u64()
                 .ok_or("local_event_response_invalid")? as usize;
@@ -484,12 +497,34 @@ impl<'a> LocalEvents<'a> {
                 return Err("local_event_candidate_source_mismatch".into());
             }
             let snippet = crate::context::truncate_utf8(&text[start..end], 2048).to_owned();
+            let excerpt_end = start + snippet.len();
+            let support = ranking::assess_excerpt(
+                query,
+                &snippet,
+                ranking::separate_boundary(text[..start].chars().next_back()),
+                ranking::separate_boundary(text[excerpt_end..].chars().next()),
+            );
             let value = json!({"ref":reference,"kind":"event","scope":event.data.scope,"role":event.data.role,
                 "snapshot":crate::model::record_snapshot(&event)?,"content_hash":hash(text.as_bytes()),
                 "text_hash":hash(snippet.as_bytes()),"matched_chunk":{"start_byte":start,"end_byte":end,"text_hash":row["text_sha256"]},
                 "text":snippet,"text_range":{"start_byte":start,"end_byte":start+snippet.len(),"total_bytes":text.len(),"projection":"event.text"},"text_truncated":start!=0||start+snippet.len()!=text.len(),
-                "score":score,"state":"captured","evidence":format!("{:?}/{:?}",event.data.role,event.data.origin),"evidence_refs":[reference],
+                "score":score,"score_kind":"cosine","semantic_rank":semantic_index+1,
+                "retrieval_support":{"kind":if support.complete{"protected_anchor_match"}else{"semantic_candidate"},"match_scope":"returned_excerpt","case_policy":"protected_case_sensitive_ascii_support_case_insensitive","protected":support.complete,"protected_anchors":support.protected_anchors,"matched_protected_anchors":support.matched_protected_anchors,"ascii_terms":support.ascii_terms,"matched_ascii_terms":support.matched_ascii_terms,"limited":support.limited},
+                "relevance":"unassessed","state":"captured","evidence":format!("{:?}/{:?}",event.data.role,event.data.origin),"evidence_refs":[reference],
                 "session_ref":event.data.session_key(),"occurred_at":event.data.occurred_at,"time_note":if event.data.occurred_at.is_none(){"发生时间未知；捕获时间不代表发生时间"}else{""}});
+            verified_bytes += serde_json::to_vec(&value)
+                .map_err(|_| "local_event_response_invalid")?
+                .len();
+            verified.push(value);
+        }
+        // Stable ordering preserves the original semantic rank within each tier.
+        // This can only rearrange the returned, source-verified candidate window.
+        verified.sort_by_key(|row| row["retrieval_support"]["protected"] != true);
+        let scanned = verified.len();
+        let mut results = Vec::new();
+        let mut bytes = 0usize;
+        for (rank, mut value) in verified.into_iter().enumerate() {
+            value["scope_rank"] = json!(rank + 1);
             let size = serde_json::to_vec(&value)
                 .map_err(|_| "local_event_response_invalid")?
                 .len();
@@ -501,10 +536,10 @@ impl<'a> LocalEvents<'a> {
         }
         Ok(
             json!({"query":query,"results":results,"match_count":results.len(),"status":if results.is_empty(){"no_verified_candidates"}else{"ok"},
-            "truncated":rows.len()>results.len()||rejected>0,"coverage":{"event_search":"local_semantic","semantic_search":"local_event_index",
+            "truncated":rows.len()>results.len()||rejected>0||verification_limited||candidates["coverage"]["candidates_truncated"]==true,"coverage":{"event_search":"local_semantic","semantic_search":"local_event_index",
             "local_event_semantic":true,"semantic_query_encoding":candidates["coverage"]["query_encoding"],"event_index_generation":generation,
             "event_index_snapshot":manifest.epoch,"local_config_identity":self.config_hash,"source_verification":"current_event_hash_and_utf8_range","rejected_candidates":rejected,
-            "partial":rejected>0,"chunk_selection":"per_event_best_chunk","note":"本机向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}),
+            "partial":rejected>0||verification_limited,"candidate_policy":"verified_excerpt_anchors_then_semantic/v1","verified_candidates":scanned,"candidate_window_limit":100,"candidate_reordering_enabled":reorder,"candidate_verification_limited":verification_limited,"candidate_text_bytes":source_bytes,"chunk_selection":"per_event_best_chunk","note":"本机向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}),
         )
     }
 }
