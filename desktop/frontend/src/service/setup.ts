@@ -108,6 +108,7 @@ export function validCloudSemanticSettings(value:CloudEmbeddingSettings):boolean
 
 export function recallCoverageNotes(page: SearchPage): string[] {
   const notes = [semanticSearchNote(page.coverage) || "本次未提供语义检索状态，不能据此确认语义覆盖。"];
+  if (page.coverage?.lexical_match === "natural_question") notes.push("按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。");
   notes.push("当前入口的语义候选只覆盖已建索引的记忆；原始聊天仍通过词法查找，尚不保证换个说法也能找到。");
   if (page.truncated) notes.push("本次结果达到数量或文字预算上限，未展示的来源并不代表不存在；可换用更具体的关键词继续找。");
   return notes;

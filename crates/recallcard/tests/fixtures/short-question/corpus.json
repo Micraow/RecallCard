@@ -1,0 +1,62 @@
+[
+  {
+    "source_id": "S01",
+    "domain": "电脑维护",
+    "text": "本地备份每周执行。"
+  },
+  {
+    "source_id": "S02",
+    "domain": "园艺",
+    "text": "阳台绿植每隔三天浇水。"
+  },
+  {
+    "source_id": "S03",
+    "domain": "阅读",
+    "text": "图书续借在到期前两天办理。"
+  },
+  {
+    "source_id": "S04",
+    "domain": "运动",
+    "text": "跑步热身需要十分钟。"
+  },
+  {
+    "source_id": "S05",
+    "domain": "烘焙",
+    "text": "烤箱预热设为一百八十度。"
+  },
+  {
+    "source_id": "S06",
+    "domain": "家务",
+    "text": "洗衣滤网每月清理一次。"
+  },
+  {
+    "source_id": "S07",
+    "domain": "出行",
+    "text": "火车车票提前两周购买。"
+  },
+  {
+    "source_id": "S08",
+    "domain": "办公",
+    "text": "会议纪要周五统一归档。"
+  },
+  {
+    "source_id": "S09",
+    "domain": "骑行",
+    "text": "自行车链条每月上油。"
+  },
+  {
+    "source_id": "S10",
+    "domain": "标识符",
+    "text": "CacheGate 使用本地缓存，每次启动检查。"
+  },
+  {
+    "source_id": "S11",
+    "domain": "标识符相邻词",
+    "text": "CacheGated 使用远程缓存，每次退出检查。"
+  },
+  {
+    "source_id": "S12",
+    "domain": "相邻主题",
+    "text": "云端备份每天执行。"
+  }
+]

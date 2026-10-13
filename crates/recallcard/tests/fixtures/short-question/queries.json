@@ -1,0 +1,446 @@
+[
+  {
+    "id": "S01a",
+    "category": "exact_phrase",
+    "query": "本地备份",
+    "expected_sources": [
+      "S01"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "S01b",
+    "category": "short_unpunctuated_question",
+    "query": "我之前怎么做本地备份",
+    "expected_sources": [
+      "S01"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S01c",
+    "category": "punctuated_question",
+    "query": "我之前怎么做本地备份？",
+    "expected_sources": [
+      "S01"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S01d",
+    "category": "synonym_question",
+    "query": "我的电脑资料多久存副本？",
+    "expected_sources": [
+      "S01"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S02a",
+    "category": "exact_phrase",
+    "query": "阳台绿植",
+    "expected_sources": [
+      "S02"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "S02b",
+    "category": "short_unpunctuated_question",
+    "query": "阳台绿植多久浇水",
+    "expected_sources": [
+      "S02"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S02c",
+    "category": "punctuated_question",
+    "query": "阳台绿植多久浇水？",
+    "expected_sources": [
+      "S02"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S02d",
+    "category": "synonym_question",
+    "query": "露台盆栽隔多久补水？",
+    "expected_sources": [
+      "S02"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S03a",
+    "category": "exact_phrase",
+    "query": "图书续借",
+    "expected_sources": [
+      "S03"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "S03b",
+    "category": "short_unpunctuated_question",
+    "query": "图书续借何时办理",
+    "expected_sources": [
+      "S03"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S03c",
+    "category": "punctuated_question",
+    "query": "图书续借何时办理？",
+    "expected_sources": [
+      "S03"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S03d",
+    "category": "synonym_question",
+    "query": "借来的书什么时候延期？",
+    "expected_sources": [
+      "S03"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S04a",
+    "category": "exact_phrase",
+    "query": "跑步热身",
+    "expected_sources": [
+      "S04"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "S04b",
+    "category": "short_unpunctuated_question",
+    "query": "跑步热身需要多久",
+    "expected_sources": [
+      "S04"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S04c",
+    "category": "punctuated_question",
+    "query": "跑步热身需要多久？",
+    "expected_sources": [
+      "S04"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S04d",
+    "category": "synonym_question",
+    "query": "慢跑之前活动多长时间？",
+    "expected_sources": [
+      "S04"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S05a",
+    "category": "exact_phrase",
+    "query": "烤箱预热",
+    "expected_sources": [
+      "S05"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "S05b",
+    "category": "short_unpunctuated_question",
+    "query": "烤箱预热设多少度",
+    "expected_sources": [
+      "S05"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S05c",
+    "category": "punctuated_question",
+    "query": "烤箱预热设多少度？",
+    "expected_sources": [
+      "S05"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S05d",
+    "category": "synonym_question",
+    "query": "烘烤设备提前加温多少？",
+    "expected_sources": [
+      "S05"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S06a",
+    "category": "exact_phrase",
+    "query": "洗衣滤网",
+    "expected_sources": [
+      "S06"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "S06b",
+    "category": "short_unpunctuated_question",
+    "query": "洗衣滤网多久清理",
+    "expected_sources": [
+      "S06"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S06c",
+    "category": "punctuated_question",
+    "query": "洗衣滤网多久清理？",
+    "expected_sources": [
+      "S06"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S06d",
+    "category": "synonym_question",
+    "query": "洗涤机器过滤器何时打扫？",
+    "expected_sources": [
+      "S06"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S07a",
+    "category": "exact_phrase",
+    "query": "火车车票",
+    "expected_sources": [
+      "S07"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "S07b",
+    "category": "short_unpunctuated_question",
+    "query": "火车车票提前多久买",
+    "expected_sources": [
+      "S07"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S07c",
+    "category": "punctuated_question",
+    "query": "火车车票提前多久买？",
+    "expected_sources": [
+      "S07"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S07d",
+    "category": "synonym_question",
+    "query": "铁路乘车凭证何时购入？",
+    "expected_sources": [
+      "S07"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S08a",
+    "category": "exact_phrase",
+    "query": "会议纪要",
+    "expected_sources": [
+      "S08"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "S08b",
+    "category": "short_unpunctuated_question",
+    "query": "会议纪要何时归档",
+    "expected_sources": [
+      "S08"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S08c",
+    "category": "punctuated_question",
+    "query": "会议纪要何时归档？",
+    "expected_sources": [
+      "S08"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S08d",
+    "category": "synonym_question",
+    "query": "开会记录星期几整理入库？",
+    "expected_sources": [
+      "S08"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S09a",
+    "category": "exact_phrase",
+    "query": "自行车链条",
+    "expected_sources": [
+      "S09"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "S09b",
+    "category": "short_unpunctuated_question",
+    "query": "自行车链条多久上油",
+    "expected_sources": [
+      "S09"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S09c",
+    "category": "punctuated_question",
+    "query": "自行车链条多久上油？",
+    "expected_sources": [
+      "S09"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "S09d",
+    "category": "synonym_question",
+    "query": "单车传动零件多久润滑？",
+    "expected_sources": [
+      "S09"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "A01",
+    "category": "ascii_anchor",
+    "query": "CacheGate",
+    "expected_sources": [
+      "S10"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "A02",
+    "category": "ascii_anchor",
+    "query": "CacheGated",
+    "expected_sources": [
+      "S11"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "A03",
+    "category": "ascii_anchor",
+    "query": "Cache",
+    "expected_sources": [],
+    "intent": "exact"
+  },
+  {
+    "id": "A04",
+    "category": "ascii_anchor",
+    "query": "CacheGate 本地缓存",
+    "expected_sources": [
+      "S10"
+    ],
+    "intent": "exact"
+  },
+  {
+    "id": "A05",
+    "category": "ascii_anchor",
+    "query": "CacheGate 远程缓存",
+    "expected_sources": [],
+    "intent": "exact"
+  },
+  {
+    "id": "A06",
+    "category": "ascii_anchor",
+    "query": "CacheGate 的本地缓存怎么检查？",
+    "expected_sources": [
+      "S10"
+    ],
+    "intent": "question"
+  },
+  {
+    "id": "A07",
+    "category": "ascii_anchor",
+    "query": "CacheGate 的远程缓存怎么检查？",
+    "expected_sources": [],
+    "intent": "question"
+  },
+  {
+    "id": "A08",
+    "category": "ascii_anchor",
+    "query": "CacheGates",
+    "expected_sources": [],
+    "intent": "exact"
+  },
+  {
+    "id": "N01",
+    "category": "negative_unrelated",
+    "query": "护照更新需要多久",
+    "expected_sources": [],
+    "intent": "question"
+  },
+  {
+    "id": "N02",
+    "category": "negative_unrelated",
+    "query": "护照更新需要多久？",
+    "expected_sources": [],
+    "intent": "question"
+  },
+  {
+    "id": "N03",
+    "category": "negative_unrelated",
+    "query": "咖啡豆如何保存",
+    "expected_sources": [],
+    "intent": "question"
+  },
+  {
+    "id": "N04",
+    "category": "negative_unrelated",
+    "query": "咖啡豆如何保存？",
+    "expected_sources": [],
+    "intent": "question"
+  },
+  {
+    "id": "P01",
+    "category": "exact_near_miss",
+    "query": "本地备份每天执行",
+    "expected_sources": [],
+    "intent": "exact"
+  },
+  {
+    "id": "P02",
+    "category": "exact_near_miss",
+    "query": "烤箱预热设为九十度",
+    "expected_sources": [],
+    "intent": "exact"
+  },
+  {
+    "id": "P03",
+    "category": "exact_near_miss",
+    "query": "火车车票当天购买",
+    "expected_sources": [],
+    "intent": "exact"
+  },
+  {
+    "id": "P04",
+    "category": "exact_near_miss",
+    "query": "洗衣滤网每天清理",
+    "expected_sources": [],
+    "intent": "exact"
+  }
+]

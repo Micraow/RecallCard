@@ -213,6 +213,9 @@ export class ScopedService {
   search(query: string) {
     return this.call<SearchPage>("search_records", { query, target: "all" });
   }
+  searchQuestion(query: string) {
+    return this.call<SearchPage>("search_records", { query, target: "all", questionMode: true });
+  }
   read(reference: string) {
     return this.call<{
       results: { text?: string; record?: EventRecord; content?: string }[];

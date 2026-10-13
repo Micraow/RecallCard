@@ -444,8 +444,13 @@ impl<'a> Context<'a> {
         Ok(response)
     }
     pub fn search(&self, args: SearchArgs) -> Result<Value> {
-        if !matches!(args.lexical_match.as_str(), "exact" | "identifier_prefix") {
-            return Err("未知 lexical_match；仅支持 exact 或 identifier_prefix".into());
+        if !matches!(
+            args.lexical_match.as_str(),
+            "exact" | "identifier_prefix" | "natural_question"
+        ) {
+            return Err(
+                "未知 lexical_match；仅支持 exact、identifier_prefix 或 natural_question".into(),
+            );
         }
         check_budget(args.budget_tokens)?;
         if args
@@ -600,7 +605,7 @@ impl<'a> Context<'a> {
             None => None,
         };
         let generation = hash(&serde_json::to_vec(&docs).map_err(|e| e.to_string())?);
-        let tokens = search::ranking_terms(&args.query);
+        let tokens = search::ranking_terms(&args.query, &args.lexical_match);
         if tokens.is_empty() {
             return Err("查询必须包含中文词组、文字或数字".into());
         }
@@ -764,10 +769,10 @@ impl<'a> Context<'a> {
                 args.event_filter,
                 args.include_navigation,
                 self.access.scopes(),
-                if args.lexical_match == "exact" {
-                    ""
-                } else {
-                    ":identifier_prefix"
+                match args.lexical_match.as_str() {
+                    "exact" => "",
+                    "identifier_prefix" => ":identifier_prefix",
+                    _ => ":natural_question",
                 },
                 self.event_vectors
                     .map(|index| format!(
@@ -851,7 +856,7 @@ impl<'a> Context<'a> {
             coverage["prefix_candidate_limit"] = json!(256);
             coverage["prefix_note"] = json!("仅显式扩展至少3个ASCII字母的标识符前缀，保留左边界；精确匹配优先，不是翻译或语义召回");
         }
-        if search::natural_han_query(&args.query) {
+        if search::natural_han_query(&args.query, &args.lexical_match) {
             coverage["lexical_matching"] = json!("natural_han_bigrams_exact_identifiers");
             coverage["lexical_note"] = json!("词法候选不等于答案，请用 read/sources 核对。");
         }
@@ -871,6 +876,7 @@ impl<'a> Context<'a> {
         } else if let Some(error) = semantic_error {
             coverage["semantic_error"] = json!(error);
         }
+        search::add_question_coverage(&mut coverage, &args);
         search::response(&ranked, &args, offset, &binding, coverage)
     }
     pub fn read(&self, args: ReadArgs) -> Result<Value> {
@@ -1215,7 +1221,7 @@ pub fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 /// 原文投影中的连续窗口；不插入省略号，字节定位可交给 read。
-fn matching_window(text: &str, query: &str, limit: usize) -> (usize, usize) {
+fn matching_window(text: &str, query: &str, limit: usize, mode: &str) -> (usize, usize) {
     if text.len() <= limit {
         return (0, text.len());
     }
@@ -1231,7 +1237,7 @@ fn matching_window(text: &str, query: &str, limit: usize) -> (usize, usize) {
     }
     let query = query.to_lowercase();
     let found = lowered.find(&query).or_else(|| {
-        let mut candidates = search::ranking_terms(&query)
+        let mut candidates = search::ranking_terms(&query, mode)
             .into_iter()
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -1344,7 +1350,7 @@ fn rank<'a>(
     raw: &str,
     mode: &str,
 ) -> Vec<(f64, &'a Document)> {
-    let natural = search::natural_han_query(raw);
+    let natural = search::natural_han_query(raw, mode);
     let wanted: std::collections::HashSet<&str> = query.iter().map(String::as_str).collect();
     let corpus: Vec<(BTreeMap<String, usize>, usize)> = docs
         .iter()

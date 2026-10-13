@@ -171,6 +171,13 @@ impl ModelOperation {
         self.semantic_status()
     }
     pub fn search(&self, query: &str, target: &str) -> AppResult<Value> {
+        self.search_mode(query, target, "exact")
+    }
+    /// 用户明确从问题入口发起；只改变词法候选模式，不开启提供器或增加外发批准。
+    pub fn search_question(&self, query: &str, target: &str) -> AppResult<Value> {
+        self.search_mode(query, target, "natural_question")
+    }
+    fn search_mode(&self, query: &str, target: &str, mode: &str) -> AppResult<Value> {
         super::validate_target(target).map_err(invalid)?;
         if query.trim().is_empty() || query.len() > 4096 {
             return Err(invalid("请输入1–4096字节的检索词"));
@@ -203,7 +210,7 @@ impl ModelOperation {
         let mut response = context
             .search(SearchArgs {
                 preview_min_bytes: None,
-                lexical_match: "exact".into(),
+                lexical_match: mode.into(),
                 include_navigation: false,
                 query: query.into(),
                 target: target.into(),

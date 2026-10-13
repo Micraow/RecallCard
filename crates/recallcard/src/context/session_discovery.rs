@@ -279,7 +279,7 @@ impl Context<'_> {
                         }
                         (a, end)
                     } else {
-                        matching_window(&d.text, &args.query, 512)
+                        matching_window(&d.text, &args.query, 512, &args.lexical_match)
                     }
                 } else {
                     // A short deterministic original slice, never a synthesized summary.
@@ -334,13 +334,14 @@ impl Context<'_> {
                 "context_limits":{"max_messages":3,"max_each_utf8_bytes":512,"graph_stop_reasons":links["constraints"]["stop_reasons"],"further_context_requires_assessed_read":true},
                 "read_args":read}));
         }
-        let coverage = json!({"event_vectors":vector_coverage,"lexical_sessions":lexical_groups.len(),"semantic_sessions":semantic_groups.len(),
+        let mut coverage = json!({"event_vectors":vector_coverage,"lexical_sessions":lexical_groups.len(),"semantic_sessions":semantic_groups.len(),
             "ordering":"independent_session_dedup_then_semantic_lexical_round_robin","scores_are_confidence":false,
             "per_channel_session_limit":MAX_CHANNEL_SESSIONS,"eligible_semantic_sessions":semantic_seen.len(),"eligible_lexical_sessions":lexical_seen.len(),
             "semantic_sessions_truncated":semantic_seen.len()>MAX_CHANNEL_SESSIONS,"lexical_sessions_truncated":lexical_seen.len()>MAX_CHANNEL_SESSIONS,
             "selection":"caller_assessment_required_not_necessarily_human","assessment_semantics":"binding verifies current original evidence, not semantic relevance or receipt issuance",
             "event_filter":args.event_filter,"as_of":args.as_of,"scope_filtered":true,"max_preview_messages":3,
             "continuation":"cursor lists more candidate sessions; it does not expand a graph or continue a text tail"});
+        search::add_question_coverage(&mut coverage, args);
         let envelope = |results: Vec<Value>| {
             let next = offset + results.len();
             let mut coverage = coverage.clone();
@@ -371,7 +372,7 @@ impl Context<'_> {
                 let text = &docs[span.reference.as_str()].text;
                 let (start, end) =
                     if part["relation"] == "anchor" && original["first_channel"] == "lexical" {
-                        matching_window(text, &args.query, bytes)
+                        matching_window(text, &args.query, bytes, &args.lexical_match)
                     } else {
                         let start = span.start_byte;
                         let mut end = (start + bytes).min(span.end_byte);
@@ -428,11 +429,15 @@ impl Context<'_> {
             }
         }
         let retry_budget = minimum.max(512);
-        let result = json!({"results":[],"status":if ordered.is_empty(){"no_matches"}else if offset==ordered.len(){"complete"}else{"budget_exhausted"},
+        let mut result = json!({"results":[],"status":if ordered.is_empty(){"no_matches"}else if offset==ordered.len(){"complete"}else{"budget_exhausted"},
             "candidate_count":ordered.len(),"relevance":"unassessed","next_cursor":null,"budget_unit":"utf8_bytes",
             "recommended_min_budget":retry_budget,"retry_cursor":(offset<ordered.len()).then(||format!("sd1:{}:{offset}",make_binding(retry_budget))),
             "event_vector_status":coverage["event_vectors"]["status"],"event_vector_error":coverage["event_vectors"]["error"],
             "hint":"Use recommended_min_budget with retry_cursor; keep other search arguments."});
+        search::preserve_question_mode(&mut result, &coverage);
+        if args.lexical_match == "natural_question" && json_size(&result)? > args.budget_tokens {
+            result.as_object_mut().unwrap().remove("hint");
+        }
         if json_size(&result)? > args.budget_tokens {
             return Err("预算不足以输出发现状态".into());
         }

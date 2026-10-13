@@ -832,9 +832,14 @@ async fn search_records(
     scope: String,
     query: String,
     target: String,
+    question_mode: Option<bool>,
 ) -> Result<Value, String> {
     execute_model(state.service.clone(), session_id, scope, move |operation| {
-        operation.search(&query, &target)
+        if question_mode.unwrap_or(false) {
+            operation.search_question(&query, &target)
+        } else {
+            operation.search(&query, &target)
+        }
     })
     .await
     .map_err(|e| e.message)

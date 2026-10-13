@@ -198,7 +198,7 @@ export interface SearchRow {
   };
 }
 export interface SearchPage {
-  coverage?: {semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string; semantic_coverage?: string; lexical_matching?: string};
+  coverage?: {semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string; semantic_coverage?: string; lexical_matching?: string; lexical_match?: string};
   results: SearchRow[];
   truncated?: boolean;
 }

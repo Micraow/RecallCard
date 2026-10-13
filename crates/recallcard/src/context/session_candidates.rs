@@ -61,7 +61,7 @@ impl Context<'_> {
         let score_kind = vector_coverage["score_kind"]
             .as_str()
             .unwrap_or("existing_ranking_score");
-        let coverage = json!({"relevance":"unassessed","scores_are_confidence":false,
+        let mut coverage = json!({"relevance":"unassessed","scores_are_confidence":false,
             "source_grouping":"same_scope_session_and_official_source_graph",
             "ordering":"best_ranked_anchor_per_distinct_source_session",
             "scope_filtered":true,"event_filter":args.event_filter,"as_of":args.as_of,
@@ -70,6 +70,7 @@ impl Context<'_> {
             "event_vectors":vector_coverage,"max_excerpt_utf8_bytes":EXCERPT_BYTES,
             "continuation":"next_cursor lists more candidate sessions, never text tails or graph neighbors",
             "selection":"Choose an evidenced candidate before read; unresolved relevance is not no_matches. Keep its anchor and filters when expanding."});
+        search::add_question_coverage(&mut coverage, args);
         let envelope = |results: Vec<Value>| {
             let next = offset + results.len();
             json!({"results":results,"candidate_count":candidates.len(),"status_scope":"ranked_candidate_sessions",
@@ -88,7 +89,7 @@ impl Context<'_> {
                 }
                 (start, end)
             } else {
-                matching_window(&doc.text, &args.query, bytes)
+                matching_window(&doc.text, &args.query, bytes, &args.lexical_match)
             };
             let session_ref = doc.session_ref.as_ref().filter(|value| value.len() <= 256);
             let source = &event.data.source;
@@ -121,6 +122,7 @@ impl Context<'_> {
                 filtered.len(),
                 &vector_coverage,
                 None,
+                &coverage,
                 args.budget_tokens,
             );
         }
@@ -155,6 +157,7 @@ impl Context<'_> {
             filtered.len(),
             &vector_coverage,
             Some(required),
+            &coverage,
             args.budget_tokens,
         )
     }
@@ -165,6 +168,7 @@ fn compact_status(
     eligible: usize,
     vectors: &Value,
     required: Option<usize>,
+    coverage: &Value,
     budget: usize,
 ) -> Result<Value> {
     let mut page = json!({"results":[],"candidate_count":total,"status":if required.is_some(){"budget_exhausted"}else if total==0{"no_matches"}else{"complete"},
@@ -174,6 +178,7 @@ fn compact_status(
         page["recommended_min_budget"] = json!(size);
         page["max_budget_bytes"] = json!(32768);
     }
+    search::preserve_question_mode(&mut page, coverage);
     if json_size(&page)? > budget {
         return Err("预算不足以输出候选状态".into());
     }

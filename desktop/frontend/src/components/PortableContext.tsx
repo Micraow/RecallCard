@@ -17,7 +17,7 @@ export function PortableContextDialog({ service, initialResults, initialGoal, cl
   const [request, setRequest] = useState({ query: initialGoal.trim(), revision: 0 });
   const search = useResource(async () => {
     const page = request.revision === 0 && initialResults ? initialResults
-      : request.query ? await service.search(request.query) : null;
+      : request.query ? await service.searchQuestion(request.query) : null;
     return { query: request.query, revision: request.revision, page };
   }, [service, request]);
   const page = search.data?.page;

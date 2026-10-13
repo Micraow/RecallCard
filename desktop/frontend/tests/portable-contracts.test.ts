@@ -84,3 +84,15 @@ test('检索覆盖分别说明本地、已批准云、退化、未知和预算�
     assert.match(notes,pattern);assert.match(notes,/原始聊天仍通过词法查找/);assert.match(notes,/预算上限/);
   }
 });
+
+test('问题入口显式选择问题词法模式，普通关键词搜索不改变批准或模式', async () => {
+  const bundle=await build({entryPoints:[new URL('../src/service/client.ts',import.meta.url).pathname],bundle:true,platform:'node',format:'esm',write:false});
+  const {ScopedService}=await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
+  const calls:any[]=[];
+  const service=new ScopedService({invoke:async(command:string,args:any)=>{calls.push({command,args});return {results:[]};}},{session_id:'synthetic_question'},'personal');
+  await service.search('本地备份');await service.searchQuestion('我之前怎么做本地备份');
+  assert.deepEqual(calls.map(c=>c.command),['search_records','search_records']);
+  assert.equal(calls[0].args.questionMode,undefined);assert.equal(calls[1].args.questionMode,true);
+  for(const call of calls){assert.equal(call.args.scope,'personal');assert.equal(call.args.sessionId,'synthetic_question');}
+  assert.match(recallCoverageNotes({results:[],coverage:{lexical_match:'natural_question',semantic_search:'unavailable'}}).join('\n'),/候选不等于答案/);
+});

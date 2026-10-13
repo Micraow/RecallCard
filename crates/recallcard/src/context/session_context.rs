@@ -338,6 +338,7 @@ impl Context<'_> {
                             VecDeque::from([first_text_piece(
                                 &message.document.text,
                                 &args.query,
+                                &args.lexical_match,
                                 message.relation == "anchor",
                                 message.hit_range,
                             )])
@@ -345,6 +346,7 @@ impl Context<'_> {
                             text_pieces(
                                 &message.document.text,
                                 &args.query,
+                                &args.lexical_match,
                                 message.relation == "anchor",
                                 message.hit_range,
                             )
@@ -433,6 +435,7 @@ impl Context<'_> {
             "event_vectors":event_vector_coverage,
             "selected_message_count":messages.len(),"text_order":"one_excerpt_per_message_then_round_robin_remaining_ranges"
         });
+        search::add_question_coverage(&mut coverage, args);
         if discovery_sources.is_some() {
             coverage["ordering"] =
                 json!("independent_session_dedup_then_semantic_lexical_round_robin");
@@ -539,6 +542,7 @@ impl Context<'_> {
 fn first_text_piece(
     text: &str,
     query: &str,
+    mode: &str,
     anchor: bool,
     hit_range: Option<(usize, usize)>,
 ) -> (usize, usize) {
@@ -549,17 +553,23 @@ fn first_text_piece(
         }
         (start, until)
     } else {
-        matching_window(text, if anchor { query } else { "" }, TEXT_SLICE_BYTES)
+        matching_window(
+            text,
+            if anchor { query } else { "" },
+            TEXT_SLICE_BYTES,
+            mode,
+        )
     }
 }
 
 fn text_pieces(
     text: &str,
     query: &str,
+    mode: &str,
     anchor: bool,
     hit_range: Option<(usize, usize)>,
 ) -> VecDeque<(usize, usize)> {
-    let (from, until) = first_text_piece(text, query, anchor, hit_range);
+    let (from, until) = first_text_piece(text, query, mode, anchor, hit_range);
     let mut pieces = VecDeque::from([(from, until)]);
     for (mut start, stop) in [(0, from), (until, text.len())] {
         while start < stop {
@@ -636,14 +646,18 @@ fn page_or_empty(
     required: usize,
 ) -> Result<Value> {
     if total == 0 {
-        return Ok(
-            json!({"results":[],"sessions":[],"status":"no_matches","truncated":false,"next_cursor":null,"budget_unit":"utf8_bytes","session_count":0,"selected_slice_count":0,"coverage":{"event_vectors":{"status":coverage["event_vectors"]["status"],"error":coverage["event_vectors"]["error"],"ranking_policy":coverage["event_vectors"]["ranking_policy"],"query_encoding":"existing_cache_only","network_requests":0}}}),
-        );
+        let mut empty = json!({"results":[],"sessions":[],"status":"no_matches","truncated":false,"next_cursor":null,"budget_unit":"utf8_bytes","session_count":0,"selected_slice_count":0,"coverage":{"event_vectors":{"status":coverage["event_vectors"]["status"],"error":coverage["event_vectors"]["error"],"ranking_policy":coverage["event_vectors"]["ranking_policy"],"query_encoding":"existing_cache_only","network_requests":0}}});
+        search::preserve_question_mode(&mut empty, coverage);
+        if json_size(&empty)? > budget {
+            return Err("预算不足以输出上下文状态".into());
+        }
+        return Ok(empty);
     }
     if items.is_empty() && position < total {
-        let empty = json!({"results":[],"sessions":[],"status":"budget_exhausted","budget_exhausted":true,
+        let mut empty = json!({"results":[],"sessions":[],"status":"budget_exhausted","budget_exhausted":true,
             "truncated":true,"next_cursor":null,"budget_unit":"utf8_bytes","recommended_min_budget":required+32,
             "max_budget_bytes":32768,"hint":"预算不足不是无匹配；增加budget_bytes后不带cursor重新开始。"});
+        search::preserve_question_mode(&mut empty, coverage);
         if json_size(&empty)? <= budget {
             return Ok(empty);
         }

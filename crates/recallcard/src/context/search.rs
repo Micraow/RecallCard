@@ -33,9 +33,10 @@ pub(super) fn query_terms(text: &str) -> Vec<String> {
         .into_iter()
         .collect()
 }
-/// 长中文问句采用字符双字组候选召回；短词组/空格关键词仍为严格 AND。
+/// 默认仍按既有长句/标点启发式；natural_question 显式请求汉字双字组候选。
+/// 两种路径均保留最少六个连续汉字及引号精确保护，不将候选当作语义答案。
 /// 不使用项目名、问题模板、领域词典或验收问题特判；带引号的查询保持精确模式。
-pub(super) fn natural_han_query(text: &str) -> bool {
+pub(super) fn natural_han_query(text: &str, mode: &str) -> bool {
     if text.contains(['"', '“', '”']) {
         return false;
     }
@@ -47,18 +48,46 @@ pub(super) fn natural_han_query(text: &str) -> bool {
         .max()
         .unwrap_or(0);
     let count = text.chars().filter(|c| han(*c)).count();
-    longest >= 6 && (count >= 12 || text.contains(['，', '。', '？', '?', '；', '：', ',', ';']))
+    longest >= 6
+        && (mode == "natural_question"
+            || count >= 12
+            || text.contains(['，', '。', '？', '?', '；', '：', ',', ';']))
 }
-pub(super) fn ranking_terms(text: &str) -> Vec<String> {
-    if !natural_han_query(text) {
+pub(super) fn ranking_terms(text: &str, mode: &str) -> Vec<String> {
+    if !natural_han_query(text, mode) {
         return query_terms(text);
     }
     super::tokenize(text)
         .into_iter()
+        // 问题里的独立 ASCII 标点不是必需代码标识符；含字母/数字的词保持原样。
+        // 仅新模式纠正此候选入口，默认/前缀模式保留历史合同。
+        .filter(|s| mode != "natural_question" || s.chars().any(char::is_alphanumeric))
         .filter(|s| !s.chars().all(han) || s.chars().count() == 2)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+/// 新模式的说明在计算完整 JSON 预算前加入，旧模式响应保持原合同。
+pub(super) fn add_question_coverage(coverage: &mut Value, args: &SearchArgs) {
+    if args.lexical_match != "natural_question" {
+        return;
+    }
+    coverage["lexical_match"] = json!("natural_question");
+    coverage["lexical_matching"] = json!(if natural_han_query(&args.query, &args.lexical_match) {
+        "natural_han_bigrams_exact_identifiers"
+    } else {
+        "all_terms"
+    });
+    coverage["lexical_note"] = json!("字面候选不等于答案；否定、相对时间与同义关系须核对原文。");
+}
+/// 最小预算回执仍保留请求模式，不用长说明挤掉可继续读取的状态。
+pub(super) fn preserve_question_mode(page: &mut Value, coverage: &Value) {
+    if coverage["lexical_match"] == "natural_question" {
+        if !page["coverage"].is_object() {
+            page["coverage"] = json!({});
+        }
+        page["coverage"]["lexical_match"] = json!("natural_question");
+    }
 }
 pub(super) fn han_term(term: &str) -> bool {
     term.chars().all(han)
@@ -172,7 +201,7 @@ pub(super) fn group_sources<'a>(ranked: Vec<(f64, &'a Document)>, query: &str) -
     });
     groups
 }
-fn item(entry: &Match<'_>, query: &str, limit: usize) -> Result<Value> {
+fn item(entry: &Match<'_>, query: &str, limit: usize, mode: &str) -> Result<Value> {
     let doc = entry.document;
     let mut value = serde_json::to_value(doc).map_err(|e| e.to_string())?;
     value["ref"] = value["reference"].take();
@@ -194,7 +223,7 @@ fn item(entry: &Match<'_>, query: &str, limit: usize) -> Result<Value> {
         }
         (start, end)
     } else {
-        matching_window(&doc.text, query, limit)
+        matching_window(&doc.text, query, limit, mode)
     };
     value["text"] = json!(&doc.text[start..end]);
     value["text_truncated"] = json!(start != 0 || end != doc.text.len());
@@ -250,6 +279,9 @@ fn compact_status(value: &mut Value) {
     if let Some(nav) = coverage.get("navigation") {
         compact["navigation"] = json!({"view_candidates":nav["view_candidates"],"fact_candidates":nav["fact_candidates"]});
     }
+    if coverage["lexical_match"] == "natural_question" {
+        compact["lexical_match"] = coverage["lexical_match"].clone();
+    }
     value["coverage"] = compact;
 }
 pub(super) fn response(
@@ -266,7 +298,7 @@ pub(super) fn response(
     let mut items = Vec::new();
     // 先预留每条可用的最短真实片段，再分配剩余空间，避免第一条长文独占。
     for entry in available.iter().take(args.limit) {
-        let candidate = item(entry, &args.query, 96)?;
+        let candidate = item(entry, &args.query, 96, &args.lexical_match)?;
         items.push(candidate);
         if json_size(&envelope(
             items.clone(),
@@ -281,7 +313,7 @@ pub(super) fn response(
         }
     }
     if items.is_empty() && !available.is_empty() {
-        let min = item(&available[0], &args.query, 96)?;
+        let min = item(&available[0], &args.query, 96, &args.lexical_match)?;
         let required = json_size(&envelope(
             vec![min],
             ranked.len(),
@@ -321,7 +353,7 @@ pub(super) fn response(
             .min(available[index].document.text.len().max(96));
         while low < high {
             let middle = low + (high - low).div_ceil(2);
-            let candidate = item(&available[index], &args.query, middle)?;
+            let candidate = item(&available[index], &args.query, middle, &args.lexical_match)?;
             let previous = std::mem::replace(&mut items[index], candidate);
             if json_size(&envelope(
                 items.clone(),
@@ -406,7 +438,7 @@ mod tests {
         assert_eq!(groups[0].document.reference, "event:stronger");
         assert_eq!(groups[1].score, 4.0, "不能把两个来源的得分相加");
         assert_eq!(groups[1].score_source_ref.as_deref(), Some("event:a"));
-        let serialized = item(&groups[1], "命中", 96).unwrap();
+        let serialized = item(&groups[1], "命中", 96, "exact").unwrap();
         assert_eq!(serialized["score_source_ref"], "event:a");
         assert_eq!(serialized["evidence"], "AssistantSuggestion");
         assert_eq!(serialized["state"], "tentative");
@@ -421,7 +453,7 @@ mod tests {
             let groups = group_sources(vec![(5.0, &memory), (source_score, &source)], "命中");
             assert_eq!(groups[0].score, 5.0);
             assert_eq!(groups[0].score_source_ref, None);
-            assert!(item(&groups[0], "命中", 96)
+            assert!(item(&groups[0], "命中", 96, "exact")
                 .unwrap()
                 .get("score_source_ref")
                 .is_none());

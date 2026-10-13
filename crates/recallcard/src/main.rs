@@ -257,7 +257,7 @@ enum Command {
     /// 不依赖 Dream 或云 API 的中英文文本检索
     Search {
         query: String,
-        #[arg(long, default_value = "exact", value_parser = ["exact", "identifier_prefix"])]
+        #[arg(long, default_value = "exact", value_parser = ["exact", "identifier_prefix", "natural_question"])]
         lexical_match: String,
         #[arg(long, default_value = "personal")]
         scope: Vec<String>,

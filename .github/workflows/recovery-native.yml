@@ -64,6 +64,9 @@ jobs:
           cargo build --locked --release --bin recallcard --target-dir desktop/src-tauri/target
           cargo build --locked --release --features custom-protocol --manifest-path desktop/src-tauri/Cargo.toml
           git diff --exit-code -- Cargo.lock desktop/src-tauri/Cargo.lock
+      - name: Fixed synthetic short-question source-hit comparison
+        run: |
+          /usr/bin/python3 scripts/eval_short_questions.py --binary desktop/src-tauri/target/release/recallcard --output "$RUNNER_TEMP/recallcard-short-question-eval"
       - name: Real connected native journey with synthetic data
         timeout-minutes: 10
         env:
@@ -78,6 +81,7 @@ jobs:
           name: recovered-native-summary-${{ github.sha }}
           path: |
             ${{ runner.temp }}/recallcard-native-evidence/summary.json
+            ${{ runner.temp }}/recallcard-short-question-eval/summary.json
             ${{ runner.temp }}/recallcard-native-evidence/*.png
           if-no-files-found: ignore
           retention-days: 7
