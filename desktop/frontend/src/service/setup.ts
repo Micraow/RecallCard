@@ -116,6 +116,7 @@ export function recallCoverageNotes(page: SearchPage): string[] {
   if(page.coverage?.cloud_fallback===false) return [
     page.coverage.event_search==='local_only'?'本机普通对话索引尚未可用或未覆盖全部范围；现有 Memory 仅按词法补充。':'尚未配置普通对话本机索引，本次只在本地按关键词寻找原话和记忆。',
     '此入口不会改用云编码；未命中或未覆盖不表示没有相关历史。',
+    ...(page.coverage.lexical_match==='natural_question'?['按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。']:[]),
     ...(page.truncated?['候选、覆盖或文字预算有限，请核对状态并回到来源。']:[])];
   const notes = [semanticSearchNote(page.coverage) || "本次未提供语义检索状态，不能据此确认语义覆盖。"];
   if (page.coverage?.lexical_match === "natural_question") notes.push("按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。");

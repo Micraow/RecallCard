@@ -18,3 +18,9 @@ test('共享入口缓存与未覆盖如实显示，不把缓存说成新外发�
  const missing=recallCoverageNotes({results:[],coverage:{cloud_fallback:false,event_search:'local_only'}}).join('\n');assert.match(missing,/未覆盖/);assert.match(missing,/不会改用云编码/);
  const lexical=recallCoverageNotes({results:[],coverage:{cloud_fallback:false}}).join('\n');assert.match(lexical,/本地按关键词/);
 });
+
+test('未配置本机索引的自然问题分支仍解释否定时间与同义词限制',()=>{
+ const notes=recallCoverageNotes({results:[],coverage:{cloud_fallback:false,lexical_match:'natural_question'}}).join('\n');
+ for(const expected of ['本地按关键词','不会改用云编码','按问题寻找字面候选','否定、相对时间和同义改写','候选不等于答案'])assert.ok(notes.includes(expected),expected);
+ assert.doesNotMatch(notes,/已发送到.*编码服务|已结合 Memory 语义/);
+});
