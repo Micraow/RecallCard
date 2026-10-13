@@ -74,3 +74,16 @@ fn memory_locator_full_snapshot_budget_and_sources_remain_bound() {
     v.suppress(&source, "合成撤回".into()).unwrap();
     assert!(invoke(&v, "recall_fetch", json!({"id":id})).is_err());
 }
+
+#[test]
+fn escaped_memory_metadata_budget_is_not_reported_as_unavailable() {
+    let d = tempfile::tempdir().unwrap();
+    let v = Vault::init(&d.path().join("vault")).unwrap();
+    let source = event(&v);
+    v.add_memory(serde_json::from_value(json!({"content":"合成预算测试","source_refs":[source],"scope":"personal","evidence":"user_explicit","time_note":"\u{0000}".repeat(256)})).unwrap()).unwrap();
+    let context = Context::new(&v, Access::new(vec!["personal".into()]).unwrap());
+    let page = context.recall_question("合成预算测试", "memories").unwrap();
+    assert_eq!(page["status"], "budget_exhausted", "{page}");
+    assert_eq!(page["coverage"]["memory_status"], "budget_exhausted");
+    assert!(serde_json::to_vec(&page).unwrap().len() <= 8192);
+}

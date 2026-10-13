@@ -91,6 +91,7 @@ fn supervise(config: Config, receiver: mpsc::Receiver<Job>) {
             if remaining.is_zero() {
                 return Err("local_event_worker_timeout".into());
             }
+            worker_configuration_current(&config)?;
             if process.is_none() {
                 process = Some(Process::start(&config)?);
             }

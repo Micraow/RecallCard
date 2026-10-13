@@ -150,7 +150,7 @@ impl<'a> LocalEvents<'a> {
             python_path,
             worker_config,
         };
-        let _guard = vault.read_guard()?;
+        let _guard = vault.lock()?;
         vault.write_replace(&config.worker_config, &worker)?;
         vault.write_replace(&path, &config)?;
         drop(_guard);
@@ -188,7 +188,7 @@ impl<'a> LocalEvents<'a> {
     pub fn disable(vault: &Vault, scope: &str) -> Result<()> {
         let path = config_path(vault, scope)?;
         if path.exists() {
-            let _guard = vault.read_guard()?;
+            let _guard = vault.lock()?;
             let mut cfg: Config = read_bounded(&path, 65536)?;
             cfg.settings.events_approved = false;
             cfg.settings.query_approved = false;
@@ -394,6 +394,8 @@ impl<'a> LocalEvents<'a> {
         let generation = status["published_generation"]
             .as_str()
             .ok_or("local_event_index_not_ready")?;
+        // status 可能等待在队列中；真正提交新问题前重新检查批准和配置。
+        self.current()?;
         let candidates = worker::exchange_before(
             &self.config,
             json!({"op":"query","query":query,"limit":100,"expected_generation":generation}),
@@ -510,4 +512,16 @@ impl<'a> LocalEvents<'a> {
 /// 调用方持最终 Vault 读锁；跨入口定位符保守绑定所有来源变化。
 pub(crate) fn source_epoch(vault: &Vault) -> Result<String> {
     Ok(snapshot::inventory(vault)?.0)
+}
+
+/// worker 真正取出排队任务后检查，不能让旧会话沿用已撤销配置开始新编码。
+fn worker_configuration_current(config: &Config) -> Result<()> {
+    let vault = Vault::open_existing(&config.root).map_err(|_| "local_event_config_unavailable")?;
+    let index =
+        LocalEvents::open(&vault, &config.scope)?.ok_or("local_event_configuration_changed")?;
+    let expected = hash(&serde_json::to_vec(config).map_err(|_| "local_event_config_invalid")?);
+    if index.config_hash != expected {
+        return Err("local_event_configuration_changed".into());
+    }
+    index.current()
 }

@@ -123,6 +123,8 @@ impl Context<'_> {
         let mut bindings = vec![];
         let mut coverage = vec![];
         let mut partial = false;
+        let mut budget_limited = false;
+        let mut memory_status = json!("not_requested");
         let scopes_digest = scopes_hash(&self.access);
         if target != "memories" {
             for scope in &scopes {
@@ -201,6 +203,8 @@ impl Context<'_> {
             let local = Context::new(self.vault, self.access.clone());
             let args=serde_json::from_value(json!({"query":query,"target":"memories","lexical_match":"natural_question","limit":10,"budget_bytes":8192})).map_err(|_|"内部检索参数无效")?;
             let page = local.search(args)?;
+            memory_status = page["status"].clone();
+            budget_limited |= page["status"] == "budget_exhausted";
             partial |= page["truncated"] == true;
             let epoch = crate::local_events::source_epoch(self.vault)?;
             let mut rows = vec![];
@@ -210,6 +214,10 @@ impl Context<'_> {
                 let resolved = local.read_page(read)?;
                 let Some(row) = resolved["results"].as_array().and_then(|r| r.first()) else {
                     partial = true;
+                    if resolved["status"] == "budget_exhausted" {
+                        budget_limited = true;
+                        memory_status = json!("budget_exhausted");
+                    }
                     continue;
                 };
                 let mut value = found.clone();
@@ -252,9 +260,13 @@ impl Context<'_> {
             }
         }
         partial |= rows.len() < candidate_count;
-        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","local_event_semantic":!bindings.is_empty(),"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"stable_round_robin_not_cross_model_score","note":"候选不是答案；未配置或未覆盖不表示没有历史。旧search仍可显式进行关键词检索。"}});
+        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"budget_limited":budget_limited,"local_event_semantic":!bindings.is_empty(),"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"stable_round_robin_not_cross_model_score","note":"候选不是答案；未配置或未覆盖不表示没有历史。旧search仍可显式进行关键词检索。"}});
         if result["results"].as_array().unwrap().is_empty() && partial {
-            result["status"] = json!("unavailable");
+            result["status"] = json!(if budget_limited {
+                "budget_exhausted"
+            } else {
+                "unavailable"
+            });
         }
         while serde_json::to_vec(&result)
             .map_err(|_| "检索结果无法序列化")?
@@ -262,6 +274,7 @@ impl Context<'_> {
             > BUDGET
         {
             result["truncated"] = json!(true);
+            result["coverage"]["budget_limited"] = json!(true);
             result["status"] = json!("partial");
             if result["results"].as_array_mut().unwrap().pop().is_none() {
                 return Err("检索元数据超过固定预算".into());

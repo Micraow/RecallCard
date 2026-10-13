@@ -148,13 +148,16 @@ def decode_blob(blob, dimensions):
 
 class EventIndex:
     """config只来自可信启动文件；encoder注入仅用于测试，CLI没有此开关。"""
-    def __init__(self, config, *, encoder=None):
+    def __init__(self, config, *, encoder=None, config_path=None):
         require(_supported_python(), "python_version_unsupported")
         shape(config, {"schema", "database", "scope", "space", "events_approved", "query_approved"},
               {"disk_cap_bytes", "backend"})
         require(config["schema"] == CONFIG_SCHEMA, "invalid_config")
         require(type(config["events_approved"]) is bool and type(config["query_approved"]) is bool, "invalid_config")
         require(config.get("backend", "python") == "python", "unsupported_backend")
+        self.config_path = Path(config_path) if config_path is not None else None
+        self.config_identity = canonical(config)
+        self._current_config()
         self.events_approved = config["events_approved"]
         self.query_approved = config["query_approved"]
         try:
@@ -338,7 +341,13 @@ class EventIndex:
         text(output, 8192 if query else MAX_BATCH_BYTES)
         return output
 
+    def _current_config(self):
+        if self.config_path is not None:
+            require(canonical(read_config(self.config_path)) == self.config_identity, "configuration_changed")
+
     def _encode(self, kind, texts):
+        # 排队/正文验证之后、任何新的本机 POST 之前再检查固定启动配置。
+        self._current_config()
         require(self.query_approved if kind == "query" else self.events_approved,
                 "query_not_approved" if kind == "query" else "events_not_approved")
         if self.encoder is not None:
@@ -614,6 +623,7 @@ class EventIndex:
         return result
 
     def dispatch(self, request):
+        self._current_config()
         common = {"schema", "id", "op"}
         require(request.get("schema") == SCHEMA, "invalid_schema")
         op = request.get("op")
@@ -700,7 +710,7 @@ def main(argv=None):
         if not _supported_python():
             serve(_UnsupportedPython(), sys.stdin.buffer, sys.stdout.buffer)
             return 0
-        worker = EventIndex(read_config(arguments.config))
+        worker = EventIndex(read_config(arguments.config), config_path=arguments.config)
         serve(worker, sys.stdin.buffer, sys.stdout.buffer)
         return 0
     except Exception:

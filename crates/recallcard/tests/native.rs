@@ -537,3 +537,37 @@ fn ordinary_cli_still_displays_help_and_does_not_load_native_config() {
     );
     assert!(legacy.status.success());
 }
+
+#[test]
+fn simple_search_replay_rechecks_sources_without_rejecting_query_cache_diagnostic() {
+    use std::cell::Cell;
+    for authorized in [false, true] {
+        let request = if authorized {
+            let mut request = request("authorized_read");
+            request["arguments"] = json!({"action":"recall_search","arguments":{"query":"合成问题"},"permission_revision":1});
+            request
+        } else {
+            let mut request = request("recall_search");
+            request["arguments"] = json!({"query":"合成问题"});
+            request
+        };
+        let mut input = frame(&request);
+        input.extend(frame(&request));
+        input.extend(frame(&request));
+        let calls = Cell::new(0);
+        let mut out = vec![];
+        native::serve_native_service_io(|_,_| { let n=calls.get();calls.set(n+1);Ok(json!({"results":[{"ref":"event:evt_synthetic","snapshot":if n<2{"same"}else{"changed"},"text":"合成原话"}],"coverage":{"scopes":[{"scope":"personal","state":"ready","query_encoding":if n==0{"local"}else{"cache"}}]}}))},EXT,&native::extension_origin(EXT).unwrap(),input.as_slice(),&mut out).unwrap();
+        let mut values = vec![];
+        let mut at = 0;
+        while at < out.len() {
+            let size = u32::from_ne_bytes(out[at..at + 4].try_into().unwrap()) as usize;
+            at += 4;
+            values.push(serde_json::from_slice::<Value>(&out[at..at + size]).unwrap());
+            at += size;
+        }
+        assert_eq!(calls.get(), 3);
+        assert_eq!(values[0]["ok"], true);
+        assert_eq!(values[0], values[1]);
+        assert_eq!(values[2]["ok"], false);
+    }
+}

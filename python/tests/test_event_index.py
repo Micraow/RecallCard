@@ -84,6 +84,23 @@ class EventIndexTests(unittest.TestCase):
     def published(self):
         return self.finish(self.put(self.begin()))
 
+    def test_fixed_config_is_rechecked_before_queued_and_direct_encoding(self):
+        path = self.root / "worker.json"
+        path.write_bytes(canonical(self.config)); path.chmod(0o600)
+        worker = EventIndex(self.config, encoder=self.encoder, config_path=path)
+        published = self.finish(self.put(self.begin(worker=worker), worker=worker), worker=worker)
+        before = len(self.encoder.calls)
+        changed = {**self.config, "query_approved": False}
+        path.write_bytes(canonical(changed))
+        self.error("configuration_changed", "query", worker=worker, query="queued synthetic question", expected_generation=published["generation"])
+        with self.assertRaises(EventIndexError) as caught:
+            worker._encode("query", ["late synthetic question"])
+        self.assertEqual(caught.exception.code, "configuration_changed")
+        self.assertEqual(len(self.encoder.calls), before)
+        path.write_bytes(canonical(self.config))
+        self.ok("query", worker=worker, query="new approved synthetic question")
+        self.assertEqual(len(self.encoder.calls), before + 1)
+
     def test_build_query_has_no_text_or_vector_and_preserves_metadata(self):
         finish = self.published()
         result = self.ok("query", query="a new question", limit=10, expected_generation=finish["generation"])

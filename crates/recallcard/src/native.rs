@@ -805,6 +805,34 @@ pub fn serve_native_service_io<R: Read, W: Write>(
         writer,
     )
 }
+// 新编码转缓存只是诊断；重试仍重读全部权限、正文、来源版本与覆盖状态。
+fn same_read_result(request: &NativeRequest, previous: &Value, current: &Value) -> bool {
+    let simple_search = request.action == "recall_search"
+        || request.action == "authorized_read"
+            && request
+                .arguments
+                .as_ref()
+                .is_some_and(|a| a["action"] == "recall_search");
+    if !simple_search {
+        return previous == current;
+    }
+    let normalize = |value: &Value| {
+        let mut value = value.clone();
+        if let Some(scopes) = value
+            .pointer_mut("/coverage/scopes")
+            .and_then(Value::as_array_mut)
+        {
+            for scope in scopes {
+                if let Some(scope) = scope.as_object_mut() {
+                    scope.remove("query_encoding");
+                }
+            }
+        }
+        value
+    };
+    normalize(previous) == normalize(current)
+}
+
 fn serve_native_bound_service_io<R: Read, W: Write>(
     service: impl Fn(&str, Value, &str, Option<&str>) -> Result<Value>,
     freshness: impl Fn(&str, Option<&str>) -> Result<String>,
@@ -881,8 +909,9 @@ fn serve_native_bound_service_io<R: Read, W: Write>(
                                     request.installation_id.as_deref(),
                                 ) {
                                     Ok(current)
-                                        if response.get("result") == Some(&current)
-                                            && response["ok"] == true =>
+                                        if response.get("result").is_some_and(|previous| {
+                                            same_read_result(&request, previous, &current)
+                                        }) && response["ok"] == true =>
                                     {
                                         response.clone()
                                     }
