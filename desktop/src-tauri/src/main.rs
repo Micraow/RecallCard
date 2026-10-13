@@ -1534,6 +1534,42 @@ async fn confirm_note(
     .await
 }
 #[tauri::command]
+async fn preview_ai_reply(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    content: String,
+) -> Result<recallcard::desktop::ReplyPreview, String> {
+    execute(state.service.clone(), move |s| {
+        s.preview_ai_reply(&session_id, &scope, &content)
+    })
+    .await
+}
+#[tauri::command]
+async fn cancel_ai_reply(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    preview_id: String,
+) -> Result<(), String> {
+    execute(state.service.clone(), move |s| {
+        s.cancel_ai_reply(&session_id, &scope, &preview_id)
+    })
+    .await
+}
+#[tauri::command]
+async fn confirm_ai_reply(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    preview_id: String,
+) -> Result<Value, String> {
+    execute(state.service.clone(), move |s| {
+        s.confirm_ai_reply(&session_id, &scope, &preview_id)
+    })
+    .await
+}
+#[tauri::command]
 async fn pick_import(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1798,6 +1834,9 @@ fn main() {
             return_import_selection,
             preview_note,
             confirm_note,
+            preview_ai_reply,
+            confirm_ai_reply,
+            cancel_ai_reply,
             confirm_import,
             pick_dream,
             prepare_dream_task,

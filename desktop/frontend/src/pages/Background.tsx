@@ -1,3 +1,4 @@
+import { PasteReplyDialog } from "../components/PortableContext";
 import { useRef, useState } from "react";
 import type { ScopedService } from "../service/client";
 import { appError, isRunning, importRecovery, type AppError, type JobStatus } from "../service/contracts";
@@ -17,6 +18,7 @@ export function BackgroundPage({ service, refresh, changed, jobs, jobsError, imp
   const records = useResource(() => Promise.all([service.memories(), service.conversations(), service.memories(0, "tentative")]), [service, refresh]);
   const inventory = usePollingResource(() => service.connections(), [service]);
   const runtime = usePollingResource(() => service.runtime(), [service], 8000);
+  const [pasting, setPasting] = useState(false);
   const [adding, setAdding] = useState(false);
   const [saved, setSaved] = useState("");
   const active = jobs.find(isRunning);
@@ -35,7 +37,8 @@ export function BackgroundPage({ service, refresh, changed, jobs, jobsError, imp
   return <div className="background-page home-page">
     <header className="home-heading">
       <div><span className="eyebrow">{scopeLabel(service.scope)}</span><h1>让下一次对话接得上</h1><p>接好常用的 AI，授权范围内的背景就能自动准备。</p></div>
-      <button className="button" onClick={() => setAdding(true)}><Icon name="plus" size={15} />补充最新情况</button>
+      <div className="home-heading-actions"><button className="button" onClick={() => setPasting(true)}>粘贴 AI 回答</button>
+      <button className="button" onClick={() => setAdding(true)}><Icon name="plus" size={15} />补充最新情况</button></div>
     </header>
     {saved && <p className="background-saved" role="status"><Icon name="check" size={15} />{saved}</p>}
     <section className="home-connection-panel" aria-label="连接健康">
@@ -75,6 +78,7 @@ export function BackgroundPage({ service, refresh, changed, jobs, jobsError, imp
       {records.loading ? <span className="muted">正在读取…</span> : records.error ? <ErrorNotice error={records.error} retry={records.refresh} /> : <div className="home-library-links"><button onClick={() => navigate("memories")}><strong>{totalMemories?.toLocaleString()}</strong><span>条记忆<Icon name="chevron" size={13} /></span></button><button onClick={() => navigate("sources")}><strong>{totalSources?.toLocaleString()}</strong><span>段原始资料<Icon name="chevron" size={13} /></span></button></div>}
       {totalSources === 0 && <button className="button" disabled={importing} onClick={() => void importSources()}><Icon name="download" size={15} />{importing ? "正在选择文件…" : "导入聊天记录"}</button>}
     </section>
+    {pasting && <PasteReplyDialog service={service} close={() => setPasting(false)} saved={() => { setPasting(false); setSaved("已保存为 AI 回答，可搜索原文；不会自动整理成用户事实。"); changed(); records.refresh(); }} />}
     {adding && <AddUpdateDialog service={service} subject="" close={() => setAdding(false)} saved={() => { setAdding(false); setSaved("已保存你的补充，新的查找可以立即读到；原对话保持原样。"); changed(); records.refresh(); }} />}
   </div>;
 }

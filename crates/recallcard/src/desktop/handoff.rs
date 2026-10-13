@@ -104,11 +104,15 @@ impl SelectedRecord {
 
     fn block(&self) -> String {
         let role = self.role.as_ref().map_or("记忆条目", role_label);
-        let evidence = match self.evidence.as_str() {
-            "UserExplicit" => "用户明确表达",
-            "Observed" => "观察所得",
-            "AssistantSuggestion" => "AI 建议，非用户事实",
-            _ => &self.evidence,
+        let evidence = if self.role == Some(Role::Assistant) {
+            "AI 回答，非用户事实"
+        } else {
+            match self.evidence.as_str() {
+                "UserExplicit" => "用户明确表达",
+                "Observed" => "观察所得",
+                "AssistantSuggestion" => "AI 建议，非用户事实",
+                _ => &self.evidence,
+            }
         };
         let status = match self.status.as_str() {
             "tentative" => "tentative（待确认）",

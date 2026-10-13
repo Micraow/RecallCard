@@ -1090,3 +1090,32 @@ fn chatgpt_do_not_remember_is_preserved_but_never_auto_consolidated() {
     assert_eq!(vault.events().unwrap().len(), 1);
     assert!(vault.memories().unwrap().is_empty());
 }
+
+#[test]
+fn manually_pasted_ai_reply_is_searchable_but_never_sent_to_automatic_consolidation() {
+    let (dir, _) = vault();
+    let mut ui = recallcard::desktop::DesktopSession::default();
+    let info = ui.select_vault(&dir.path().join("pasted"), true).unwrap();
+    let preview = ui
+        .preview_ai_reply(
+            &info.session_id,
+            "personal",
+            "合成回答：也许应该改变偏好，尚未确认。",
+        )
+        .unwrap();
+    ui.confirm_ai_reply(&info.session_id, "personal", &preview.preview_id)
+        .unwrap();
+    let vault = Vault::open(std::path::Path::new(&info.root)).unwrap();
+    let runtime = MemoryRuntime::new(&vault);
+    runtime.configure(config()).unwrap();
+    let mut provider = fake();
+    assert!(runtime.tick(&mut provider).unwrap().is_none());
+    assert_eq!(provider.calls, 0);
+    assert_eq!(vault.events().unwrap().len(), 1);
+    assert!(vault.memories().unwrap().is_empty());
+    let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+    let result = context
+        .search(serde_json::from_value(json!({"query":"改变偏好","target":"events"})).unwrap())
+        .unwrap();
+    assert!(result.to_string().contains("改变偏好"));
+}

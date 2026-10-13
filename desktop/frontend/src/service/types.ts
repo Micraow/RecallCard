@@ -240,6 +240,7 @@ export const platformLabel = (platform: string) =>
     "qwen-export": "Qwen",
     claude: "Claude",
     "recallcard-desktop": "本地笔记",
+    "manual-ai-paste": "手动粘贴的 AI 回答",
     codex: "Codex",
   })[platform.toLowerCase()] || platform;
 export const evidenceLabel = (evidence: string) =>

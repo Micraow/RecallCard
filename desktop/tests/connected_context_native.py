@@ -226,6 +226,53 @@ class ConnectedJourney(FirstUseJourney):
         (self.artifacts / "same-vault-managed-mcp.json").write_text(json.dumps(found, ensure_ascii=False, indent=2))
         self.checkpoint("补充后入口自动刷新且受管理MCP从同一正本读到更新")
 
+        # 平台无关闭环：真实 React → Tauri → 正本 → 系统剪贴板；无外部网站或模型。
+        browser.type("#global-search", "周四回访")
+        run("xdotool", "key", "Return")
+        wait_for(lambda: self.content("搜索「周四回访」") and self.content("带到任意 AI"), "按问题检索已存原话")
+        browser.button("带到任意 AI")
+        browser.button("预览将复制的内容", "//dialog")
+        wait_for(lambda: self.content("完整复制内容") and self.content("用户原话"), "复制范围与来源预览")
+        preview = browser.observe("return document.querySelector('#portable-preview').value")
+        assert UPDATE in preview and "recallcard.context/1" in preview
+        assert self.content("字节 UTF-8") and self.content("附件原件及附件正文")
+        browser.button("核对并复制上下文", "//dialog")
+        wait_for(lambda: self.content("已复制。请到任意 AI 粘贴"), "用户点击触发实际剪贴板写入")
+        assert run("xclip", "-selection", "clipboard", "-o") == preview
+        assert len(self.events()) == 4 and not self.memories(), "复制不应生成记忆或回流事件"
+        self.checkpoint("任意AI交接显示来源长度和排除范围且系统剪贴板全文一致")
+        browser.button("关闭", "//dialog//div[contains(@class,'modal-footer')]")
+        assert not browser.observe("return Boolean(document.querySelector('dialog[open]'))")
+        browser.button("首页")
+        browser.button("粘贴 AI 回答")
+        browser.type("#pasted-ai-reply", "合成取消的回答，不得保存。")
+        browser.button("预览回答", "//dialog")
+        wait_for(lambda: self.content("确认为 AI 回答保存"), "保存前显式预览")
+        browser.button("取消", "//dialog//div[contains(@class,'modal-footer')]")
+        assert len(self.events()) == 4
+        browser.button("粘贴 AI 回答")
+        reply = "合成AI回答：建议周四回访时核对图四单位。这是助手建议，用户尚未确认。"
+        browser.type("#pasted-ai-reply", reply)
+        browser.button("预览回答", "//dialog")
+        wait_for(lambda: self.content("确认为 AI 回答保存"), "普通回答无协议标记也能预览")
+        assert len(self.events()) == 4 and self.content("AI 回答，非用户事实")
+        self.checkpoint("普通回答保存前显示助手来源并且取消不落库")
+        browser.button("确认为 AI 回答保存", "//dialog")
+        wait_for(lambda: len(self.events()) == 5 and self.content("已保存为 AI 回答"), "普通回答实际保存")
+        saved = [event for event in self.events() if event.get("content") == reply]
+        assert len(saved) == 1 and saved[0]["role"] == "assistant" and saved[0]["origin"] == "assistant_output"
+        assert saved[0].get("occurred_at") is None and saved[0].get("reply_to") is None
+        assert saved[0]["metadata"]["exclude_from_automatic_memory"] is True and not self.memories()
+        browser.type("#global-search", "合成AI回答")
+        run("xdotool", "key", "Return")
+        wait_for(lambda: self.content(reply), "已保存回答可按原文找回")
+        browser.click(".search-result")
+        wait_for(lambda: self.content("手动保存的 AI 回答") and self.content(reply), "搜索结果打开真实助手来源")
+        self.checkpoint("粘贴回答只追加一条助手来源且可搜索回到原文")
+        self.portable_acceptance = {"clipboard_full_match":True,"copy_added_events":0,"cancel_added_events":0,
+            "reply_events_added":1,"reply_role":"assistant","reply_original_time_known":False,
+            "automatic_memory":False,"reply_searchable":True,"external_site_used":False}
+
         browser.close()
         self.driver = None
         wait_for(ready, "窗口关闭后可重新启动")
@@ -249,7 +296,7 @@ class ConnectedJourney(FirstUseJourney):
         assert not snapshot.exists()
         denied = subprocess.run([str(self.cli), "--vault", str(self.vault), "--json", "connection-context", connection, "--scope", "personal"], capture_output=True, text=True)
         assert denied.returncode != 0 and UPDATE not in denied.stdout
-        assert len(self.events()) == 4
+        assert len(self.events()) == 5
         self.checkpoint("撤权清除文件入口并拒绝旧连接继续读取且正本保留")
 
 
@@ -289,7 +336,7 @@ def main():
                 except Exception: pass
             raise
         finally:
-            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.7-connected-context-native", "passed_steps": smoke.steps, "application": str(smoke.application), "cli": str(smoke.cli), "build": getattr(smoke, "build_identity", None), "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False, "external_agents_executed": False, "canonical": smoke.canonical_summary(), "attachment_acceptance": getattr(smoke, "attachment_acceptance", None)}, ensure_ascii=False, indent=2))
+            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.7-connected-context-native", "passed_steps": smoke.steps, "application": str(smoke.application), "cli": str(smoke.cli), "build": getattr(smoke, "build_identity", None), "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False, "external_agents_executed": False, "canonical": smoke.canonical_summary(), "attachment_acceptance": getattr(smoke, "attachment_acceptance", None), "portable_acceptance": getattr(smoke, "portable_acceptance", None)}, ensure_ascii=False, indent=2))
             try:
                 if smoke.vault.exists():
                     subprocess.run([str(smoke.cli), "--vault", str(smoke.vault), "--json", "service", "stop"], timeout=15, capture_output=True)

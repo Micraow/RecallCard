@@ -12,7 +12,9 @@ mod background;
 mod branches;
 mod git_sync;
 mod handoff;
+mod reply;
 pub use git_sync::{DesktopGitSyncPreview, GitSyncOperation};
+pub use reply::ReplyPreview;
 mod imports;
 mod memory;
 mod recent;
@@ -140,6 +142,7 @@ pub struct DesktopSession {
     pending_dream: Option<PendingDream>,
     pending_git_sync: Option<git_sync::PendingGitSync>,
     pending_note: Option<PendingNote>,
+    pending_reply: Option<reply::PendingReply>,
     pending_memory: Option<memory::PendingMemory>,
     pending_background: Option<background::PendingBackground>,
     pending_import_job: Option<imports::PendingImportJob>,
@@ -238,6 +241,7 @@ impl DesktopSession {
         self.pending_dream = None;
         self.pending_git_sync = None;
         self.pending_note = None;
+        self.pending_reply = None;
         self.pending_memory = None;
         self.pending_background = None;
     }
@@ -359,6 +363,7 @@ impl DesktopSession {
     ) -> Result<NotePreview> {
         self.vault(session_id)?;
         self.pending_note = None;
+        self.pending_reply = None;
         self.pending_memory = None;
         self.pending_background = None;
         check_scope(scope)?;
@@ -410,6 +415,7 @@ impl DesktopSession {
             .capture(pending.input.clone())
             .map_err(|_| "笔记保存未完成，请检查资料库后重试".to_owned())?;
         self.pending_note = None;
+        self.pending_reply = None;
         self.pending_memory = None;
         self.pending_background = None;
         Ok(json!({"ref": format!("event:{}", event.id), "event": event}))
@@ -837,6 +843,7 @@ impl DesktopSession {
         self.pending_dream = None;
         self.pending_git_sync = None;
         self.pending_note = None;
+        self.pending_reply = None;
         self.pending_memory = None;
         self.pending_background = None;
         Ok(())

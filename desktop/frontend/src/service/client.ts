@@ -1,3 +1,4 @@
+import { validatePortableContext, type PortableContext, type ReplyPreview } from "./portable";
 import type {
   CredentialStatus,
   ModelSetupSnapshot,
@@ -126,6 +127,19 @@ export class ScopedService {
       scope: this.scope,
       ...args,
     });
+  }
+  async prepareContext(references: string[], goal: string) {
+    const result = await this.call<PortableContext>("prepare_selected_context", { references, goal, budgetTokens: 32768 });
+    return validatePortableContext(result, this.scope, references);
+  }
+  previewAiReply(content: string) {
+    return this.call<ReplyPreview>("preview_ai_reply", { content });
+  }
+  cancelAiReply(previewId: string) {
+    return this.call<void>("cancel_ai_reply", { previewId });
+  }
+  confirmAiReply(previewId: string) {
+    return this.call<{ ref: string; role: "assistant"; automatic_memory: false }>("confirm_ai_reply", { previewId });
   }
   previewNote(content: string) {
     return this.call<{
