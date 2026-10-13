@@ -61,12 +61,12 @@ test('保存失败不标记成功，下一次相同快照可幂等重试',async(
   await assert.rejects(h.tick(),/合成失败/);assert.equal(h.state().auto_capture_hash,undefined);assert.equal(h.state().automatic_status,'failed');
   failed=false;await h.tick();assert.ok(h.state().auto_capture_hash);assert.equal(h.state().automatic_error,null);
 });
-test('DOM写入失败保留完整结果且重复tick不重新读取或重放插入',async()=>{
+test('DOM写入失败保留完整结果且重复tick只核验不重放插入',async()=>{
   const h=await harness();const content=h.api.content;
   h.api.content=async(tab,message)=>message.kind==='insert'?{ok:false,error:'输入框已被编辑'}:content(tab,message);
   assert.equal((await h.tick()).status,'manual_fallback');assert.equal(h.state().preview.delivery,'prepared');assert.match(h.state().preview.text,/合成偏好/);
   assert.equal(h.state().relay.phase,'awaiting_user_send');assert.equal(h.state().relay.manual_fallback,true);
-  const reads=h.calls.filter(r=>r.action==='authorized_read').length;await h.tick();assert.equal(h.calls.filter(r=>r.action==='authorized_read').length,reads);
+  const reads=h.calls.filter(r=>r.action==='authorized_read').length;await h.tick();assert.equal(h.calls.filter(r=>r.action==='authorized_read').length,reads+1);assert.equal(h.content.filter(m=>m.kind==='insert').length,0);
 });
 test('悬浮暂停不再读取、保存或写入；恢复沿用request_id与轮数',async()=>{
   const h=await harness();await h.tick();const prior=h.state();
@@ -98,4 +98,63 @@ test('权限修订或结果改变后，已准备复制内容不能继续发送�
     else{const native=h.api.native;h.api.native=async(host,request)=>request.action==='authorized_read'?{ok:true,result:{bootstrap_version:'v2',stable_text:'新资料',refs:[]}}:native(host,request);}
     await assert.rejects(h.broker.handle({...h.message(),kind:'relay_control',command:'copy'},h.sender),/变化/);
   }
+});
+
+test('同授权版本移出背景使旧草稿失效，编辑块保留并等待明确重新准备',async()=>{
+  for(const edited of [false,true]){
+    const h=await harness();await h.tick();const before=h.state().preview;
+    let draft=edited?'用户编辑后的旧背景':before.text;
+    const content=h.api.content,native=h.api.native;let freshReads=0;
+    h.api.content=async(tab,message)=>{
+      if(message.kind==='remove'){h.content.push(message);if(edited)return{ok:false,error:'用户已编辑'};draft='';return{ok:true,result:{}};}
+      return content(tab,message);
+    };
+    h.api.native=async(host,request)=>{if(request.action==='authorized_read'){freshReads++;return{ok:true,result:{bootstrap_version:'removed-v2',stable_text:'仅使用说明，已移出背景',refs:[]}};}return native(host,request);};
+    await assert.rejects(h.tick(),edited?/先人工删除/:/开局背景已变化/);
+    assert.equal(h.state().preview,null);assert.equal(h.state().bootstrap,null);
+    assert.equal(h.state().relay.reprepare_required,true);assert.equal(h.state().relay.request_id,null);
+    assert.equal(draft,edited?'用户编辑后的旧背景':'');
+    if(edited)assert.match(h.state().relay.detail,/先人工删除/);
+    const command=command=>h.broker.handle({...h.message(),kind:'relay_control',command},h.sender);
+    await command('resume');const count=h.content.filter(m=>m.kind==='insert').length,reads=freshReads;
+    for(let i=0;i<2;i++)assert.equal((await h.tick()).status,'reprepare_required');
+    assert.equal(h.content.filter(m=>m.kind==='insert').length,count);assert.equal(freshReads,reads);
+    if(edited)assert.match(h.state().relay.detail,/先人工删除/);
+    const renewed=await command('bootstrap');
+    assert.equal(renewed.preview.delivery,'prepared');assert.match(renewed.preview.text,/已移出背景/);
+    if(edited)assert.match(renewed.relay.detail,/先人工删除/);
+    assert.equal(renewed.relay.reprepare_required,false);assert.equal(h.content.filter(m=>m.kind==='insert').length,count);
+    assert.equal(draft,edited?'用户编辑后的旧背景':'');
+  }
+});
+test('旧背景核验离线也失效，显式重新准备失败不会解除阻塞',async()=>{
+  const h=await harness();await h.tick();const native=h.api.native;
+  h.api.native=async(host,request)=>{if(request.action==='authorized_read')throw new Error('合成离线');return native(host,request);};
+  await assert.rejects(h.tick(),/旧预览已废弃/);assert.equal(h.state().relay.reprepare_required,true);
+  await assert.rejects(h.broker.handle({...h.message(),kind:'relay_control',command:'bootstrap'},h.sender),/合成离线/);
+  assert.equal(h.state().relay.reprepare_required,true);assert.equal(h.state().relay.request_id,null);assert.equal((await h.tick()).status,'reprepare_required');
+});
+
+test('弹窗手动背景与自动接力混用不误删，新鲜度失效后两入口都可明确重新准备',async()=>{
+  const h=await harness();const native=h.api.native;let version='v1';
+  h.api.native=async(host,request)=>['bootstrap','authorized_read'].includes(request.action)?{ok:true,result:{bootstrap_version:version,stable_text:'合成'+version,refs:[]}}:native(host,request);
+  const popup={id:extensionId,url:`chrome-extension://${extensionId}/popup.html`};
+  const prepare=()=>h.broker.handle({kind:'bootstrap',tabId:1,nonce:h.state().nonce,session_ref:h.state().session_ref},popup);
+  const initial=await prepare();assert.equal(initial.preview.delivery,'prepared');
+  await h.tick();assert.equal(h.state().preview.id,initial.preview.id);assert.equal(h.state().relay?.reprepare_required||false,false);
+  assert.equal(h.content.filter(m=>m.kind==='insert').length,0);
+  version='v2';await assert.rejects(h.tick(),/开局背景已变化/);assert.equal(h.state().relay.reprepare_required,true);
+  const renewed=await prepare();assert.match(renewed.preview.text,/合成v2/);assert.equal(renewed.relay.reprepare_required,false);
+  await h.tick();assert.equal(h.state().preview.id,renewed.preview.id);assert.equal(h.content.filter(m=>m.kind==='insert').length,0);
+  const copied=await h.broker.handle({...h.message(),kind:'relay_control',command:'copy'},h.sender);assert.match(copied.text,/合成v2/);
+});
+
+test('手动重新准备保存预览后会话核验失败，精确清理本次预览并允许再次准备',async()=>{
+  const h=await harness();const save=h.api.save,content=h.api.content;let failNext=false,failed=false;
+  h.api.save=async(tab,value)=>{await save(tab,value);if(value.preview?.delivery==='prepared'&&!failed)failNext=true;};
+  h.api.content=async(tab,message)=>{if(message.kind==='check'&&failNext){failNext=false;failed=true;return{ok:false,error:'合成短暂核验失败'};}return content(tab,message);};
+  const prepare=()=>h.broker.handle({...h.message(),kind:'relay_control',command:'bootstrap'},h.sender);
+  await assert.rejects(prepare(),/文档或会话已变化/);
+  assert.equal(h.state().preview,null);assert.equal(h.state().bootstrap,null);assert.equal(h.state().relay.request_id,null);assert.equal(h.state().relay.reprepare_required,true);
+  const result=await prepare();assert.equal(result.preview.delivery,'prepared');assert.equal(result.relay.reprepare_required,false);assert.equal(h.content.filter(m=>m.kind==='insert').length,0);
 });

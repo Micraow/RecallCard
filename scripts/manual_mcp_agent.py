@@ -30,7 +30,7 @@ def load_agent_entry(config, connection_id, scope, environment, output):
         raise RuntimeError('Authorized Agent entry failed; no direct vault fallback')
     response = load_json(result.stdout)
     entry = response.get('result', {})
-    if (response.get('ok') is not True or entry.get('schema') != 'recallcard.agent-entry/1'
+    if (response.get('ok') is not True or entry.get('schema') != 'recallcard.agent-entry/2'
             or entry.get('reference_data') is not True or entry.get('connection_id') != connection_id
             or entry.get('scopes') != [scope]):
         raise ValueError('Agent entry identity or scope mismatch')

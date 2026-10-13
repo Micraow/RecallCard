@@ -64,6 +64,14 @@ class ConnectedJourney(FirstUseJourney):
         assert selected["content"] == before["content"] and selected["source_refs"] == before["source_refs"]
         preview = browser.observe("return document.querySelector('#opening-preview').value")
         assert "recallcard.context/1" in preview and f'memory:{created["id"]}@{selected["revision"]}' in preview
+        connection = self.cli_result("connections")["entries"][0]["id"]
+        entry = self.cli_result("connection-context", connection, "--scope", "personal", "--budget-bytes", "4096")
+        mcp_config = {"command": str(self.cli), "args": ["--vault", str(self.vault), "mcp", "--scope", "personal", "--connection-id", connection]}
+        bootstrap = self.mcp_tool(mcp_config, "bootstrap", {})
+        assert entry["schema"] == "recallcard.agent-entry/2"
+        assert entry["bootstrap_version"] == bootstrap["bootstrap_version"] and entry["bootstrap_version"] in preview
+        assert [item["ref"] for item in entry["profile"]] == bootstrap["refs"] == [f'memory:{created["id"]}@{selected["revision"]}']
+        assert entry["profile"][0]["text"] == text and entry["profile"][0]["text_truncated"] is False
         browser.button("核对并复制开局背景", "//dialog")
         wait_for(lambda: self.content("开局背景已复制"), "开局背景实际写入系统剪贴板")
         assert run("xclip", "-selection", "clipboard", "-o") == preview
@@ -80,7 +88,13 @@ class ConnectedJourney(FirstUseJourney):
         assert removed["protected"] is True and "bootstrap" not in removed["labels"]
         assert removed["content"] == before["content"] and removed["source_refs"] == before["source_refs"]
         assert len(self.memories()) == 1 and self.events() == events
-        self.opening_background_acceptance = {"home_without_question": True, "empty_memory_honest": True, "cancel_zero_writes": True, "protected_inclusion_requires_approval": True, "same_bootstrap_projection": True, "explicit_protected_removal": True, "clipboard_full_match": True, "memory_and_sources_preserved": True, "model_invoked": False, "external_site_used": False}
+        assert not Path(entry["file_path"]).exists(), "移出立即使受管理旧文件失效"
+        refreshed = self.cli_result("connection-context", connection, "--scope", "personal", "--budget-bytes", "4096")
+        bootstrap = self.mcp_tool(mcp_config, "bootstrap", {})
+        assert refreshed["profile"] == bootstrap["refs"] == []
+        assert refreshed["bootstrap_version"] == bootstrap["bootstrap_version"] != entry["bootstrap_version"]
+        assert text not in json.dumps(refreshed, ensure_ascii=False) and text not in bootstrap["stable_text"]
+        self.opening_background_acceptance = {"home_without_question": True, "empty_memory_honest": True, "cancel_zero_writes": True, "protected_inclusion_requires_approval": True, "same_bootstrap_projection": True, "managed_file_and_mcp_selection_match": True, "explicit_protected_removal": True, "clipboard_full_match": True, "memory_and_sources_preserved": True, "model_invoked": False, "external_site_used": False}
         self.checkpoint("明确确认后只移出常驻选择且记忆保护与原话都保留")
         browser.button("关闭", "//dialog//div[contains(@class,'modal-footer')]")
 

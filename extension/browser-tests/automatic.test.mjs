@@ -2,6 +2,7 @@
 import {before,after,test} from 'node:test';
 import assert from 'node:assert/strict';
 import {fileURLToPath} from 'node:url';
+import {mkdir} from 'node:fs/promises';
 import {chromium} from 'playwright';
 import {Broker} from '../broker.js';
 let browser;
@@ -11,14 +12,14 @@ const EXT='abcdefghijklmnopabcdefghijklmnop';
 const initial='<div data-message-author-role="user" data-message-id="u1"><p>合成用户决定</p></div><div data-message-author-role="assistant" data-message-id="a1" data-is-streaming="false"><p>合成回答</p></div><textarea id="mobile-composer-prompt">原有草稿</textarea>';
 async function harness(authorized=true){
   const page=await browser.newPage();let state;let now=10000;
-  const nativeCalls=[],saved=[],inserts=[];
+  const nativeCalls=[],saved=[],inserts=[];let background={bootstrap_version:'v1',stable_text:'合成稳定背景',refs:[]};
   let grant=authorized?{capture:true,recall:true,provider_disclosure:true,permission_revision:1,platform:'chatgpt'}:null;
   await page.route('**/*',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:'<!doctype html><meta charset="UTF-8"><title>合成对话</title>'+initial}));
   await page.goto('https://chatgpt.com/c/synthetic');
   assert.equal(await page.evaluate(()=>document.characterSet),'UTF-8','合成页面必须按UTF-8解码原始中文');
   const broker=new Broker({id:EXT,installationId:async()=>'11111111-1111-4111-8111-111111111111',popupUrl:`chrome-extension://${EXT}/popup.html`,getTab:async()=>({id:1,active:true,url:page.url()}),load:async()=>state?structuredClone(state):null,save:async(_,value)=>{state=structuredClone(value);},now:()=>now+=2000,
     content:async(_,message)=>{if(message.kind==='insert')inserts.push(message);return page.evaluate(({message,EXT})=>new Promise(resolve=>window.contentListener(message,{id:EXT,url:`chrome-extension://${EXT}/background.js`},resolve)),{message,EXT});},
-    native:async(_,request)=>{nativeCalls.push(request);if(request.action==='connection')return{ok:true,result:{connection_id:'c'.repeat(64),capture_enabled:!!grant?.capture,automation:grant,state:grant?'reachable':'revoked'}};if(request.action==='automatic_capture'){saved.push(request.arguments.conversation);return{ok:true,result:{events_added:request.arguments.conversation.messages.length,events_seen:request.arguments.conversation.messages.length}};}if(request.action==='authorized_read')return{ok:true,result:request.arguments.action==='bootstrap'?{bootstrap_version:'v1',stable_text:'合成稳定背景',refs:[]}:{results:[{ref:'event:evt_synthetic',content:'合成召回'}]}};throw new Error('意外Native动作');}
+    native:async(_,request)=>{nativeCalls.push(request);if(request.action==='connection')return{ok:true,result:{connection_id:'c'.repeat(64),capture_enabled:!!grant?.capture,automation:grant,state:grant?'reachable':'revoked'}};if(request.action==='automatic_capture'){saved.push(request.arguments.conversation);return{ok:true,result:{events_added:request.arguments.conversation.messages.length,events_seen:request.arguments.conversation.messages.length}};}if(request.action==='authorized_read')return{ok:true,result:request.arguments.action==='bootstrap'?background:{results:[{ref:'event:evt_synthetic',content:'合成召回'}]}};throw new Error('意外Native动作');}
   });
   await page.exposeFunction('worker',message=>broker.handle(message,{id:EXT,origin:'https://chatgpt.com',url:page.url(),tab:{id:1,url:page.url()},frameId:0,documentId:'synthetic-doc'}).then(result=>({ok:true,result}),error=>({ok:false,error:error.message})));
   for(const name of ['site-adapters.js','composer-adapter.js','conversation-format.js','conversation-adapters.js'])await page.addScriptTag({path:fileURLToPath(new URL('../'+name,import.meta.url))});
@@ -28,9 +29,10 @@ async function harness(authorized=true){
     window.sendEvents=[];for(const name of ['click','keydown','submit'])document.addEventListener(name,()=>window.sendEvents.push(name));
     window.chrome={runtime:{id:EXT,getURL:path=>`chrome-extension://${EXT}/`+path,onMessage:{addListener:listener=>window.contentListener=listener},sendMessage:message=>window.worker(message)}};
   },EXT);
+  await page.addScriptTag({path:fileURLToPath(new URL('../relay-overlay.js',import.meta.url))});
   await page.addScriptTag({path:fileURLToPath(new URL('../content.js',import.meta.url))});
   const tick=async()=>{await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));await page.evaluate(async()=>{window.syntheticClock+=2000;await window.ticks.at(-1)();});};
-  return{page,tick,nativeCalls,saved,inserts,state:()=>state,setGrant:value=>{grant=value;}};
+  return{page,tick,nativeCalls,saved,inserts,state:()=>state,setGrant:value=>{grant=value;},setBackground:value=>{background=value;}};
 }
 test('一次授权后真实DOM完成消息自动保存/准备草稿，零click/Enter/submit且重复tick不重注入',async()=>{
   const h=await harness();try{await h.tick();assert.equal(h.saved.length,1);assert.equal(h.saved[0].messages[0].text,'合成用户决定');assert.equal(h.inserts.length,1);
@@ -59,5 +61,22 @@ test('上下文块不回流为新用户事实；模型完成的只读请求自�
 });
 test('SPA换会话自动重绑，旧nonce请求不能查询，持久授权不需要再次点击',async()=>{
   const h=await harness();try{await h.tick();const old=h.state();await h.page.evaluate(()=>history.pushState({},'', '/c/next-synthetic'));await h.tick();assert.equal(h.inserts.length,1);assert.equal(h.state().automatic_status,'waiting_for_conversation_identity');await h.page.evaluate(()=>{for(const node of document.querySelectorAll('[data-message-id]'))node.setAttribute('data-message-id','next-'+node.getAttribute('data-message-id'));});await h.tick();await h.tick();assert.notEqual(h.state().nonce,old.nonce);assert.equal(h.inserts.length,2);assert.equal(h.saved.at(-1).source.conversation_id,'next-synthetic');assert.deepEqual(await h.page.evaluate(()=>sendEvents),[]);
+  }finally{await h.page.close();}
+});
+
+test('移出背景使旧草稿失效但保留真实编辑文本，连续tick和恢复不自动重新填框',async()=>{
+  const h=await harness();try{
+    await h.tick();const before=await h.page.locator('textarea').inputValue();
+    const edited=before.replace('合成稳定背景','我改写的旧背景')+'\n用户自己的新备注';
+    await h.page.locator('textarea').fill(edited);
+    h.setBackground({bootstrap_version:'removed-v2',stable_text:'已移出背景，只有使用说明',refs:[]});
+    await h.tick();assert.equal(h.state().preview,null);assert.equal(h.state().relay.reprepare_required,true);assert.match(h.state().relay.detail,/先人工删除/);
+    const control=command=>h.page.evaluate(({command,state})=>chrome.runtime.sendMessage({kind:'relay_control',command,route:state.route,nonce:state.nonce,session_ref:state.session_ref}),{command,state:h.state()});
+    assert.equal((await control('resume')).ok,true);
+    await h.tick();await h.tick();assert.equal(h.inserts.length,1);assert.equal(await h.page.locator('textarea').inputValue(),edited);
+    await mkdir(new URL('../artifacts/',import.meta.url),{recursive:true});
+    await h.page.screenshot({path:fileURLToPath(new URL('../artifacts/background-edited-stale.png',import.meta.url)),fullPage:true});
+    const renewed=await control('bootstrap');assert.equal(renewed.ok,true);assert.equal(renewed.result.preview.delivery,'prepared');assert.match(renewed.result.preview.text,/已移出背景/);
+    assert.equal(h.inserts.length,1);assert.equal(await h.page.locator('textarea').inputValue(),edited);assert.deepEqual(await h.page.evaluate(()=>sendEvents),[]);
   }finally{await h.page.close();}
 });

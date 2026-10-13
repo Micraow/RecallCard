@@ -108,7 +108,7 @@ class ManagedEntryContractTests(unittest.TestCase):
         self.config = {'binary': '/synthetic/recallcard', 'vault': str(self.root / 'vault')}
         self.path = self.root / 'vault/generated/bootstrap/conn_synthetic/context.json'
         self.path.parent.mkdir(parents=True)
-        self.entry = {'schema': 'recallcard.agent-entry/1', 'reference_data': True,
+        self.entry = {'schema': 'recallcard.agent-entry/2', 'reference_data': True,
                       'connection_id': 'conn_synthetic', 'scopes': ['project:synthetic'],
                       'file_path': str(self.path), 'profile': [], 'directory': []}
         write(self.path, self.entry)
@@ -132,7 +132,7 @@ class ManagedEntryContractTests(unittest.TestCase):
         reader.assert_not_called()
 
     def test_wrong_path_or_scope_is_rejected(self):
-        for change in [{'file_path': str(self.root / 'elsewhere.json')}, {'scopes': ['private']}]:
+        for change in [{'file_path': str(self.root / 'elsewhere.json')}, {'scopes': ['private']}, {'schema': 'recallcard.agent-entry/1'}]:
             with patch('manual_mcp_agent.subprocess.run', return_value=self.result(self.entry | change)):
                 with self.assertRaises(ValueError):
                     load_agent_entry(self.config, 'conn_synthetic', 'project:synthetic', {}, self.root)

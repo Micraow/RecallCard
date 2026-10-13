@@ -1,7 +1,7 @@
 import { strictJson, isRecord } from './protocol.js';
 export const PHASES = Object.freeze(['idle', 'preparing', 'awaiting_user_send', 'waiting_reply', 'result_ready', 'paused', 'blocked']);
 export function relayState(state) {
-  return { enabled: true, paused: false, phase: 'idle', round: 0, request_id: null, detail: '等待本机连接与授权', manual_fallback: false, result_ready: false, ...(state.relay || {}) };
+  return { enabled: true, paused: false, phase: 'idle', round: 0, request_id: null, detail: '等待本机连接与授权', manual_fallback: false, reprepare_required: false, result_ready: false, ...(state.relay || {}) };
 }
 export function setRelay(state, phase, detail, extra = {}) {
   if (!PHASES.includes(phase)) throw new Error('接力状态无效');

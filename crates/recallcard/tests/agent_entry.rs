@@ -37,7 +37,7 @@ fn live_entry_filters_scope_sources_and_suppression_and_invalidates_before_write
     let v = Vault::init(&d.path().join("vault")).unwrap();
     let own = source(&v, "personal", "own", "可访问原话");
     let other = source(&v, "project:other", "secret", "OTHER_SCOPE_SECRET");
-    let m:MemoryInput=serde_json::from_value(json!({"scope":"personal","content":"通用合成背景","source_refs":[own],"evidence":"user_explicit"})).unwrap();
+    let m:MemoryInput=serde_json::from_value(json!({"scope":"personal","content":"通用合成背景","labels":["bootstrap"],"source_refs":[own],"evidence":"user_explicit"})).unwrap();
     v.add_memory(m).unwrap();
     let entry = connect(&v, "personal");
     let a = agent_entry::refresh(&v, &entry.id, vec!["personal".into()], 4096).unwrap();

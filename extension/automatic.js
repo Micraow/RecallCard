@@ -15,7 +15,7 @@ export async function automaticCycle(broker, tabId, message) {
   const active = grant && grant.platform === siteFor(state.route).id && Number.isSafeInteger(grant.permission_revision);
   if (!active || !grant.capture && !grant.recall) {
     if (state.preview && state.automatic_revision) { await broker.discardStale(tabId, state, state.preview); state = await broker.current(tabId, message); }
-    setRelay(state, 'blocked', '需要在桌面确认此网站的接入权限');
+    setRelay(state, 'blocked', relayState(state).reprepare_required ? relayState(state).detail : '需要在桌面确认此网站的接入权限');
     await broker.api.save(tabId, state);
     return { status: checked.connection.state === 'revoked' ? 'revoked' : 'not_authorized', account_identity: 'unverified' };
   }
@@ -26,6 +26,22 @@ export async function automaticCycle(broker, tabId, message) {
   }
   state.automatic_revision = grant.permission_revision;
   await broker.api.save(tabId, state);
+  // 失效后的恢复必须由用户发起，不能下一 tick 又把新背景追加到已编辑的旧块。
+  if (relayState(state).reprepare_required) return { status: 'reprepare_required', account_identity: 'unverified' };
+  const pending = state.preview;
+  if (grant.recall && grant.provider_disclosure && pending?.action === 'bootstrap' && ['prepared', 'draft', 'left_draft'].includes(pending.delivery)) {
+    try {
+      const request = validateAction(pending.source_request, state);
+      if (request.action !== 'bootstrap' || (pending.automatic_revision !== undefined && pending.automatic_revision !== grant.permission_revision) || !pending.result_fingerprint) throw new Error('旧开局背景缺少当前核验信息');
+      const fresh = await broker.userNative(tabId, message, state, 'authorized_read', { action: request.action, arguments: request.arguments, permission_revision: grant.permission_revision });
+      if (await broker.fingerprint('bootstrap', fresh) !== pending.result_fingerprint) throw new Error('开局背景已变化');
+      state = await broker.current(tabId, message);
+    } catch (error) {
+      const warning = await broker.discardStale(tabId, state, pending);
+      throw new Error(`${error.message}；旧预览已废弃。${warning}请明确重新准备，扩展不会自动发送`);
+    }
+  }
+
   const reply = await broker.api.content(tabId, { kind: 'automatic_snapshot', route: state.route, nonce: state.nonce, session_ref: state.session_ref, capture: !!grant.capture, recall: !!grant.recall, capsule_id: state.preview?.id || null, sent_message_id: state.relay_sent_message || null }, state.documentId);
   if (!reply?.ok) throw new Error(reply?.error || '自动读取尚未就绪');
   state = await broker.current(tabId, message);
@@ -114,9 +130,8 @@ export async function prepareAutomaticRequest(broker, tabId, message, state, req
   // Revalidate immediately before disclosing in the website composer. Every
   // automatic read is grant-checked again by native, including revocation.
   const fresh = await broker.userNative(tabId, message, state, 'authorized_read', args);
-  const stable = value => { if (request.action !== 'bootstrap') return value; const { coverage: _coverage, ...rest } = value; return rest; };
-  const fingerprint = await format.hash(stable(result));
-  if (fingerprint !== await format.hash(stable(fresh))) throw new Error('资料在准备期间变化，请等待下一次读取');
+  const fingerprint = await broker.fingerprint(request.action, result);
+  if (fingerprint !== await broker.fingerprint(request.action, fresh)) throw new Error('资料在准备期间变化，请等待下一次读取');
   const capsule = makeCapsule(request, fresh, state);
   // Persist the complete result before attempting the composer. A changed DOM or
   // user edit becomes a copy/paste fallback, never a lost result or replayed read.

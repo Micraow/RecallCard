@@ -44,3 +44,6 @@ Linux 合成 HOME/项目测试覆盖预览隐私、保留设置、幂等应用�
 - [Codex MCP 配置](https://developers.openai.com/codex/mcp/)：项目 `.codex/config.toml` 与 `mcp_servers`，项目需要受信任。
 - [Claude Code MCP](https://code.claude.com/docs/en/mcp)：项目 `.mcp.json`、`mcpServers` 和宿主批准行为。
 - [Claude Code Hooks](https://code.claude.com/docs/en/hooks)：`SessionStart` 的 matcher、命令与生命周期输入。
+
+
+文件入口现使用 `recallcard.agent-entry/2`，`profile` 只携带首页“开局背景”默认投影实际选中的完整条目，并保留证据与时间。另存文件是静态副本，使用前重新生成并核对；更新不会扫描或覆盖用户另存文件。受管理缓存的失效不等于能收回宿主已经读取的资料。旧 schema 的手工接入脚本应随产品升级。

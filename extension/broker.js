@@ -44,6 +44,7 @@ export async function resultFingerprint(action, result) {
 }
 export class Broker {
   constructor(api) { this.api = api; this.locks = new Map(); }
+  fingerprint(action, result) { return resultFingerprint(action, result); }
   async serial(tabId, operation) {
     const previous = this.locks.get(tabId) || Promise.resolve();
     const next = previous.catch(() => {}).then(operation);
@@ -129,7 +130,7 @@ export class Broker {
     state.preview = null;
     state.bootstrap = null;
     state.relay_sent_message = null;
-    setRelay(state, 'blocked', '旧资料或权限已失效，请重新准备', { request_id: null, manual_fallback: true });
+    setRelay(state, 'blocked', `旧资料或权限已失效。${warning}请明确点击准备使用说明，核对新预览后手动复制`, { request_id: null, manual_fallback: true, reprepare_required: true });
     await this.api.save(tabId, state);
     return warning;
   }
@@ -154,7 +155,7 @@ export class Broker {
       const old = relayState(state);
       const paused = ['pause', 'disable'].includes(command);
       state.relay = { ...old, enabled: command === 'disable' ? false : command === 'enable' ? true : old.enabled, paused };
-      setRelay(state, paused ? 'paused' : state.preview ? 'awaiting_user_send' : 'idle', paused ? '接力已暂停，恢复后会重新核对当前会话与权限' : '接力已恢复，正在重新核对当前会话');
+      setRelay(state, paused ? 'paused' : old.reprepare_required ? 'blocked' : state.preview ? 'awaiting_user_send' : 'idle', old.reprepare_required ? old.detail : paused ? '接力已暂停，恢复后会重新核对当前会话与权限' : '接力已恢复，正在重新核对当前会话');
       await this.api.save(tabId, state);
       return publicState(state);
     }
@@ -178,16 +179,34 @@ export class Broker {
     if (command === 'bootstrap') {
       if (state.bootstrap || state.preview) fail('本会话已有使用说明或本轮资料，请继续当前轮；重新开始需显式重置');
       const request = validateAction({ protocol: PROTOCOL, request_id: `b_${newNonce()}`, nonce: state.nonce, session_ref: state.session_ref, action: 'bootstrap', arguments: {} }, state);
-      await prepareAutomaticRequest(this, tabId, message, state, request, grant);
-      return publicState(await this.current(tabId, message));
+      const previousWarning = relayState(state).reprepare_required ? relayState(state).detail : '';
+      try {
+        await prepareAutomaticRequest(this, tabId, message, state, request, grant);
+        state = await this.current(tabId, message);
+        state.relay = { ...relayState(state), reprepare_required: false,
+          ...(previousWarning ? { detail: `${previousWarning}。新预览已备好，检查旧草稿后手动复制；没有自动填入或发送` } : {}) };
+        await this.api.save(tabId, state);
+        return publicState(state);
+      } catch (error) {
+        const current = await this.api.load(tabId);
+        if (current?.nonce === state.nonce && current.session_ref === state.session_ref) {
+          if (current.preview?.id === request.request_id) current.preview = null;
+          if (current.bootstrap?.id === request.request_id) current.bootstrap = null;
+          setRelay(current, 'blocked', `${previousWarning}${error.message}；请重新准备`, { request_id: null, manual_fallback: true, reprepare_required: true });
+          await this.api.save(tabId, current);
+        }
+        throw error;
+      }
     }
+    if (relayState(state).reprepare_required) fail('旧资料已失效，请先明确点击准备使用说明；不会继续处理旧轮请求');
     if (command === 'copy') {
       const capsule = state.preview;
-      if (!capsule || capsule.automatic_revision !== grant.permission_revision) fail('本轮资料或权限已变化，请重新准备');
-      const result = await this.userNative(tabId, message, state, 'authorized_read', { action: capsule.source_request.action, arguments: capsule.source_request.arguments, permission_revision: grant.permission_revision });
+      if (!capsule || (capsule.automatic_revision !== undefined && capsule.automatic_revision !== grant.permission_revision)) fail('本轮资料或权限已变化，请重新准备');
+      const request = validateAction(capsule.source_request, state);
+      const result = await this.userNative(tabId, message, state, 'authorized_read', { action: request.action, arguments: request.arguments, permission_revision: grant.permission_revision });
       if (await resultFingerprint(capsule.action, result) !== capsule.result_fingerprint) {
-        await this.discardStale(tabId, state, capsule);
-        fail('资料已变化，旧副本已废弃，请重新准备');
+        const warning = await this.discardStale(tabId, state, capsule);
+        fail(`资料已变化，旧副本已废弃。${warning}请重新准备`);
       }
       return { text: capsuleText(capsule), request_id: capsule.id };
     }
@@ -319,10 +338,13 @@ export class Broker {
         await this.api.save(tabId, state);
         return publicState(state);
       }
+      const previousWarning = relayState(state).reprepare_required ? relayState(state).detail : '';
+      if (previousWarning && message.kind === 'execute') fail('旧资料已失效，请先明确准备 Bootstrap');
       if (message.kind === 'bootstrap' && state.bootstrap) {
         if (state.preview?.delivery === 'draft' && state.preview.id !== state.bootstrap.id) fail('请先移除当前草稿中的上下文，或确认它已手动发送');
         state = await this.revalidate(tabId, message, state, state.bootstrap);
         state.preview = state.bootstrap;
+        if (previousWarning) setRelay(state, 'awaiting_user_send', `${previousWarning}。新预览已备好，检查旧草稿后手动复制`, { reprepare_required: false, request_id: state.preview.id, manual_fallback: true });
         await this.api.save(tabId, state);
         return publicState(state);
       }
@@ -333,7 +355,10 @@ export class Broker {
       const fingerprint = await resultFingerprint(request.action, checked.result);
       state = await this.current(tabId, message);
       state.preview = { ...makeCapsule(request, checked.result, state), source_request: request, result_fingerprint: fingerprint };
-      if (request.action === 'bootstrap') state.bootstrap = state.preview;
+      if (request.action === 'bootstrap') {
+        state.bootstrap = state.preview;
+        if (previousWarning) setRelay(state, 'awaiting_user_send', `${previousWarning}。新预览已备好，检查旧草稿后手动复制`, { reprepare_required: false, request_id: state.preview.id, manual_fallback: true });
+      }
       await this.api.save(tabId, state);
       return publicState(state);
     });
