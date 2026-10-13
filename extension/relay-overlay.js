@@ -35,13 +35,14 @@
       this.cancelButton = button('结束本次简洁接力', () => { void action('text_cancel').catch(error => this.error(error.message)); });
       const preview = create('details', '', this.panel); create('summary', '本轮资料预览', preview);
       this.packetPreview = create('textarea', '', preview); this.packetPreview.readOnly = true; this.packetPreview.setAttribute('aria-label', '简洁接力本轮资料预览'); this.previewSection = preview;
+      this.finalOutput = create('textarea', '', this.panel); this.finalOutput.readOnly = true; this.finalOutput.hidden = true; this.finalOutput.setAttribute('aria-label', 'AI 正式回答，内容仍需核对');
       this.full = create('textarea', '', this.panel); this.full.readOnly = true; this.full.hidden = true; this.full.setAttribute('aria-label', '完整本轮资料，可手动复制');
       const fallback = create('details', '', this.panel); create('summary', '网页改版或手动接力', fallback);
       create('p', '复制 AI 的完整请求并粘贴在这里。不会后台读取剪贴板，也不会申请持续监听权限。', fallback).className = 'muted';
       this.input = create('textarea', '', fallback); this.input.setAttribute('aria-label', '粘贴完整 AI 请求或回答'); this.input.placeholder = '粘贴 AI 整条回复；简洁接力以 RECALLCARD/2 开头';
       this.executeButton = button('处理已粘贴内容', () => this.run(async () => { const text = this.input.value; await action('execute', { text }); this.input.value = ''; }), fallback);
       const help = create('details', '', this.panel); create('summary', '能力与隐私边界', help);
-      create('p', 'ChatGPT / DeepSeek：按已授权范围读取完成的可见文字，资料只放入未变化的输入框。无法确定完成或 DOM 变化时请手动复制粘贴。Qwen（仅 chat.qwen.ai）/ Z.ai：实验性输入框与手动接力；Qwen Studio 站点未确认。真实账号与页面改版尚未验收。', help).className = 'muted';
+      create('p', 'ChatGPT / DeepSeek：按已授权范围读取完成的可见文字；简洁接力由你复制和发送，本轮不并行自动采集对话。旧模式资料只放入未变化的输入框。无法确定完成或 DOM 变化时请手动复制粘贴。Qwen（仅 chat.qwen.ai）/ Z.ai：实验性输入框与手动接力；Qwen Studio 站点未确认。真实账号与页面改版尚未验收。', help).className = 'muted';
       create('p', '剪贴板：仅你点击时写入；读取只通过你主动粘贴。网站内隐藏历史、附件和推理过程不读取。账号身份未核验。', help).className = 'muted';
       const controls = create('div', '', this.panel); controls.className = 'row';
       this.disableButton = button('关闭接力', () => this.run(async () => { await action('disable'); this.panel.hidden = true; }), controls);
@@ -54,7 +55,7 @@
     }
     notice(text) { this.detail.textContent = text; }
     error(text) { this.notice(text); }
-    reset() { this.state = null; this.full.value = ''; this.full.hidden = true; this.input.value = ''; this.packetPreview.value = ''; this.title.textContent = 'RecallCard · 会话已变化'; this.notice('正在重新确认当前对话；旧资料不会重放。'); }
+    reset() { this.state = null; this.full.value = ''; this.full.hidden = true; this.input.value = ''; this.packetPreview.value = ''; this.finalOutput.value = ''; this.finalOutput.hidden = true; this.title.textContent = 'RecallCard · 会话已变化'; this.notice('正在重新确认当前对话；旧资料不会重放。'); }
     update(state) {
       if (this.state?.nonce && this.state.nonce !== state.nonce) this.reset();
       this.state = state;
@@ -63,19 +64,23 @@
       this.textStartButton.hidden = !!textRelay;
       this.bootstrapButton.hidden = !!textRelay;
       this.retryButton.hidden = !textRelay?.canRetry;
-      this.cancelButton.hidden = !textRelay && !this.startingText || !!textRelay?.cancelled;
+      this.cancelButton.hidden = !textRelay && !this.startingText || !!textRelay?.cancelled || !!textRelay?.completed;
       this.previewSection.hidden = !textRelay?.packet;
       this.packetPreview.value = textRelay?.packet?.text || '';
+      this.finalOutput.hidden = !textRelay?.final;
+      this.finalOutput.value = textRelay?.final?.body || '';
+      if (textRelay?.completed) { this.full.hidden = true; this.full.value = ''; }
       this.disableButton.hidden = !!textRelay;
       this.title.textContent = `RecallCard · ${labels[relay.phase] || '等待连接'}`;
       this.pill.textContent = relay.enabled === false ? 'RecallCard · 开启接力' : `RecallCard · ${labels[relay.phase] || '接力'}`;
       this.round.textContent = `${state.platform_name || '当前网站'} · 第 ${relay.round || 0} 轮 · 发送由你完成` + (textRelay ? ` · 读取 ${textRelay.budget?.reads || 0}/${textRelay.limits?.reads || 0} · 资料预算 ${textRelay.budget?.disclosureBytes || 0} 字节` : '');
-      this.notice((relay.detail || '等待确认本机连接与授权') + (textRelay?.cancelled ? '。如需重新开始，请在扩展弹窗重新连接当前对话。' : ''));
+      this.notice((relay.detail || '等待确认本机连接与授权') + (textRelay?.cancelled || textRelay?.completed ? '。如需重新开始，请在扩展弹窗重新连接当前对话。' : ''));
       this.pauseButton.textContent = relay.paused ? '恢复' : '暂停';
+      this.pauseButton.disabled = !!textRelay?.cancelled || !!textRelay?.completed;
       this.bootstrapButton.disabled = !!relay.request_id || relay.paused;
-      this.copyButton.disabled = !relay.request_id || relay.paused;
+      this.copyButton.disabled = !relay.request_id || relay.paused || !!textRelay?.completed || !!textRelay?.cancelled;
       this.sentButton.disabled = relay.phase !== 'awaiting_user_send';
-      this.executeButton.disabled = relay.paused;
+      this.executeButton.disabled = relay.paused || !!textRelay?.completed || !!textRelay?.cancelled;
       if (relay.enabled === false) this.panel.hidden = true;
       if (relay.request_id !== this.lastRequest) { this.full.value = ''; this.full.hidden = true; this.lastRequest = relay.request_id; }
     }

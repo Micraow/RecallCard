@@ -56,6 +56,9 @@ for(const platform of ['chatgpt','deepseek'])test(`${platform} 简洁接力真�
     await h.turn('assistant','a4',final);await h.settle();
     assert.equal(engine(h).phase,'result_ready');assert.equal(engine(h).final.body,'更正后的约定是周四回访。[S1]');
     assert.match(await h.page.locator('#recallcard-relay strong').innerText(),/回答已就绪/);
+    assert.equal(await h.page.locator('#recallcard-relay').getByRole('textbox',{name:'AI 正式回答，内容仍需核对'}).inputValue(),'更正后的约定是周四回访。[S1]');
+    assert.equal(await h.page.locator('#recallcard-relay').getByRole('button',{name:'复制本轮资料',exact:true}).isDisabled(),true);
+    assert.equal(await h.page.locator('#recallcard-relay').getByRole('button',{name:'暂停',exact:true}).isDisabled(),true);
     const reads=h.calls.filter(r=>r.action==='authorized_read').length;
     await h.settle();assert.equal(h.calls.filter(r=>r.action==='authorized_read').length,reads,'终态不会重放读取');
     assert.equal(await h.page.locator('main textarea').inputValue(),'合成问题');
@@ -63,6 +66,7 @@ for(const platform of ['chatgpt','deepseek'])test(`${platform} 简洁接力真�
     assert.equal(engine(h).budget.reads,reads);
     await mkdir(new URL('../artifacts/',import.meta.url),{recursive:true});
     await h.page.screenshot({path:new URL(`../artifacts/text2-${platform}-complete.png`,import.meta.url).pathname,fullPage:true});
+    await h.page.locator('#recallcard-relay').screenshot({path:new URL(`../artifacts/text2-${platform}-panel.png`,import.meta.url).pathname});
     console.log(JSON.stringify({suite:'text2-synthetic-web',platform,complete:true,rounds:engine(h).round,real_native:false,model_executed:false,automatic_sends:0,original_draft_preserved:true,actual_read_calls:reads}));
   }finally{await h.page.close();}
 });
