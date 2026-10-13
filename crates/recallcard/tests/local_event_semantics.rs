@@ -60,7 +60,7 @@ fn event(vault: &Vault, scope: &str, text: &str, origin: &str) -> String {
     format!("event:{}", e.id)
 }
 fn refresh(index: &LocalEvents<'_>) {
-    for _ in 0..64 {
+    for _ in 0..128 {
         if index.refresh_step().unwrap()["complete"] == true {
             return;
         }
@@ -188,9 +188,19 @@ fn shared_local_gateway_reaches_mcp_native_and_keeps_current_grants() {
     refresh(&index);
     let access = Access::new(vec!["personal".into()]).unwrap();
     let context = Context::new(&vault, access.clone());
-    let found =
-        transport::invoke(&context, "recall_search", json!({"query":"test-query-a"})).unwrap();
+    let found = transport::invoke(
+        &context,
+        "recall_search",
+        json!({"query":"synthetic-alpha"}),
+    )
+    .unwrap();
     assert_eq!(found["results"][0]["ref"], alpha);
+    assert_eq!(
+        found["coverage"]["scopes"][0]["lexical"]["status"],
+        "available"
+    );
+    assert_eq!(found["coverage"]["scopes"][0]["fusion"], "rrf/1:k=60");
+    assert_eq!(found["results"][0]["retrieval"]["lexical_rank"], 1);
     assert!(!found.to_string().contains(&hidden));
     assert!(serde_json::to_vec(&found).unwrap().len() <= 8192);
     let id = found["results"][0]["id"].clone();
@@ -219,7 +229,7 @@ fn shared_local_gateway_reaches_mcp_native_and_keeps_current_grants() {
     let wide = Access::new(vec!["personal".into(), "project:hidden".into()]).unwrap();
     let service = AgentReadService::new(&vault, &entry.id, &wide, None);
     let mcp = service
-        .invoke("recall_search", json!({"query":"test-query-a"}))
+        .invoke("recall_search", json!({"query":"synthetic-alpha"}))
         .unwrap();
     assert_eq!(mcp["results"], found["results"]);
     assert_eq!(
@@ -261,13 +271,13 @@ fn shared_local_gateway_reaches_mcp_native_and_keeps_current_grants() {
         .unwrap();
         serde_json::from_slice::<serde_json::Value>(&out[4..]).unwrap()
     };
-    let native = call("recall_search", json!({"query":"test-query-a"}));
+    let native = call("recall_search", json!({"query":"synthetic-alpha"}));
     assert_eq!(native["ok"], true, "{native}");
     assert_eq!(native["result"]["results"], found["results"]);
     assert_eq!(call("recall_fetch", json!({"id":id}))["result"], read);
     connections::revoke(&vault, &browser.id, browser.permission_revision).unwrap();
     assert_eq!(
-        call("recall_search", json!({"query":"test-query-a"}))["ok"],
+        call("recall_search", json!({"query":"synthetic-alpha"}))["ok"],
         false
     );
     connections::revoke(&vault, &entry.id, entry.permission_revision).unwrap();
@@ -365,4 +375,131 @@ fn original_neighbor_prevents_a_chunk_boundary_from_forging_an_exact_identifier(
         .ends_with("E_PIPE_71"));
     assert_eq!(found["results"][0]["retrieval_support"]["protected"], false);
     assert_eq!(found["results"][0]["relevance"], "unassessed");
+}
+
+#[test]
+fn independent_sqlite_channel_recovers_identifier_outside_semantic_top_hundred() {
+    let (_server, endpoint) = server();
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    for n in 0..100 {
+        event(
+            &vault,
+            "personal",
+            &format!("synthetic unrelated record {n}"),
+            "user_input",
+        );
+    }
+    let exact = event(
+        &vault,
+        "personal",
+        "synthetic-alpha E_NET_731 原始编号",
+        "user_input",
+    );
+    let hidden = event(&vault, "project:hidden", "E_NET_731 无权范围", "user_input");
+    let python_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../python")
+        .canonicalize()
+        .unwrap();
+    let index = LocalEvents::configure(
+        &vault,
+        "personal",
+        setup(endpoint),
+        "python3".into(),
+        python_path,
+    )
+    .unwrap();
+    refresh(&index);
+    let found = index.search("E_NET_731", 2).unwrap();
+    let row = &found["results"][0];
+    assert_eq!(row["ref"], exact);
+    assert!(row["semantic_rank"].is_null());
+    assert!(row["retrieval"]["semantic_evidence"].is_null());
+    assert_eq!(row["retrieval"]["lexical_rank"], 1);
+    assert_eq!(
+        row["retrieval"]["lexical_evidence_verification"],
+        "one_complete_query_term"
+    );
+    assert_eq!(row["score"], 0.0);
+    assert_eq!(row["score_kind"], "cosine");
+    assert_eq!(row["retrieval_support"]["protected"], true);
+    assert_eq!(row["relevance"], "unassessed");
+    assert!(!found.to_string().contains(&hidden));
+    assert_eq!(found["coverage"]["lexical"]["status"], "available");
+    let neighbor = index.search("E_NET_7310", 2).unwrap();
+    assert!(neighbor["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["retrieval"]["lexical_rank"].is_null()));
+    vault
+        .suppress(
+            exact.trim_start_matches("event:"),
+            "synthetic correction withdrawal".into(),
+        )
+        .unwrap();
+    assert!(index.search("E_NET_731", 2).is_err());
+    refresh(&index);
+    let after = index.search("E_NET_731", 2).unwrap();
+    assert!(!after.to_string().contains(&exact));
+    assert!(after["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["retrieval"]["lexical_rank"].is_null()));
+}
+
+#[test]
+fn lexical_cross_chunk_preview_and_shared_fetch_keep_complete_original_identifier() {
+    use recallcard::{context::Context, policy::Access, transport};
+    let (_server, endpoint) = server();
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let original = format!("{}E_PIPE_710 后续原文", " ".repeat(247));
+    let exact = event(&vault, "personal", &original, "user_input");
+    let python_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../python")
+        .canonicalize()
+        .unwrap();
+    let index = LocalEvents::configure(
+        &vault,
+        "personal",
+        setup(endpoint),
+        "python3".into(),
+        python_path,
+    )
+    .unwrap();
+    refresh(&index);
+    let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+    let found =
+        transport::invoke(&context, "recall_search", json!({"query":"E_PIPE_710"})).unwrap();
+    let row = &found["results"][0];
+    assert_eq!(row["ref"], exact);
+    assert_eq!(row["retrieval_support"]["protected"], true);
+    assert_eq!(row["matched_chunk"]["end_byte"], 256);
+    assert_eq!(row["retrieval"]["lexical_evidence"]["start_byte"], 247);
+    assert_eq!(row["retrieval"]["lexical_evidence"]["end_byte"], 257);
+    let start = row["text_range"]["start_byte"].as_u64().unwrap() as usize;
+    let end = row["text_range"]["end_byte"].as_u64().unwrap() as usize;
+    assert_eq!(row["text"], original[start..end]);
+    assert!(row["text"].as_str().unwrap().contains("E_PIPE_710"));
+    assert_eq!(
+        row["text_hash"],
+        recallcard::model::hash(&original.as_bytes()[start..end])
+    );
+    let page = transport::invoke(&context, "recall_fetch", json!({"id":row["id"]})).unwrap();
+    assert_eq!(page["results"][0]["ref"], exact);
+    assert_eq!(page["results"][0]["text_range"]["start_byte"], start);
+    assert_eq!(page["results"][0]["text"], original[start..]);
+    let long = "查一下去年秋天安装的办公室门锁型号还有当时讨论过的备用钥匙存放位置和更换电池日期";
+    let limited = transport::invoke(&context, "recall_search", json!({"query":long})).unwrap();
+    assert!(!limited["results"].as_array().unwrap().is_empty());
+    assert_eq!(
+        limited["coverage"]["scopes"][0]["lexical"]["status"],
+        "limited_query"
+    );
+    assert_eq!(
+        limited["coverage"]["scopes"][0]["lexical"]["reason"],
+        "lexical_query_term_limit"
+    );
 }

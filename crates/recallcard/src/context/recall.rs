@@ -204,7 +204,7 @@ impl Context<'_> {
                             row["relevance"] = json!("unassessed");
                         }
                         partial |= page["truncated"] == true;
-                        coverage.push(json!({"scope":scope,"state":"ready","candidates":rows.len(),"truncated":page["truncated"],"query_encoding":page["coverage"]["semantic_query_encoding"],"candidate_policy":page["coverage"]["candidate_policy"],"verified_candidates":page["coverage"]["verified_candidates"],"verification_limited":page["coverage"]["candidate_verification_limited"]}));
+                        coverage.push(json!({"scope":scope,"state":"ready","candidates":rows.len(),"truncated":page["truncated"],"query_encoding":page["coverage"]["semantic_query_encoding"],"candidate_policy":page["coverage"]["candidate_policy"],"verified_candidates":page["coverage"]["verified_candidates"],"verification_limited":page["coverage"]["candidate_verification_limited"],"lexical":page["coverage"]["lexical"],"fusion":page["coverage"]["fusion"]}));
                         bindings.push((index, epoch, config));
                         groups.push(rows);
                     }

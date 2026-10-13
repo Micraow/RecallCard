@@ -108,10 +108,16 @@ export function validCloudSemanticSettings(value:CloudEmbeddingSettings):boolean
 
 export function recallCoverageNotes(page: SearchPage): string[] {
   const readyScopes=page.coverage?.scopes?.filter(scope=>scope.state==='ready')||[];
+  const lexical=[...(page.coverage?.lexical?[page.coverage.lexical]:[]),...readyScopes.flatMap(scope=>scope.lexical?[scope.lexical]:[])];
   if(page.coverage?.local_event_semantic) return [
     (page.coverage.semantic_query_encoding==='cache'||readyScopes.length>0&&readyScopes.every(scope=>scope.query_encoding==='cache'))?'本次使用已缓存的本机问题向量。':'本次问题已发送到你批准的本机编码服务。',
     '普通对话已直接参与本机语义检索，无需先整理成 Memory；记忆条目按词法补充，此入口没有云回退。',
-    '每条原话展示得分最高的一处片段。角色、时间、否定与后续纠正仍需回到来源核对。',
+    '每条原话展示一处来源已核验的匹配片段，可能由词法或语义通道选中。角色、时间、否定与后续纠正仍需回到来源核对。',
+    ...(lexical.some(item=>item.status==='available')?['普通对话词法索引已独立寻找完整编号和汉字词组候选，并结合语义排序；字面匹配不代表事实正确。']:[]),
+    ...(lexical.some(item=>item.status==='legacy_unavailable')?['部分范围仍使用旧语义索引；显式刷新普通对话索引后可补建词法通道并复用已有向量。']:[]),
+    ...(lexical.some(item=>item.status==='limited_query')?['本次问题超出词法通道预算，完整问题仍用于语义检索；没有截短或改写问题。']:[]),
+    ...(lexical.some(item=>item.status==='unsupported_query')?['本次问题没有受支持的词法词项，仍按完整问题进行语义检索。']:[]),
+    ...(lexical.some(item=>item.candidates_truncated)?['词法候选达到本次扫描或数量预算，未展示的精确来源仍可能存在。']:[]),
     '相似候选可能完全无关；尚未校准相关性或可回答性，不能把返回结果当作已经记起事实。',
     ...(page.coverage.candidate_verification_limited||readyScopes.some(scope=>scope.verification_limited)?['来源核验受到时间或资源门槛限制，部分候选尚未核验；请缩小范围或稍后重试。']:[]),
     ...(page.truncated?['候选、片段或核验达到本次预算，未展示的来源不代表不存在。']:[])];

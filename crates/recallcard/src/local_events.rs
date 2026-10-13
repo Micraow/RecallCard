@@ -502,6 +502,7 @@ impl<'a> LocalEvents<'a> {
                 return Err("local_event_candidate_source_mismatch".into());
             }
             let retrieval = evidence::verify(
+                query,
                 &text,
                 row,
                 semantic_index,
@@ -548,7 +549,7 @@ impl<'a> LocalEvents<'a> {
         }
         Ok(
             json!({"query":query,"results":results,"match_count":results.len(),"status":if results.is_empty(){"no_verified_candidates"}else{"ok"},
-            "truncated":rows.len()>results.len()||rejected>0||verification_limited||candidates["coverage"]["candidates_truncated"]==true,"coverage":{"event_search":"local_semantic","semantic_search":"local_event_index",
+            "truncated":rows.len()>results.len()||rejected>0||verification_limited||candidates["coverage"]["candidates_truncated"]==true||candidates["coverage"]["lexical"]["candidates_truncated"]==true,"coverage":{"event_search":"local_semantic","semantic_search":"local_event_index",
             "local_event_semantic":true,"semantic_query_encoding":candidates["coverage"]["query_encoding"],"event_index_generation":generation,
             "event_index_snapshot":manifest.epoch,"local_config_identity":self.config_hash,"source_verification":"current_event_hash_and_utf8_range","rejected_candidates":rejected,
             "partial":rejected>0||verification_limited,"candidate_policy":"verified_excerpt_anchors_then_channel_order/v2","lexical":candidates["coverage"]["lexical"],"fusion":candidates["coverage"]["fusion"],"verified_candidates":scanned,"candidate_window_limit":100,"candidate_reordering_enabled":reorder,"candidate_verification_limited":verification_limited,"candidate_text_bytes":source_bytes,"chunk_selection":candidates["coverage"]["chunk_selection"],"note":"本机向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}),

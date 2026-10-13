@@ -44,6 +44,7 @@ fn cosine(value: &Value) -> Result<f64> {
         .ok_or_else(|| "local_event_retrieval_invalid".into())
 }
 pub(super) fn verify(
+    query: &str,
     text: &str,
     row: &Value,
     row_index: usize,
@@ -90,6 +91,7 @@ pub(super) fn verify(
         let chunk_start = number(&row["start_byte"], text.len())?;
         let chunk_end = number(&row["end_byte"], text.len())?;
         if matched_terms == 0
+            || !super::lexical_context::query_term(query, text, start, end)
             || start >= chunk_end
             || end <= chunk_start
             || start < chunk_start.saturating_sub(256)
@@ -112,7 +114,15 @@ pub(super) fn verify(
         None
     };
     Ok(Verified {
-        metadata: metadata.clone(),
+        metadata: {
+            let mut value = metadata.clone();
+            value["lexical_evidence_verification"] = json!(if lexical_range.is_some() {
+                "one_complete_query_term"
+            } else {
+                "not_applicable"
+            });
+            value
+        },
         semantic_rank: json!(semantic_rank),
         lexical_range,
     })
@@ -129,34 +139,41 @@ mod tests {
     }
     #[test]
     fn cross_chunk_lexical_evidence_keeps_null_semantic_rank_and_exact_source_span() {
-        let verified = verify(" E_PIPE_710 rest", &row(), 0, true).unwrap();
+        let verified = verify("E_PIPE_710", " E_PIPE_710 rest", &row(), 0, true).unwrap();
         assert_eq!(verified.lexical_range, Some((1, 11)));
         assert!(verified.semantic_rank.is_null());
     }
     #[test]
     fn lexical_evidence_must_match_current_original_bytes_and_intersect_chunk() {
-        assert!(verify(" E_PIPE_711 rest", &row(), 0, true).is_err());
+        assert!(verify("E_PIPE_710", " E_PIPE_711 rest", &row(), 0, true).is_err());
         let mut changed = row();
         changed["start_byte"] = json!(11);
-        assert!(verify(" E_PIPE_710 rest", &changed, 0, true).is_err());
+        assert!(verify("E_PIPE_710", " E_PIPE_710 rest", &changed, 0, true).is_err());
         changed = row();
         changed["retrieval"]["lexical_matched_terms"] = json!(2);
-        assert!(verify(" E_PIPE_710 rest", &changed, 0, true).is_err());
+        assert!(verify("E_PIPE_710", " E_PIPE_710 rest", &changed, 0, true).is_err());
     }
     #[test]
     fn forged_rank_or_fusion_and_downgraded_metadata_are_rejected() {
         let mut changed = row();
         changed["retrieval"]["fusion_score"] = json!(1.0);
-        assert!(verify(" E_PIPE_710 rest", &changed, 0, true).is_err());
+        assert!(verify("E_PIPE_710", " E_PIPE_710 rest", &changed, 0, true).is_err());
         changed = row();
         changed["retrieval"]["semantic_rank"] = json!(101);
-        assert!(verify(" E_PIPE_710 rest", &changed, 0, true).is_err());
-        assert!(verify(" E_PIPE_710 rest", &json!({}), 0, true).is_err());
+        assert!(verify("E_PIPE_710", " E_PIPE_710 rest", &changed, 0, true).is_err());
+        assert!(verify("E_PIPE_710", " E_PIPE_710 rest", &json!({}), 0, true).is_err());
         assert_eq!(
-            verify(" E_PIPE_710 rest", &json!({}), 2, false)
+            verify("E_PIPE_710", " E_PIPE_710 rest", &json!({}), 2, false)
                 .unwrap()
                 .semantic_rank,
             3
         );
+    }
+    #[test]
+    fn coherently_rehashed_false_prefix_still_fails_against_original_boundaries() {
+        let mut changed = row();
+        changed["retrieval"]["lexical_evidence"]["end_byte"] = json!(10);
+        changed["retrieval"]["lexical_evidence"]["text_sha256"] = json!(hash(b"E_PIPE_71"));
+        assert!(verify("E_PIPE_71", " E_PIPE_710 rest", &changed, 0, true).is_err());
     }
 }

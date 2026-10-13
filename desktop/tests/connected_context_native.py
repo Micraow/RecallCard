@@ -179,6 +179,14 @@ class ConnectedJourney(FirstUseJourney):
             assert browser.observe("return document.querySelector('dialog fieldset label')?.textContent.includes(" + json.dumps(UPDATE) + ")") is True
             assert self.content("此入口没有云回退")
             assert self.content("相似候选可能完全无关")
+            lexical_note = "普通对话词法索引已独立寻找完整编号和汉字词组候选，并结合语义排序；字面匹配不代表事实正确。"
+            lexical_position = browser.observe("return [...document.querySelectorAll('dialog aside[aria-label=\"本次检索覆盖\"] p')].findIndex(n=>n.textContent===" + json.dumps(lexical_note) + ")")
+            assert lexical_position >= 0
+            lexical_selector = f'dialog aside[aria-label="本次检索覆盖"] p:nth-child({lexical_position + 1})'
+            lexical_element = browser.find(lexical_selector)
+            browser.command("POST", "/execute/sync", {"script": "arguments[0].scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});", "args": [{ELEMENT: lexical_element}]})
+            wait_for(lambda: self.exact_visible_text(lexical_selector, lexical_note), "独立词法通道说明全文真实可见")
+            self.capture("13-independent-lexical-coverage-visible")
             support_selector = "dialog fieldset label small.context-note"
             support_element = wait_for(lambda: browser.find(support_selector), "候选核对说明真实存在")
             browser.command("POST", "/execute/sync", {"script": "arguments[0].scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});", "args": [{ELEMENT: support_element}]})
@@ -200,8 +208,17 @@ class ConnectedJourney(FirstUseJourney):
             assert resolved["results"][0]["ref"] == recalled["results"][0]["ref"]
             assert resolved["results"][0]["snapshot"] == recalled["results"][0]["snapshot"]
             assert resolved["results"][0]["text"] == UPDATE
+            lexical_read = self.mcp_tool(mcp_config, "recall_search", {"query": "周四"})
+            lexical_source = next(row for row in lexical_read["results"] if row["ref"] == "event:" + original["id"])
+            assert lexical_read["coverage"]["scopes"][0]["lexical"]["status"] == "available"
+            assert lexical_source["retrieval"]["lexical_rank"] is not None
+            assert lexical_source["retrieval"]["lexical_evidence_verification"] == "one_complete_query_term"
+            assert "周四" in lexical_source["text"]
+            lexical_full = self.mcp_tool(mcp_config, "recall_fetch", {"id": lexical_source["id"]})
+            assert lexical_full["results"][0]["ref"] == lexical_source["ref"]
+            assert lexical_full["results"][0]["text"] == UPDATE
             assert self.events() == before and not self.memories()
-            self.local_event_acceptance = {"fake_encoder_contract_only": True, "actual_model_quality_verified": False, "actual_loopback_http": True, "raw_event_without_memory": True, "separate_explicit_approval": True, "no_calls_before_index_request": True, "canonical_unchanged": True, "new_query_local_encoded": True, "same_source_in_context_preview": True, "managed_mcp_same_event_and_snapshot": True, "candidate_support_visible": True, "candidate_not_answerable_claim": True, "cloud_fallback": False}
+            self.local_event_acceptance = {"fake_encoder_contract_only": True, "actual_model_quality_verified": False, "actual_loopback_http": True, "raw_event_without_memory": True, "separate_explicit_approval": True, "no_calls_before_index_request": True, "canonical_unchanged": True, "new_query_local_encoded": True, "same_source_in_context_preview": True, "managed_mcp_same_event_and_snapshot": True, "candidate_support_visible": True, "candidate_not_answerable_claim": True, "independent_lexical_coverage_visible": True, "managed_mcp_lexical_term_source_verified": True, "cloud_fallback": False}
             self.checkpoint("本机新问题返回原Event并接入复制预览而不冒充真实模型质量")
             browser.button("关闭", "//dialog//div[contains(@class,'modal-footer')]")
             browser.button("设置")

@@ -140,6 +140,7 @@ class EventLexicalTests(unittest.TestCase):
         self.assertEqual(row["retrieval"]["semantic_evidence"]["start_byte"], 0)
         self.assertEqual(row["retrieval"]["semantic_evidence"]["score"], 1)
         self.assertEqual(row["retrieval"]["semantic_rank"], 1)
+        self.assertEqual(self.ok("query", query="ZXQ-714")["coverage"]["chunk_selection"], "lexical_primary_else_semantic_best")
 
     def test_legacy_read_and_explicit_refresh_reuse_old_vectors_without_implicit_migration(self):
         legacy = self.finish(self.put(self.begin(version=None), "old", "ZXQ-714", contexts=False))
@@ -234,10 +235,22 @@ class EventLexicalTests(unittest.TestCase):
         with patch.object(lexical, "MAX_TOTAL_TERMS", 0):
             self.error("lexical_index_term_limit", "upsert", build_id=build["build_id"], batch_id="total", source=self.source("bad", "one"), source_chunk_count=1, chunks=self.chunks("one"))
         self.finish(self.put(build, "good", "ZXQ-714"))
-        before = len(self.encoder.calls)
-        self.error("lexical_query_term_limit", "query", query=" ".join(f"word{i}" for i in range(33)))
-        self.error("lexical_query_term_length_limit", "query", query="a" * 129)
-        self.assertEqual(before, len(self.encoder.calls))
+        for query, reason in (
+            (" ".join(f"word{i}" for i in range(33)), "lexical_query_term_limit"),
+            ("a" * 129, "lexical_query_term_length_limit"),
+            ("请帮我找到此前讨论过的方案选择原因以及后来修改决定时留下的具体证据和相关记录", "lexical_query_term_limit"),
+        ):
+            with self.subTest(query=query):
+                page = self.ok("query", query=query)
+                self.assertTrue(page["results"])
+                self.assertEqual(page["coverage"]["lexical"]["status"], "limited_query")
+                self.assertEqual(page["coverage"]["lexical"]["reason"], reason)
+                self.assertEqual(page["coverage"]["lexical_candidates"], 0)
+                self.assertEqual(page["coverage"]["lexical"]["postings_scanned"], 0)
+                self.assertEqual(self.encoder.calls[-1], ("query", [query]))
+                semantic = self.ok("query", query=query, retrieval_mode="semantic_only")
+                self.assertEqual([r["ref"] for r in page["results"]], [r["ref"] for r in semantic["results"]])
+                self.assertEqual(semantic["coverage"]["chunk_selection"], "per_event_best_chunk")
         result = self.ok("query", query="🙂")
         self.assertEqual(result["coverage"]["lexical"]["status"], "unsupported_query")
         self.assertTrue(result["results"])
@@ -255,6 +268,25 @@ class EventLexicalTests(unittest.TestCase):
         self.assertEqual(first["coverage"]["lexical"]["candidate_chunks"], 3)
         self.assertEqual(first["results"], second["results"])
         self.assertLessEqual(first["coverage"]["union_candidates"], 200)
+
+    def test_round_robin_does_not_starve_later_query_terms_at_global_budget(self):
+        # 强制高频词的hash排在罕见编号之前，不能靠词hash的偶然顺序通过。
+        pair = sorted((lexical.terms(term, query=True)[0][0], term) for term in ("common", "ZXQ-714"))
+        common, rare = pair[0][1], pair[1][1]
+        build = self.begin()
+        for i in range(12):
+            self.put(build, f"common-{i}", common)
+        self.finish(self.put(build, "rare", rare))
+        with patch.object(lexical, "MAX_POSTINGS", 4), patch.object(lexical, "MAX_CANDIDATE_CHUNKS", 2):
+            result = self.ok("query", query=common + " " + rare, limit=100)
+        coverage = result["coverage"]["lexical"]
+        self.assertEqual(coverage["postings_scanned"], 4)
+        self.assertEqual(coverage["candidate_chunks"], 2)
+        self.assertEqual(coverage["query_terms_visited"], 2)
+        self.assertEqual(coverage["posting_order"], "round_robin_terms")
+        self.assertTrue(coverage["candidates_truncated"])
+        rare_row = next(r for r in result["results"] if r["ref"] == "event:rare")
+        self.assertIsNotNone(rare_row["retrieval"]["lexical_rank"])
 
     def test_real_sqlite_disk_failure_preserves_published_and_empty_gc(self):
         self.config = {**self.config, "database": str(self.root / "small.sqlite"), "disk_cap_bytes": 1024**2}

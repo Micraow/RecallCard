@@ -612,8 +612,17 @@ class EventIndex:
             require(expected is None or expected == initial, "generation_mismatch")
             self._verified_published(db, initial)
             lex_version = lexical.version(db, initial)
-        # 查询词数超限在任何编码前返回；不静默截断为另一条查询。
-        query_terms = lexical.terms(query, query=True) if lex_version and retrieval_mode == "hybrid" else []
+        # 词法是可选候选路线。超预算时不截断原query，也不让该路线阻断semantic；
+        # 仅吞掉明确的查询资源限制，索引损坏等错误仍然失败关闭。
+        query_terms = []
+        lexical_query_limit = None
+        if lex_version and retrieval_mode == "hybrid":
+            try:
+                query_terms = lexical.terms(query, query=True)
+            except lexical.LexicalError as error:
+                if error.code not in ("lexical_query_term_limit", "lexical_query_term_length_limit"):
+                    raise
+                lexical_query_limit = error.code
         vector, mode = self._query_vector(query)
         heap = []
         scanned = 0
@@ -624,6 +633,8 @@ class EventIndex:
             row, source_set_hash = self._verified_published(db, generation)
             if lex_version and retrieval_mode == "hybrid":
                 lex_candidates, lexical_coverage = lexical.candidates(db, generation, self.scope, query_terms)
+                if lexical_query_limit:
+                    lexical_coverage.update(status="limited_query", reason=lexical_query_limit)
             else:
                 lex_candidates = []
                 lexical_coverage = {"status": "available" if lex_version else "legacy_unavailable",
@@ -706,7 +717,7 @@ class EventIndex:
                 "next_cursor": None, "coverage": {"status": "indexed_snapshot_requires_host_revalidation", "indexed_sources": row[1],
                 "indexed_chunks": row[2], "scanned_chunks": scanned, "query_encoding": mode, "candidate_limit": limit,
                 "candidates_truncated": row[1] > len(results), "response_limited": response_limited,
-                "chunk_selection": "per_event_best_chunk", "lexical": lexical_coverage,
+                "chunk_selection": "lexical_primary_else_semantic_best" if lex_version and retrieval_mode == "hybrid" else "per_event_best_chunk", "lexical": lexical_coverage,
                 "fusion": lexical.FUSION if lex_version and retrieval_mode == "hybrid" else "semantic_only",
                 "semantic_candidates": len(semantic), "lexical_candidates": len(lex_candidates), "union_candidates": len(union),
                 "local_only": True, "external_calls": 0, "page_rows": QUERY_PAGE}}

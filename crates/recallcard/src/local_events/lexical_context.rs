@@ -42,6 +42,47 @@ pub(super) fn excerpt_range(
     (left, right)
 }
 
+fn ascii_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '+' | '#')
+}
+fn han(c: char) -> bool {
+    matches!(c, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' |
+        '\u{f900}'..='\u{faff}' | '\u{20000}'..='\u{323af}')
+}
+/// The index is derived and untrusted. A correct span/hash alone cannot prove
+/// that a prefix of another identifier is a complete term of the current query.
+pub(super) fn query_term(query: &str, text: &str, start: usize, end: usize) -> bool {
+    if start >= end
+        || end > text.len()
+        || end - start > 128
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+    {
+        return false;
+    }
+    let term = &text[start..end];
+    let left = text[..start].chars().next_back();
+    let right = text[end..].chars().next();
+    if term.chars().all(ascii_char) && term.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return !left.is_some_and(ascii_char)
+            && !right.is_some_and(ascii_char)
+            && query.split(|c| !ascii_char(c)).any(|part| part == term);
+    }
+    if !term.chars().all(han) {
+        return false;
+    }
+    match term.chars().count() {
+        2 => query.contains(term),
+        1 if !left.is_some_and(han) && !right.is_some_and(han) => {
+            query.match_indices(term).any(|(at, _)| {
+                !query[..at].chars().next_back().is_some_and(han)
+                    && !query[at + term.len()..].chars().next().is_some_and(han)
+            })
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +123,22 @@ mod tests {
         assert!(text[left..right].contains("E_PIPE_710"));
         assert!(right - left <= 2048);
         assert_eq!(excerpt_range("abc", 0, 3, None), (0, 3));
+    }
+    #[test]
+    fn derived_span_cannot_forge_an_ascii_prefix_or_different_query() {
+        assert!(!query_term("E_PIPE_71", " E_PIPE_710 ", 1, 10));
+        assert!(!query_term("E_PIPE_710", " XE_PIPE_710 ", 2, 12));
+        assert!(!query_term("E_PIPE_71", " E_PIPE_710 ", 1, 11));
+        assert!(!query_term("e_pipe_710", " E_PIPE_710 ", 1, 11));
+        assert!(query_term("查 E_PIPE_710", " E_PIPE_710 ", 1, 11));
+    }
+    #[test]
+    fn han_evidence_requires_a_query_bigram_or_separate_single_character() {
+        assert!(query_term("查去年办公室", "办公室", 0, 6));
+        assert!(!query_term("办", "办公室", 0, 3));
+        assert!(query_term("找 办", " 办 ", 1, 4));
+        assert!(!query_term("办公室", " 办 ", 1, 4));
+        assert!(!query_term("其他词", "办公室", 0, 6));
+        assert!(!query_term("🟠", "🟠", 0, 4));
     }
 }

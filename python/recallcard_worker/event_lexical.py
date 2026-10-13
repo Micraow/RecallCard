@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from collections import deque
 import hashlib
 import json
 import re
@@ -193,28 +194,38 @@ def candidates(db, generation, scope, query_terms):
     found = {}
     scanned = 0
     truncated = False
-    for key, *_ in query_terms:
+    # 逐词轮转流式游标，避免第一个高频词独占全局posting/候选预算。
+    # 最多32个游标，仍只物化8192行；达到边界就诚实报告窗口限制。
+    active = deque()
+    visited = set()
+    for term_index, (key, *_) in enumerate(query_terms):
         cursor = db.execute("""SELECT t.source_ref,t.ordinal,t.start_byte,t.end_byte,t.text_sha256
             FROM lexical_terms t JOIN sources s ON s.generation=t.generation AND s.ref=t.source_ref
             WHERE t.generation=? AND t.term_hash=? AND s.scope=? ORDER BY t.source_ref,t.ordinal LIMIT ?""",
-            (generation, key, scope, MAX_POSTINGS - scanned + 1))
-        for ref, ordinal, start, end, sha in cursor:
-            if scanned == MAX_POSTINGS:
+            (generation, key, scope, MAX_POSTINGS))
+        active.append((term_index, cursor))
+    while active and scanned < MAX_POSTINGS:
+        term_index, cursor = active.popleft()
+        visited.add(term_index)
+        row = cursor.fetchone()
+        if row is None:
+            continue
+        scanned += 1
+        ref, ordinal, start, end, sha = row
+        identifier = (ref, ordinal)
+        if identifier not in found:
+            if len(found) == MAX_CANDIDATE_CHUNKS:
                 truncated = True
-                break
-            scanned += 1
-            identifier = (ref, ordinal)
-            if identifier not in found:
-                if len(found) == MAX_CANDIDATE_CHUNKS:
-                    truncated = True
-                    continue
+            else:
                 found[identifier] = [0, (start, end, sha)]
+        if identifier in found:
             found[identifier][0] += 1
             found[identifier][1] = min(found[identifier][1], (start, end, sha))
-        if scanned == MAX_POSTINGS:
-            # 一旦资源预算用完，明确报告窗口限制；不声称全部词项已扫描。
-            truncated = True
-            break
+        active.append((term_index, cursor))
+    if active:
+        truncated = True
+    for _, cursor in active:
+        cursor.close()
     per_event = {}
     for (ref, ordinal), (matched, evidence) in found.items():
         item = (matched, -ordinal, evidence)
@@ -225,6 +236,7 @@ def candidates(db, generation, scope, query_terms):
     return [(ref, -item[1], item[0], item[2]) for ref, item in ordered[:CHANNEL_LIMIT]], {
         "status": "available" if query_terms else "unsupported_query", "version": VERSION, "query_terms": len(query_terms),
         "postings_scanned": scanned, "postings_limit": MAX_POSTINGS,
+        "query_terms_visited": len(visited), "posting_order": "round_robin_terms",
         "candidate_chunks": len(found), "candidates_limit": MAX_CANDIDATE_CHUNKS,
         "candidates_truncated": truncated, "channel_limit": CHANNEL_LIMIT,
         "case_policy": "ascii_case_sensitive", "match_policy": "whole_ascii_or_han_bigram",
