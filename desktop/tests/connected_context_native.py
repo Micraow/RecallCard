@@ -233,10 +233,23 @@ class ConnectedJourney(FirstUseJourney):
         self.checkpoint("补充后入口自动刷新且受管理MCP从同一正本读到更新")
 
         # 平台无关闭环：真实 React → Tauri → 正本 → 系统剪贴板；无外部网站或模型。
-        browser.type("#global-search", "周四回访")
-        run("xdotool", "key", "Return")
-        wait_for(lambda: self.content("搜索「周四回访」") and self.content("带到任意 AI"), "按问题检索已存原话")
-        browser.button("带到任意 AI")
+        browser.type("#recall-question", "周四回访")
+        browser.button("准备这次对话")
+        wait_for(lambda: self.content("用户原话") and self.content("原始聊天仍通过词法查找"), "首页问题实际检索并显示覆盖")
+        browser.button("预览将复制的内容", "//dialog")
+        wait_for(lambda: bool(browser.observe("return document.querySelector('#portable-preview')?.value")), "问题A已有完整预览")
+        assert len(self.events()) == 4 and not self.memories()
+        browser.type("#portable-goal", "MissingSyntheticQZX987")
+        wait_for(lambda: self.content("问题已改变"), "新问题不能沿用旧召回")
+        assert not browser.observe("return Boolean(document.querySelector('#portable-preview'))")
+        assert browser.observe("return [...document.querySelectorAll('dialog .modal-footer button')].find(n=>n.textContent.includes('预览将复制')).disabled")
+        browser.button("按这个问题找资料", "//dialog")
+        wait_for(lambda: self.content("这次没有找到匹配来源"), "空召回不复活旧来源")
+        assert browser.observe("return document.querySelectorAll('dialog fieldset input:checked').length") == 0
+        assert not browser.observe("return Boolean(document.querySelector('#portable-preview'))")
+        browser.type("#portable-goal", "周四回访")
+        browser.button("按这个问题找资料", "//dialog")
+        wait_for(lambda: self.content("用户原话") and not self.content("问题已改变"), "重新按当前问题找到来源")
         browser.button("预览将复制的内容", "//dialog")
         wait_for(lambda: self.content("完整复制内容") and self.content("用户原话"), "复制范围与来源预览")
         preview = browser.observe("return document.querySelector('#portable-preview').value")
@@ -280,7 +293,7 @@ class ConnectedJourney(FirstUseJourney):
         assert browser.observe("return Boolean(document.querySelector(" + json.dumps(source_selector + " .role-avatar.assistant") + "))")
 
         self.checkpoint("粘贴回答只追加一条助手来源且可搜索回到原文")
-        self.portable_acceptance = {"clipboard_full_match":True,"copy_added_events":0,"cancel_added_events":0,
+        self.portable_acceptance = {"clipboard_full_match":True,"home_question_search":True,"changed_question_researched":True,"no_match_drops_old_choices":True,"coverage_visible":True,"copy_added_events":0,"cancel_added_events":0,
             "reply_events_added":1,"reply_role":"assistant","reply_original_time_known":False,
             "automatic_memory":False,"reply_searchable":True,"external_site_used":False,
             "search_dom_exact_visible":True,"source_dom_exact_visible":True,"search_webdriver_rendered_exact":rendered_exact}

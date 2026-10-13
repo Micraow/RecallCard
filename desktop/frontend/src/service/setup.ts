@@ -1,5 +1,5 @@
 import type { AppError } from "./contracts";
-import type { BuildInfo } from "./types";
+import type { BuildInfo, SearchPage } from "./types";
 import type { MemoryConfig, MemoryJob, RuntimeStatus } from "./runtime";
 export interface CredentialStatus {
   present: boolean;
@@ -104,4 +104,11 @@ export function validCloudSemanticSettings(value:CloudEmbeddingSettings):boolean
   && (!value.budget_mode||['limited','unlimited'].includes(value.budget_mode))
   && Number.isSafeInteger(value.max_calls_per_month)&&value.max_calls_per_month>=1&&value.max_calls_per_month<=1000000
   && Number.isSafeInteger(value.max_bytes_per_month)&&value.max_bytes_per_month>=1&&value.max_bytes_per_month<=4294967296;
+}
+
+export function recallCoverageNotes(page: SearchPage): string[] {
+  const notes = [semanticSearchNote(page.coverage) || "本次未提供语义检索状态，不能据此确认语义覆盖。"];
+  notes.push("当前入口的语义候选只覆盖已建索引的记忆；原始聊天仍通过词法查找，尚不保证换个说法也能找到。");
+  if (page.truncated) notes.push("本次结果达到数量或文字预算上限，未展示的来源并不代表不存在；可换用更具体的关键词继续找。");
+  return notes;
 }

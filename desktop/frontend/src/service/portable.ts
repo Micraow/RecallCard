@@ -1,3 +1,5 @@
+import type { SearchPage } from "./types";
+
 export interface PortableRecord {
   ref: string; kind: string; role: string | null; evidence: string; text: string;
   conversation_title: string | null; truncated: boolean; content_retained: boolean;
@@ -39,3 +41,19 @@ export async function revalidateAndCopy(
   await copy(current.text);
   return active() ? { copied: true, current } : null;
 }
+
+
+export function recallChoices(page: SearchPage | null | undefined) {
+  const seen = new Set<string>();
+  return (page?.results || []).filter(row => {
+    if (seen.has(row.ref)) return false;
+    seen.add(row.ref); return true;
+  }).map(row => ({
+    ref: row.ref,
+    label: row.conversation_title || Array.from(row.text || row.content || row.snippet || row.ref).slice(0, 72).join(""),
+    snippet: Array.from(row.text || row.content || row.snippet || "").slice(0, 240).join(""),
+    role: row.role, evidence: row.evidence || "", kind: row.kind,
+  }));
+}
+export const currentRecallQuery = (goal: string, searched: string, page: SearchPage | null | undefined) =>
+  !!page && !!goal.trim() && goal.trim() === searched.trim();

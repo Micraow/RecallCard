@@ -51,3 +51,36 @@ test("真实服务桥按当前 session/scope 准备、保存与定向取消，�
   assert.equal(calls[0].args.budgetTokens,32768);
   assert.deepEqual(calls[3].args,{sessionId:'portable_session',scope:'personal',previewId:'synthetic_preview'});
 });
+
+import { recallChoices, currentRecallQuery } from '../src/service/portable.ts';
+import { recallCoverageNotes } from '../src/service/setup.ts';
+import type { SearchPage } from '../src/service/types.ts';
+test('问题变化或未返回有效检索不能沿用旧来源，空结果仍是本次真实检索', () => {
+  const page:SearchPage={results:[{ref:'event:first',kind:'event',text:'合成来源'}]};
+  assert.equal(currentRecallQuery('问题二','问题一',page),false);
+  assert.equal(currentRecallQuery('问题二','问题二',null),false);
+  assert.equal(currentRecallQuery('   ','',page),false);
+  assert.equal(currentRecallQuery(' 问题一 ','问题一',page),true);
+  assert.equal(currentRecallQuery('问题二','问题二',{results:[]}),true);
+});
+test('保留第九条候选供换选，同会话来源仍有独立摘录、角色和唯一引用', () => {
+  const page:SearchPage={results:Array.from({length:9},(_,i)=>({ref:`event:synthetic_${i}`,kind:'event',text:`独立合成摘录${i}`,conversation_title:'相同合成会话',role:i%2?'assistant':'user'}))};
+  page.results.push(page.results[0]);
+  const choices=recallChoices(page);
+  assert.equal(choices.length,9);assert.equal(choices[8].ref,'event:synthetic_8');
+  assert.equal(choices[1].role,'assistant');assert.equal(choices[1].snippet,'独立合成摘录1');
+  assert.deepEqual(recallChoices({results:[]}),[]);
+});
+test('检索覆盖分别说明本地、已批准云、退化、未知和预算，不声称原始聊天已全量语义化', () => {
+  for(const [coverage,pattern] of [
+    [{semantic_search:'available',semantic_query_encoding:'local_encoded'},/本机编码/],
+    [{semantic_search:'available',semantic_query_encoding:'cloud_encoded'},/独立云批准编码/],
+    [{semantic_search:'unavailable',semantic_error:'worker_failed'},/worker_failed.*保留词法结果/],
+    [{semantic_search:'unavailable',semantic_error:'offline_config_invalid'},/offline_config_invalid/],
+    [{semantic_search:'unavailable'},/词法匹配/],
+    [undefined,/未提供语义检索状态/],
+  ] as const) {
+    const notes=recallCoverageNotes({results:[],coverage,truncated:true}).join('\n');
+    assert.match(notes,pattern);assert.match(notes,/原始聊天仍通过词法查找/);assert.match(notes,/预算上限/);
+  }
+});

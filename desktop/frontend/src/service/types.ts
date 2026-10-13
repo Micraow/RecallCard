@@ -180,6 +180,7 @@ export interface MessagesPage {
   order_kind: string;
 }
 export interface SearchRow {
+  role?: string | null;
   ref: string;
   kind: string;
   text: string;
@@ -197,7 +198,7 @@ export interface SearchRow {
   };
 }
 export interface SearchPage {
-  coverage?: {semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string};
+  coverage?: {semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string; semantic_coverage?: string; lexical_matching?: string};
   results: SearchRow[];
   truncated?: boolean;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { PortableContextDialog } from "../components/PortableContext";
+import { PortableContextDialog, RecallCoverage } from "../components/PortableContext";
 import type { ScopedService } from "../service/client";
 import { useResource } from "../service/hooks";
 import {
@@ -31,7 +31,8 @@ export function SearchPage({
         {results.data && <Badge>{results.data.results.length} 条结果</Badge>}
       </div>
       {!results.loading && !results.error && !!results.data?.results.length && <button className="button primary" onClick={() => setSharing(true)}>带到任意 AI</button>}
-      {sharing && results.data && <PortableContextDialog key={service.workspace.session_id + service.scope + query} service={service} initialGoal={query} choices={results.data.results.map(row => ({ref:row.ref, label:row.conversation_title || titleOf(row.text || row.content || row.snippet || row.ref, 72)}))} close={() => setSharing(false)} />}
+      {sharing && results.data && <PortableContextDialog key={service.workspace.session_id + service.scope + query} service={service} initialGoal={query} initialResults={results.data} close={() => setSharing(false)} />}
+      {!results.loading && !results.error && results.data && <RecallCoverage page={results.data} />}
       {results.loading ? (
         <Loading label="正在检索本机资料" />
       ) : results.error ? (

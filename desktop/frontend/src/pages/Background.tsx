@@ -1,4 +1,4 @@
-import { PasteReplyDialog } from "../components/PortableContext";
+import { PasteReplyDialog, PortableContextDialog } from "../components/PortableContext";
 import { useRef, useState } from "react";
 import type { ScopedService } from "../service/client";
 import { appError, isRunning, importRecovery, type AppError, type JobStatus } from "../service/contracts";
@@ -19,6 +19,8 @@ export function BackgroundPage({ service, refresh, changed, jobs, jobsError, imp
   const inventory = usePollingResource(() => service.connections(), [service]);
   const runtime = usePollingResource(() => service.runtime(), [service], 8000);
   const [pasting, setPasting] = useState(false);
+  const [question, setQuestion] = useState("");
+  const [handoffQuestion, setHandoffQuestion] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [saved, setSaved] = useState("");
   const active = jobs.find(isRunning);
@@ -40,6 +42,13 @@ export function BackgroundPage({ service, refresh, changed, jobs, jobsError, imp
       <div className="home-heading-actions"><button className="button" onClick={() => setPasting(true)}>粘贴 AI 回答</button>
       <button className="button" onClick={() => setAdding(true)}><Icon name="plus" size={15} />补充最新情况</button></div>
     </header>
+    <form className="home-question" aria-label="按问题准备资料" onSubmit={event => { event.preventDefault(); if (question.trim() && new TextEncoder().encode(question.trim()).length <= 4096) setHandoffQuestion(question.trim()); }}>
+      <label className="field-label" htmlFor="recall-question">这次想聊什么？</label>
+      <div><input id="recall-question" className="text-input" value={question} onChange={event => setQuestion(event.target.value)} placeholder="写下当前问题，找回相关原话和记忆" />
+        <button className="button primary" disabled={!question.trim() || new TextEncoder().encode(question.trim()).length > 4096}>准备这次对话</button></div>
+      <p>先找资料、核对来源，再复制到你常用的 AI；不会代你发送。若已批准云向量，问题会按现有配置交给该服务编码。</p>
+    </form>
+    {handoffQuestion !== null && <PortableContextDialog key={service.workspace.session_id + service.scope + handoffQuestion} service={service} initialGoal={handoffQuestion} close={() => setHandoffQuestion(null)} />}
     {saved && <p className="background-saved" role="status"><Icon name="check" size={15} />{saved}</p>}
     <section className="home-connection-panel" aria-label="连接健康">
       <div className="home-panel-heading"><div><h2>你的 AI 连接</h2><p>一次确认范围，之后无需每轮挑选上下文。</p></div><button className="text-button" onClick={openConnections}>管理连接<Icon name="chevron" size={14} /></button></div>

@@ -1,25 +1,46 @@
 import { useEffect, useRef, useState } from "react";
 import type { ScopedService } from "../service/client";
 import { appError, type AppError } from "../service/contracts";
-import { evidenceLabel, scopeLabel } from "../service/types";
-import { revalidateAndCopy, utf8Bytes, type PortableContext, type ReplyPreview } from "../service/portable";
+import { evidenceLabel, scopeLabel, type SearchPage } from "../service/types";
+import { useResource } from "../service/hooks";
+import { recallCoverageNotes } from "../service/setup";
+import { revalidateAndCopy, utf8Bytes, recallChoices, currentRecallQuery, type PortableContext, type ReplyPreview } from "../service/portable";
 import { Badge, Dialog, ErrorNotice, Prose } from "./common";
 
-export interface ContextChoice { ref: string; label: string }
-export function PortableContextDialog({ service, choices, initialGoal, close }: {
-  service: ScopedService; choices: ContextChoice[]; initialGoal: string; close: () => void;
+export function RecallCoverage({ page }: { page: SearchPage }) {
+  return <aside className="context-note" aria-label="本次检索覆盖">{recallCoverageNotes(page).map(note => <p key={note}>{note}</p>)}</aside>;
+}
+export function PortableContextDialog({ service, initialResults, initialGoal, close }: {
+  service: ScopedService; initialResults?: SearchPage; initialGoal: string; close: () => void;
 }) {
   const [goal, setGoal] = useState(initialGoal);
-  const [refs, setRefs] = useState(choices.slice(0, 8).map(row => row.ref));
+  const [request, setRequest] = useState({ query: initialGoal.trim(), revision: 0 });
+  const search = useResource(async () => {
+    const page = request.revision === 0 && initialResults ? initialResults
+      : request.query ? await service.search(request.query) : null;
+    return { query: request.query, revision: request.revision, page };
+  }, [service, request]);
+  const page = search.data?.page;
+  const choices = recallChoices(page);
+  const [refs, setRefs] = useState<string[]>([]);
   const [preview, setPreview] = useState<PortableContext | null>(null);
   const [error, setError] = useState<AppError | null>(null);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const lock = useRef(false), active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, [service]);
+  useEffect(() => { setRefs(recallChoices(page).slice(0, 8).map(row => row.ref)); }, [search.data]);
+  const fresh = !search.loading && !search.error && search.data?.revision === request.revision && currentRecallQuery(goal, search.data.query, page);
+  const validGoal = !!goal.trim() && utf8Bytes(goal.trim()) <= 4096;
   const prepare = () => service.prepareContext(refs, goal.trim());
+  const invalidate = () => { setPreview(null); setStatus(""); setError(null); };
+  const find = () => {
+    if (lock.current || !validGoal) return;
+    invalidate(); setRefs([]);
+    setRequest(old => ({ query: goal.trim(), revision: old.revision + 1 }));
+  };
   const run = async (copy: boolean) => {
-    if (lock.current || !refs.length || !goal.trim()) return;
+    if (lock.current || !fresh || !refs.length || !validGoal) return;
     lock.current = true; setBusy(true); setError(null); setStatus("");
     try {
       if (copy && preview) {
@@ -35,27 +56,32 @@ export function PortableContextDialog({ service, choices, initialGoal, close }: 
     } catch (reason) { if (active.current) { setError(appError(reason)); setPreview(null); } }
     finally { lock.current = false; if (active.current) setBusy(false); }
   };
-  const invalidate = () => { setPreview(null); setStatus(""); setError(null); };
   return <Dialog title="带到任意 AI" close={close} busy={busy} wide>
     <div className="modal-body portable-context">
-      <p>在 {scopeLabel(service.scope)} 准备资料。无需安装扩展或登录网站，复制后在常用 AI 中粘贴并自行发送。</p>
+      <p>在 {scopeLabel(service.scope)} 按当前问题找资料，再核对复制。使用现有检索配置；若你已批准云向量，问题会按既有批准交给该服务编码。</p>
       <label className="field-label" htmlFor="portable-goal">这次想问什么</label>
       <textarea id="portable-goal" className="text-area" value={goal} disabled={busy} onChange={e => { setGoal(e.target.value); invalidate(); }} />
       {utf8Bytes(goal.trim()) > 4096 && <p role="alert">问题最多 4,096 字节，请缩短后再准备。</p>}
-      <fieldset disabled={busy}><legend>相关来源 · 已选 {refs.length} / 8 条</legend>
+      <button className="button" disabled={busy || search.loading || !validGoal} onClick={find}>{search.loading ? "正在找相关资料…" : fresh ? "重新查找相关资料" : "按这个问题找资料"}</button>
+      {!search.loading && page && !fresh && <p role="status">问题已改变，下面仍是旧问题的结果。请重新查找，旧选择暂不能预览或复制。</p>}
+      {search.error && <ErrorNotice error={search.error} retry={find} />}
+      {fresh && page && <RecallCoverage page={page} />}
+      {fresh && !choices.length && <p role="status">这次没有找到匹配来源，不代表从未聊过。试试人名、项目名或记得的几个关键词；不会沿用上次的资料。</p>}
+      {!!choices.length && <fieldset disabled={busy || !fresh}><legend>相关来源 · 已选 {refs.length} / 8 条 · 共 {choices.length} 条候选</legend>
         {choices.map(choice => <label className="portable-choice" key={choice.ref}>
           <input type="checkbox" checked={refs.includes(choice.ref)} disabled={!refs.includes(choice.ref) && refs.length >= 8}
             onChange={e => { setRefs(e.target.checked ? [...refs, choice.ref] : refs.filter(ref => ref !== choice.ref)); invalidate(); }} />
-          <span>{choice.label}<small>{choice.ref}</small></span>
+          <span><Badge>{choice.role === "user" ? "用户原话" : choice.role === "assistant" ? "AI 回答，非用户事实" : choice.kind === "memory" ? "记忆 · " + evidenceLabel(choice.evidence) : "原始来源"}</Badge> {choice.label}
+            <span className="portable-excerpt">{choice.snippet}</span><small>{choice.ref}</small></span>
         </label>)}
-      </fieldset>
-      <p className="context-note">不会复制：未勾选的 {choices.length - refs.length} 条结果、其他历史消息、附件原件及附件正文。稳定背景会一并带入，完整内容见下方预览；片段不代表完整会话或同一分支。</p>
+      </fieldset>}
+      <p className="context-note">默认选择前 8 条候选，可以取消后换选其他来源。不会复制：未勾选的 {Math.max(0, choices.length - refs.length)} 条结果、其他历史消息、附件原件及附件正文。稳定背景会一并带入，完整内容见下方预览；片段不代表完整会话或同一分支。</p>
       {error && <ErrorNotice error={error} />}
       {preview && <PortablePreview preview={preview} />}
       {status && <p role="status">{status}</p>}
     </div>
     <div className="modal-footer"><button className="button" onClick={close} disabled={busy}>关闭</button>
-      <button className="button primary" disabled={busy || !refs.length || !goal.trim() || utf8Bytes(goal.trim()) > 4096} onClick={() => void run(!!preview)}>
+      <button className="button primary" disabled={busy || !fresh || !refs.length || !validGoal} onClick={() => void run(!!preview)}>
         {busy ? "正在核对资料…" : preview ? "核对并复制上下文" : "预览将复制的内容"}
       </button></div>
   </Dialog>;
