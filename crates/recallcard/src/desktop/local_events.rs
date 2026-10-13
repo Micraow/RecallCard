@@ -62,34 +62,26 @@ impl ModelOperation {
         query: &str,
         target: &str,
     ) -> AppResult<Option<Value>> {
-        if !matches!(target, "all" | "events") {
+        if !matches!(target, "all" | "events" | "memories") {
             return Ok(None);
         }
         let vault = self.vault()?;
-        let Some(index) = LocalEvents::open(&vault, &self.scope).map_err(error)? else {
-            return Ok(None);
-        };
-        let mut response = index.search(query, 20).map_err(error)?;
-        // 新本机入口不借用另一个Memory/云批准。既有Memory仍可按词法补充且保留来源类型。
-        if target == "all" {
-            let context = crate::context::Context::new(
-                &vault,
-                crate::policy::Access::new(vec![self.scope.clone()]).map_err(error)?,
-            );
-            let args=serde_json::from_value(json!({"query":query,"target":"memories","lexical_match":"natural_question","limit":10,"budget_bytes":8192})).map_err(|_|error("invalid_request".into()))?;
-            let memory = context.search(args).map_err(error)?;
-            if let (Some(rows), Some(extra)) = (
-                response["results"].as_array_mut(),
-                memory["results"].as_array(),
-            ) {
-                rows.extend(extra.iter().cloned());
-            }
-            response["coverage"]["memory_search"] = json!("lexical_only_no_cloud_fallback");
-            response["match_count"] =
-                json!(response["results"].as_array().map(Vec::len).unwrap_or(0));
-            if memory["truncated"] == true {
-                response["truncated"] = json!(true);
-            }
+        let context = crate::context::Context::new(
+            &vault,
+            crate::policy::Access::new(vec![self.scope.clone()]).map_err(error)?,
+        );
+        let mut response = context.recall_question(query, target).map_err(error)?;
+        // 保留未配置时既有关键词体验；此分支明确只用本地词法，绝不进入旧云选择器。
+        if target != "memories"
+            && LocalEvents::open(&vault, &self.scope)
+                .map_err(error)?
+                .is_none()
+        {
+            let args=serde_json::from_value(json!({"query":query,"target":target,"lexical_match":"natural_question","limit":10,"budget_bytes":7168})).map_err(|_|error("invalid_request".into()))?;
+            let coverage = response["coverage"].clone();
+            response = context.search(args).map_err(error)?;
+            response["coverage"]["local_event_gateway"] = coverage;
+            response["coverage"]["cloud_fallback"] = json!(false);
         }
         self.vault()?;
         Ok(Some(response))

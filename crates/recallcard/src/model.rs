@@ -414,3 +414,11 @@ impl EventInput {
         }
     }
 }
+
+/// 与分页读取共用完整正本版本；经 Value 统一字段顺序，不能用纯正文摘要代替。
+pub(crate) fn record_snapshot(record: &impl serde::Serialize) -> Result<String> {
+    let value = serde_json::to_value(record).map_err(|e| e.to_string())?;
+    Ok(hash(
+        &serde_json::to_vec(&value).map_err(|e| e.to_string())?,
+    ))
+}

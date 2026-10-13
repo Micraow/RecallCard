@@ -181,8 +181,18 @@ class ConnectedJourney(FirstUseJourney):
             browser.button("预览将复制的内容", "//dialog")
             wait_for(lambda: bool(browser.observe("return document.querySelector('#portable-preview')?.value")), "本机Event命中可进入原上下文预览")
             assert UPDATE in browser.observe("return document.querySelector('#portable-preview').value")
+            connection = self.cli_result("connections")["entries"][0]["id"]
+            mcp_config = {"command": str(self.cli), "args": ["--vault", str(self.vault), "mcp", "--scope", "personal", "--connection-id", connection]}
+            recalled = self.mcp_tool(mcp_config, "recall_search", {"query": "synthetic-vector-query"})
+            original = next(event for event in self.events() if event.get("content") == UPDATE)
+            assert recalled["results"][0]["ref"] == "event:" + original["id"]
+            assert recalled["coverage"]["cloud_fallback"] is False
+            resolved = self.mcp_tool(mcp_config, "recall_fetch", {"id": recalled["results"][0]["id"]})
+            assert resolved["results"][0]["ref"] == recalled["results"][0]["ref"]
+            assert resolved["results"][0]["snapshot"] == recalled["results"][0]["snapshot"]
+            assert resolved["results"][0]["text"] == UPDATE
             assert self.events() == before and not self.memories()
-            self.local_event_acceptance = {"fake_encoder_contract_only": True, "actual_model_quality_verified": False, "actual_loopback_http": True, "raw_event_without_memory": True, "separate_explicit_approval": True, "no_calls_before_index_request": True, "canonical_unchanged": True, "new_query_local_encoded": True, "same_source_in_context_preview": True, "cloud_fallback": False}
+            self.local_event_acceptance = {"fake_encoder_contract_only": True, "actual_model_quality_verified": False, "actual_loopback_http": True, "raw_event_without_memory": True, "separate_explicit_approval": True, "no_calls_before_index_request": True, "canonical_unchanged": True, "new_query_local_encoded": True, "same_source_in_context_preview": True, "managed_mcp_same_event_and_snapshot": True, "cloud_fallback": False}
             self.checkpoint("本机新问题返回原Event并接入复制预览而不冒充真实模型质量")
             browser.button("关闭", "//dialog//div[contains(@class,'modal-footer')]")
             browser.button("设置")

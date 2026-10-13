@@ -97,7 +97,7 @@ fn native_stdio_reads_existing_deepseek_context_without_web_draft_turns() {
         json!({"refs":[format!("event:{allowed}")],"budget_tokens":8192}),
     ));
     let output = run(&vault, &configured.id, input);
-    assert_eq!(output[1]["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(output[1]["result"]["tools"].as_array().unwrap().len(), 6);
     assert!(output[1]["result"]["tools"]
         .as_array()
         .unwrap()

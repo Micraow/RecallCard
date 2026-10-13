@@ -336,6 +336,9 @@ struct NativeServices<'a> {
 }
 impl NativeServices<'_> {
     fn read(&self, vault: &Vault, access: Access, name: &str, args: Value) -> Result<Value> {
+        if matches!(name, "recall_search" | "recall_fetch") {
+            return invoke(&Context::new(vault, access), name, args);
+        }
         let before = self.semantic_status(vault, &access);
         let context = match self.semantic.filter(|_| !before.reconnect_required) {
             Some(semantic) => Context::with_semantic(vault, access.clone(), semantic),
@@ -497,7 +500,10 @@ fn browser_operation(
     use crate::application::connections;
     let (session, installation) = binding;
     let capture_scope = services.capture_scope;
-    let reading = matches!(name, "bootstrap" | "search" | "read" | "sources");
+    let reading = matches!(
+        name,
+        "bootstrap" | "search" | "read" | "sources" | "recall_search" | "recall_fetch"
+    );
     // Preserve explicitly installed legacy IPC routing only when no managed
     // browser grant exists. Managed installations never fall back to broad scopes.
     if reading && installation.is_none() {
@@ -655,8 +661,11 @@ fn browser_operation(
                     return Err("此网站未授权自动准备资料".into());
                 }
                 let action = object["action"].as_str().ok_or("缺少只读动作")?;
-                if !matches!(action, "bootstrap" | "search" | "read" | "sources") {
-                    return Err("只允许四种只读资料操作".into());
+                if !matches!(
+                    action,
+                    "bootstrap" | "search" | "read" | "sources" | "recall_search" | "recall_fetch"
+                ) {
+                    return Err("只允许已定义的只读资料操作".into());
                 }
                 let scopes = grant
                     .recall_scopes
@@ -856,7 +865,13 @@ fn serve_native_bound_service_io<R: Read, W: Write>(
                                 response.clone()
                             } else if matches!(
                                 request.action.as_str(),
-                                "bootstrap" | "search" | "read" | "sources" | "authorized_read"
+                                "bootstrap"
+                                    | "search"
+                                    | "read"
+                                    | "sources"
+                                    | "recall_search"
+                                    | "recall_fetch"
+                                    | "authorized_read"
                             ) {
                                 // 只读重试仍重新检查事实、抑制与权限；不能借 request_id 重放已撤回正文。
                                 match service(

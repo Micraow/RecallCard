@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { parseAction, strictJson, validateAction, routeFor, reserveRequest, makeCapsule, MAX_REQUESTS } from '../protocol.js';
+import { validateArguments, parseAction, strictJson, validateAction, routeFor, reserveRequest, makeCapsule, MAX_REQUESTS } from '../protocol.js';
 const fixture = JSON.parse(await readFile(new URL('./fixtures/actions.json', import.meta.url)));
 const action = (changes = {}) => ({ ...structuredClone(fixture.valid), ...changes });
 const fence = (value) => '```recallcard-action\n' + JSON.stringify(value) + '\n```';
@@ -49,4 +49,14 @@ test('上下文标记来源、人工发送状态；不把输出变成 HTML 或�
   assert.match(capsule.text, /recallcard_context/);
   assert.match(capsule.text, /synthetic/);
   assert.throws(() => makeCapsule(action(), {text:'私'.repeat(40000)}, fixture.session), /64 KiB/);
+});
+
+test('简洁本机动作只接受query或来源id，不允许模型注入范围、提供器或预算', () => {
+  assert.doesNotThrow(() => validateArguments('recall_search', {query:'之前那个合成计划怎么定的'}));
+  assert.doesNotThrow(() => validateArguments('recall_fetch', {id:'rcs1|synthetic-locator'}));
+  for (const extra of [{scope:'personal'}, {endpoint:'https://external.invalid'}, {budget_bytes:8192}, {target:'events'}]) {
+    assert.throws(() => validateArguments('recall_search', {query:'合成问题', ...extra}));
+  }
+  assert.throws(() => validateArguments('recall_fetch', {id:'S1',query:'扩展范围'}));
+  assert.throws(() => validateArguments('recall_search', {query:'中'.repeat(1400)}));
 });

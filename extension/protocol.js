@@ -87,13 +87,16 @@ export function strictJson(text) {
 }
 export function validateArguments(action, args) {
   const allowed = {
+    recall_search: ['query'], recall_fetch: ['id'],
     bootstrap: ['budget_bytes', 'budget_tokens'],
     search: ['query', 'target', 'include_navigation', 'event_filter', 'session_ref', 'as_of', 'limit', 'detail', 'budget_bytes', 'budget_tokens', 'cursor'],
     read: ['refs', 'detail', 'include_adjacent', 'budget_bytes', 'budget_tokens', 'cursor', 'offset_bytes'],
     sources: ['refs', 'detail', 'include_adjacent', 'budget_bytes', 'budget_tokens', 'cursor', 'offset_bytes'],
   };
-  if (!Object.hasOwn(allowed, action)) fail('只支持 bootstrap、search、read、sources 四种只读动作');
-  keys(args, allowed[action], action === 'search' ? ['query'] : ['read', 'sources'].includes(action) ? ['refs'] : []);
+  if (!Object.hasOwn(allowed, action)) fail('只支持已定义的只读资料动作');
+  keys(args, allowed[action], ['search', 'recall_search'].includes(action) ? ['query'] : action === 'recall_fetch' ? ['id'] : ['read', 'sources'].includes(action) ? ['refs'] : []);
+  if (action === 'recall_search') { shortString(args.query, 4096, 'query'); if (byteLength(args.query) > 4096) fail('query 超过4096 UTF-8字节'); }
+  if (action === 'recall_fetch') shortString(args.id, 768, 'id');
   if (args.budget_bytes !== undefined && args.budget_tokens !== undefined) fail('budget_bytes 与兼容别名 budget_tokens 不能同时提供');
   integer(args.budget_bytes, 512, 32768, 'budget_bytes');
   integer(args.budget_tokens, 512, 32768, 'budget_tokens');

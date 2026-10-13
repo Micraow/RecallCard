@@ -344,6 +344,35 @@ impl<'a> LocalEvents<'a> {
         }
     }
     pub fn search(&self, query: &str, limit: usize) -> Result<Value> {
+        self.search_before(
+            query,
+            limit,
+            std::time::Instant::now() + std::time::Duration::from_secs(45),
+        )
+    }
+    pub(crate) fn verify_binding(&self, epoch: &str, config: &str) -> Result<()> {
+        self.current()?;
+        if config != self.config_hash || snapshot::inventory(self.vault)?.0 != epoch {
+            return Err("local_event_source_or_configuration_stale".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn verify_source(&self, epoch: &str, config: &str, reference: &str) -> Result<()> {
+        self.verify_binding(epoch, config)?;
+        let id = reference
+            .strip_prefix("event:")
+            .ok_or("local_event_reference_invalid")?;
+        if !snapshot::verified_sources(self, epoch)?.contains(id) {
+            return Err("local_event_source_not_current".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn search_before(
+        &self,
+        query: &str,
+        limit: usize,
+        deadline: std::time::Instant,
+    ) -> Result<Value> {
         if !self.config.settings.query_approved {
             return Err("local_event_query_not_approved".into());
         }
@@ -358,16 +387,17 @@ impl<'a> LocalEvents<'a> {
                 return Err("local_event_index_stale_refresh_required".into());
             }
         }
-        let status = worker::exchange(&self.config, json!({"op":"status"}))?;
+        let status = worker::exchange_before(&self.config, json!({"op":"status"}), deadline)?;
         if status["state"] != "complete" || status["source_epoch"] != manifest.epoch {
             return Err("local_event_index_stale_refresh_required".into());
         }
         let generation = status["published_generation"]
             .as_str()
             .ok_or("local_event_index_not_ready")?;
-        let candidates = worker::exchange(
+        let candidates = worker::exchange_before(
             &self.config,
             json!({"op":"query","query":query,"limit":100,"expected_generation":generation}),
+            deadline,
         )?;
         let _guard = self.vault.read_guard()?;
         self.current()?;
@@ -453,7 +483,9 @@ impl<'a> LocalEvents<'a> {
             }
             let snippet = crate::context::truncate_utf8(&text[start..end], 2048).to_owned();
             let value = json!({"ref":reference,"kind":"event","scope":event.data.scope,"role":event.data.role,
-                "text":snippet,"text_range":{"start_byte":start,"end_byte":start+snippet.len()},"text_truncated":start!=0||start+snippet.len()!=text.len(),
+                "snapshot":crate::model::record_snapshot(&event)?,"content_hash":hash(text.as_bytes()),
+                "text_hash":hash(snippet.as_bytes()),"matched_chunk":{"start_byte":start,"end_byte":end,"text_hash":row["text_sha256"]},
+                "text":snippet,"text_range":{"start_byte":start,"end_byte":start+snippet.len(),"total_bytes":text.len(),"projection":"event.text"},"text_truncated":start!=0||start+snippet.len()!=text.len(),
                 "score":score,"state":"captured","evidence":format!("{:?}/{:?}",event.data.role,event.data.origin),"evidence_refs":[reference],
                 "session_ref":event.data.session_key(),"occurred_at":event.data.occurred_at,"time_note":if event.data.occurred_at.is_none(){"发生时间未知；捕获时间不代表发生时间"}else{""}});
             let size = serde_json::to_vec(&value)
@@ -469,8 +501,13 @@ impl<'a> LocalEvents<'a> {
             json!({"query":query,"results":results,"match_count":results.len(),"status":if results.is_empty(){"no_verified_candidates"}else{"ok"},
             "truncated":rows.len()>results.len()||rejected>0,"coverage":{"event_search":"local_semantic","semantic_search":"local_event_index",
             "local_event_semantic":true,"semantic_query_encoding":candidates["coverage"]["query_encoding"],"event_index_generation":generation,
-            "event_index_snapshot":manifest.epoch,"source_verification":"current_event_hash_and_utf8_range","rejected_candidates":rejected,
+            "event_index_snapshot":manifest.epoch,"local_config_identity":self.config_hash,"source_verification":"current_event_hash_and_utf8_range","rejected_candidates":rejected,
             "partial":rejected>0,"chunk_selection":"per_event_best_chunk","note":"本机向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}),
         )
     }
+}
+
+/// 调用方持最终 Vault 读锁；跨入口定位符保守绑定所有来源变化。
+pub(crate) fn source_epoch(vault: &Vault) -> Result<String> {
+    Ok(snapshot::inventory(vault)?.0)
 }

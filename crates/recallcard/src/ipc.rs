@@ -138,8 +138,17 @@ impl Response {
     }
 }
 fn check_method(method: &str) -> Result<()> {
-    if !["bootstrap", "search", "read", "sources"].contains(&method) {
-        return Err("IPC 仅允许 bootstrap/search/read/sources 四个只读操作".into());
+    if ![
+        "bootstrap",
+        "search",
+        "read",
+        "sources",
+        "recall_search",
+        "recall_fetch",
+    ]
+    .contains(&method)
+    {
+        return Err("IPC 仅允许已定义的只读资料操作".into());
     }
     Ok(())
 }

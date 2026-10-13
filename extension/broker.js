@@ -38,6 +38,10 @@ export async function resultFingerprint(action, result) {
     const { coverage: _coverage, ...stable } = result;
     selected = stable;
   }
+  if (action === 'recall_search' && result?.coverage?.scopes) {
+    // 本机新编码转为缓存是运行诊断，不是来源变化。其余状态/范围/正文/定位符完整核验。
+    selected = {...result, coverage: {...result.coverage, scopes: result.coverage.scopes.map(({query_encoding: _mode, ...scope}) => scope)}};
+  }
   const bytes = new TextEncoder().encode(JSON.stringify(canonical(selected)));
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest), (n) => n.toString(16).padStart(2, '0')).join('');

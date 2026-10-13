@@ -317,7 +317,7 @@ impl Context<'_> {
             metadata.as_object_mut().unwrap().remove("reply_to");
             metadata.as_object_mut().unwrap().remove("revision_of");
         }
-        let snapshot = hash(&serde_json::to_vec(&record).map_err(|e| e.to_string())?);
+        let snapshot = record_snapshot(&record)?;
         let binding_snapshot = source_generation
             .as_ref()
             .map(|generation| hash(format!("{snapshot}:{generation}").as_bytes()))

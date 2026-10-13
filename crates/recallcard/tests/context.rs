@@ -232,7 +232,7 @@ fn temporal_filters_do_not_rewrite_unknown_time() {
         .is_empty());
 }
 #[test]
-fn mcp_has_exactly_four_readonly_tools_and_no_mutation_route() {
+fn mcp_exposes_four_legacy_and_two_simple_readonly_tools_without_mutations() {
     let (_d, v) = setup();
     capture(&v, "personal", "a", "跨客户端原始决定");
     let requests = [
@@ -260,7 +260,7 @@ fn mcp_has_exactly_four_readonly_tools_and_no_mutation_route() {
         .map(|s| serde_json::from_str::<Value>(s).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(responses.len(), 4);
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 6);
     assert_eq!(responses[2]["result"]["isError"], false);
     assert!(responses[2]["result"]["content"][0]["text"]
         .as_str()

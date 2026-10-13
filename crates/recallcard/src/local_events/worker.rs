@@ -3,7 +3,7 @@ use super::*;
 use std::{
     process::Stdio,
     sync::{mpsc, Mutex, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -11,6 +11,7 @@ use tokio::{
 };
 struct Job {
     request: Value,
+    deadline: Instant,
     reply: mpsc::SyncSender<Result<Value>>,
 }
 struct Handle {
@@ -19,6 +20,16 @@ struct Handle {
 }
 static WORKER: OnceLock<Mutex<Option<Handle>>> = OnceLock::new();
 pub(super) fn exchange(config: &Config, operation: Value) -> Result<Value> {
+    exchange_before(config, operation, Instant::now() + Duration::from_secs(45))
+}
+pub(super) fn exchange_before(
+    config: &Config,
+    operation: Value,
+    deadline: Instant,
+) -> Result<Value> {
+    if Instant::now() >= deadline {
+        return Err("local_event_worker_timeout".into());
+    }
     let key = hash(&serde_json::to_vec(config).map_err(|_| "local_event_config_invalid")?);
     let registry = WORKER.get_or_init(|| Mutex::new(None));
     let mut slot = registry
@@ -30,6 +41,7 @@ pub(super) fn exchange(config: &Config, operation: Value) -> Result<Value> {
     let (reply, receiver) = mpsc::sync_channel(1);
     let mut pending = Job {
         request: operation,
+        deadline,
         reply,
     };
     for attempt in 0..2 {
@@ -49,7 +61,7 @@ pub(super) fn exchange(config: &Config, operation: Value) -> Result<Value> {
             Ok(()) => {
                 drop(slot);
                 return receiver
-                    .recv_timeout(Duration::from_secs(45))
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                     .map_err(|_| "local_event_worker_timeout".to_owned())?;
             }
             Err(mpsc::TrySendError::Full(_)) => return Err("local_event_worker_busy".into()),
@@ -75,11 +87,15 @@ fn supervise(config: Config, receiver: mpsc::Receiver<Job>) {
     let mut process: Option<Process> = None;
     while let Ok(job) = receiver.recv_timeout(Duration::from_secs(30)) {
         let result = runtime.block_on(async {
+            let remaining = job.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("local_event_worker_timeout".into());
+            }
             if process.is_none() {
                 process = Some(Process::start(&config)?);
             }
             let response = tokio::time::timeout(
-                Duration::from_secs(40),
+                remaining.min(Duration::from_secs(40)),
                 process.as_mut().unwrap().exchange(job.request),
             )
             .await

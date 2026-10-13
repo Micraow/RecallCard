@@ -9,6 +9,8 @@ mod candidate_review;
 mod confirmation;
 mod navigation;
 mod paging;
+mod recall;
+pub use recall::{RecallFetchArgs, RecallSearchArgs};
 mod search;
 mod session_candidates;
 mod session_context;

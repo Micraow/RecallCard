@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Broker, bindSession, verifyContent, verifyPopup, HOST } from '../broker.js';
+import { resultFingerprint, Broker, bindSession, verifyContent, verifyPopup, HOST } from '../broker.js';
 const extensionId = 'abcdefghijklmnopabcdefghijklmnop';
 const popupUrl = `chrome-extension://${extensionId}/popup.html`;
 const popup = {id:extensionId, url:popupUrl};
@@ -253,4 +253,14 @@ test('目录分页结果在插入前被撤权时清除预览，不降级复用�
   h.api.native = async () => ({ ok: false, error: '合成撤权拒绝' });
   await assert.rejects(h.broker.handle(h.message('insert'), popup), /旧预览已废弃/);
   assert.equal(h.state().preview, null);
+});
+
+test('简洁检索的新编码转缓存不制造旧资料，正文或覆盖变化仍然失效', async () => {
+  const original = {results:[{ref:'event:evt_synthetic',id:'rcs1|synthetic',snapshot:'same',text:'合成原话'}],coverage:{scopes:[{scope:'personal',state:'ready',query_encoding:'local'}]},truncated:false};
+  const cached = structuredClone(original); cached.coverage.scopes[0].query_encoding='cache';
+  assert.equal(await resultFingerprint('recall_search',original),await resultFingerprint('recall_search',cached));
+  for (const change of [v=>{v.results[0].text='变化';},v=>{v.results[0].snapshot='new';},v=>{v.coverage.scopes[0].state='unavailable';},v=>{v.results[0].id='different';}]) {
+    const next=structuredClone(cached); change(next);
+    assert.notEqual(await resultFingerprint('recall_search',original),await resultFingerprint('recall_search',next));
+  }
 });
