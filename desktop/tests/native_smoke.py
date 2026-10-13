@@ -146,7 +146,22 @@ class WebDriver:
         return self.command("POST", "/element", {"using": using, "value": selector})[ELEMENT]
 
     def text(self, selector):
-        return self.command("GET", f"/element/{self.find(selector)}/text")
+        # React may replace a node between find and the read-only GET. Re-find
+        # this exact selector only for W3C stale-element errors; never replay a
+        # click/input or turn an absent element/assertion failure into success.
+        for attempt in range(3):
+            try:
+                return self.command("GET", f"/element/{self.find(selector)}/text")
+            except DriverError as error:
+                try:
+                    payload = json.loads(str(error))
+                    value = payload.get("value") if isinstance(payload, dict) else None
+                    code = value.get("error") if isinstance(value, dict) else None
+                except (ValueError, TypeError):
+                    code = None
+                if code != "stale element reference" or attempt == 2:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
     def assert_vault_badge(self, expected):
         # WebDriver 的 rendered text 可能受单行省略布局影响；同时留下原值，

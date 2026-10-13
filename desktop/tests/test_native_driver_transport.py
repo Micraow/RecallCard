@@ -37,4 +37,29 @@ class DriverTransportTest(unittest.TestCase):
         with patch.object(module,"urlopen",side_effect=RemoteDisconnected("closed")) as request:
             with self.assertRaises(RemoteDisconnected):self.driver().request("GET","/session/demo/screenshot")
             self.assertEqual(request.call_count,3)
+    def test_stale_text_relocates_same_selector_and_keeps_rendered_text(self):
+        driver=self.driver()
+        stale=module.DriverError(json.dumps({"value":{"error":"stale element reference"}}))
+        with patch.object(driver,"find",side_effect=["old-node","new-node"]) as find, patch.object(driver,"command",side_effect=[stale,"完整合成原文末尾"]) as command, patch.object(module.time,"sleep"):
+            self.assertEqual(driver.text(".message[data-reference='event:synthetic']"),"完整合成原文末尾")
+            self.assertEqual([c.args for c in find.call_args_list],[(".message[data-reference='event:synthetic']",)]*2)
+            self.assertEqual([c.args for c in command.call_args_list],[("GET","/element/old-node/text"),("GET","/element/new-node/text")])
+    def test_persistently_stale_text_fails_after_three_fresh_observations(self):
+        driver=self.driver();stale=module.DriverError(json.dumps({"value":{"error":"stale element reference"}}))
+        with patch.object(driver,"find",return_value="node") as find, patch.object(driver,"command",side_effect=stale) as command, patch.object(module.time,"sleep"):
+            with self.assertRaisesRegex(module.DriverError,"stale element reference"):driver.text(".synthetic")
+            self.assertEqual(find.call_count,3);self.assertEqual(command.call_count,3)
+    def test_missing_or_invalid_read_errors_are_not_hidden_by_stale_recovery(self):
+        for body in [{"value":{"error":"no such element"}}, {"value":{"error":"invalid session id"}}, {"value":"bad"}, ["bad"], "not json"]:
+            driver=self.driver();error=module.DriverError(body if isinstance(body,str) else json.dumps(body))
+            with self.subTest(body=body), patch.object(driver,"find",return_value="node"), patch.object(driver,"command",side_effect=error) as command, patch.object(module.time,"sleep"):
+                with self.assertRaises(module.DriverError):driver.text(".synthetic")
+                self.assertEqual(command.call_count,1)
+    def test_click_stale_failure_does_not_replay_the_action(self):
+        driver=self.driver();stale=module.DriverError(json.dumps({"value":{"error":"stale element reference"}}))
+        with patch.object(driver,"find",return_value="node"), patch.object(driver,"command",side_effect=[None,stale]) as command:
+            with self.assertRaisesRegex(module.DriverError,"stale element reference"):driver.click(".synthetic")
+            self.assertEqual(command.call_count,2)
+            self.assertEqual(command.call_args.args,("POST","/element/node/click",{}))
+
 if __name__=="__main__":unittest.main()
