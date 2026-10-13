@@ -3,11 +3,33 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import Mock
 from connected_context_native import ConnectedJourney, ORIGINAL, UPDATE
 
 
 class CanonicalEvidenceTest(unittest.TestCase):
+    def test_native_attachment_fixture_has_one_opaque_payload_and_one_explicit_gap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journey = object.__new__(ConnectedJourney)
+            journey.temporary = Path(directory)
+            with zipfile.ZipFile(journey.create_archive()) as archive:
+                record = json.loads(archive.read("conversations.json"))[0]
+                self.assertEqual(len(record["mapping"]), 4)
+                self.assertTrue(all("children" not in node for node in record["mapping"].values()))
+                upload = record["mapping"]["u1"]["message"]
+                self.assertEqual(upload["content"]["parts"], [""])
+                self.assertEqual(upload["metadata"]["attachments"][0]["id"], "file_SYNTHETIC_PRESENT")
+                self.assertEqual(record["mapping"]["u2"]["message"]["content"]["parts"], [ORIGINAL])
+                self.assertIn("file_SYNTHETIC_PRESENT.dat", archive.namelist())
+                self.assertNotIn("file_SYNTHETIC_MISSING.dat", archive.namelist())
+                payload = archive.read("file_SYNTHETIC_PRESENT.dat")
+                self.assertTrue(payload.startswith(b"%PDF-"))
+                self.assertIn(b"SYNTHETIC", payload)
+                library = json.loads(archive.read("library_files.json"))
+                self.assertEqual(library[0]["file_size_bytes"], len(payload))
+                self.assertEqual(len(json.loads(archive.read("export_manifest.json"))["logical_files"]), 2)
+
     def test_missing_vault_is_not_import_success(self):
         with tempfile.TemporaryDirectory() as directory:
             journey = object.__new__(ConnectedJourney)

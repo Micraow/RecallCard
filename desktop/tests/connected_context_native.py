@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import traceback
+import zipfile
 from urllib.request import urlopen
 
 from first_use_native import FirstUseJourney, JourneyDriver, DIALOG, ORIGINAL, UPDATE
@@ -15,6 +16,39 @@ from native_smoke import ROOT, wait_for, run
 
 
 class ConnectedJourney(FirstUseJourney):
+    def create_archive(self):
+        """真实导入链路使用独立合成原件与缺失原件，绝不读取个人归档。"""
+        path = super().create_archive()
+        with zipfile.ZipFile(path) as archive:
+            records = json.loads(archive.read("conversations.json"))
+        record = records[0]
+        payload = b"%PDF-1.4\nSYNTHETIC OPAQUE ATTACHMENT\n%%EOF\n"
+        present = {"id": "file_SYNTHETIC_PRESENT", "name": "合成图表.pdf",
+                   "mime_type": "application/pdf", "size": len(payload)}
+        missing = {"id": "file_SYNTHETIC_MISSING", "name": "合成未附原件.pdf",
+                   "mime_type": "application/pdf", "size": 99}
+        for node in record["mapping"].values():
+            node.pop("children", None)  # 官方样本可以只有 parent。
+        upload = record["mapping"]["u1"]["message"]
+        upload["content"] = {"content_type": "text", "parts": [""]}
+        upload["metadata"]["attachments"] = [present]
+        record["mapping"]["u2"]["message"]["metadata"]["attachments"] = [missing]
+        library = [{"file_id": a["id"], "file_name": a["name"],
+                    "mime_type": a["mime_type"], "file_size_bytes": a["size"], "state": "ready"}
+                   for a in [present, missing]]
+        manifest = {"version": 1, "manifest_file": "export_manifest.json",
+                    "export_files": [{"path": a["id"] + ".dat", "size_bytes": a["size"]}
+                                     for a in [present, missing]],
+                    "logical_files": {a["id"] + ".dat": {"files": [a["id"] + ".dat"], "sharded": False}
+                                      for a in [present, missing]}}
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, value in [("conversations.json", records), ("library_files.json", library),
+                                ("export_manifest.json", manifest),
+                                ("conversation_asset_file_names.json", {present["id"] + ".dat": "合成归档别名.pdf"})]:
+                archive.writestr(name, json.dumps(value, ensure_ascii=False))
+            archive.writestr(present["id"] + ".dat", payload)
+        return path
+
     def capture(self, name, webview=True):
         if self.driver and webview:
             # 业务谓词成立早于WebKit绘制；只等绘制，不修改页面或代替用户动作。
@@ -112,6 +146,38 @@ class ConnectedJourney(FirstUseJourney):
         browser.click(".source-row")
         wait_for(lambda: ORIGINAL in browser.text(".conversation-article"), "实际原话详情")
         self.checkpoint("导入的原始来源可读可追溯")
+        events = self.events()
+        upload = next(event for event in events if event["source"]["message_id"] == "u1")
+        latest = next(event for event in events if event["source"]["message_id"] == "u2")
+        assert upload["kind"] == "file" and not upload["content"]
+        assert upload["metadata"]["source_assets"]["files"][0]["payload_status"] == "retained"
+        assert latest["metadata"]["source_assets"]["files"][0]["payload_status"] == "missing"
+        present_row = ".source-message[data-reference='event:" + upload["id"] + "']"
+        missing_row = ".source-message[data-reference='event:" + latest["id"] + "']"
+        wait_for(lambda: "原件已保留" in browser.text(present_row), "附件-only 消息显示保留状态")
+        assert "合成图表.pdf" in browser.text(present_row)
+        assert "合成归档别名.pdf" in browser.text(present_row)
+        assert "application/pdf" in browser.text(present_row)
+        assert "合成未附原件.pdf" not in browser.text(present_row)
+        assert browser.observe("return document.querySelectorAll('.message-assets a,.message-assets button,.message-assets iframe,.message-assets object,.message-assets embed').length") == 0
+        browser.click(present_row)
+        self.checkpoint("附件only原消息显示真实保留状态与独立别名")
+        browser.click(missing_row)
+        wait_for(lambda: "所提供归档中未找到原件" in browser.text(missing_row), "缺失附件仍绑定其原消息")
+        assert "合成未附原件.pdf" in browser.text(missing_row)
+        assert ORIGINAL in browser.text(missing_row)
+        assert "原件已保留" not in browser.text(missing_row)
+        self.checkpoint("缺失原件明确显示且没有串联到其他消息")
+        browser.button("查看记录")
+        wait_for(lambda: self.content("导入记录"), "实际导入记录页")
+        browser.button("处理明细")
+        wait_for(lambda: "2 条附件引用" in browser.text(".import-coverage"), "真实任务报告附件计数")
+        assert "1 条附件引用已保留原始字节" in browser.text(".import-coverage")
+        assert "1 条附件引用在所提供归档中未找到原件" in browser.text(".import-coverage")
+        self.checkpoint("导入报告同时显示保留和缺失的附件引用数")
+        self.attachment_acceptance = {"message_references": 2, "retained": 1, "missing": 1,
+                                      "attachment_only": 1, "ui_report_verified": True,
+                                      "original_message_association_verified": True}
         browser.button("连接")
         wait_for(lambda: self.content("连接你常用的 AI"), "连接中心")
         browser.button("连接 Codex")
@@ -223,7 +289,7 @@ def main():
                 except Exception: pass
             raise
         finally:
-            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.7-connected-context-native", "passed_steps": smoke.steps, "application": str(smoke.application), "cli": str(smoke.cli), "build": getattr(smoke, "build_identity", None), "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False, "external_agents_executed": False, "canonical": smoke.canonical_summary()}, ensure_ascii=False, indent=2))
+            (smoke.artifacts / "summary.json").write_text(json.dumps({"success": success, "suite": "v0.7-connected-context-native", "passed_steps": smoke.steps, "application": str(smoke.application), "cli": str(smoke.cli), "build": getattr(smoke, "build_identity", None), "synthetic_data_only": True, "invoke_mocked": False, "external_chatgpt_verified": False, "external_agents_executed": False, "canonical": smoke.canonical_summary(), "attachment_acceptance": getattr(smoke, "attachment_acceptance", None)}, ensure_ascii=False, indent=2))
             try:
                 if smoke.vault.exists():
                     subprocess.run([str(smoke.cli), "--vault", str(smoke.vault), "--json", "service", "stop"], timeout=15, capture_output=True)
