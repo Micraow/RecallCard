@@ -30,6 +30,18 @@ class CanonicalEvidenceTest(unittest.TestCase):
                 self.assertEqual(library[0]["file_size_bytes"], len(payload))
                 self.assertEqual(len(json.loads(archive.read("export_manifest.json"))["logical_files"]), 2)
 
+    def test_portable_visible_text_requires_the_entire_text_and_no_clipping(self):
+        journey = object.__new__(ConnectedJourney)
+        journey.driver = Mock()
+        expected = "合成完整回答，包括结尾"
+        for sample in [None, {"text": expected[:-1], "visible": True, "unclipped": True},
+                       {"text": expected, "visible": False, "unclipped": True},
+                       {"text": expected, "visible": True, "unclipped": False}]:
+            journey.driver.observe.return_value = sample
+            self.assertFalse(journey.exact_visible_text(".synthetic", expected))
+        journey.driver.observe.return_value = {"text": expected, "visible": True, "unclipped": True}
+        self.assertTrue(journey.exact_visible_text(".synthetic", expected))
+
     def test_missing_vault_is_not_import_success(self):
         with tempfile.TemporaryDirectory() as directory:
             journey = object.__new__(ConnectedJourney)

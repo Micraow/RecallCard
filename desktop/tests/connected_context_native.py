@@ -58,6 +58,12 @@ class ConnectedJourney(FirstUseJourney):
             (self.artifacts / f"{name}-visible.json").write_text(json.dumps(observed, ensure_ascii=False, indent=2))
         super().capture(name, webview)
 
+    def exact_visible_text(self, selector, expected):
+        # WebDriver rendered-text 对 -webkit-line-clamp 元素可能漏字；用完整 DOM
+        # 文本、真实可见矩形与无内容裁切共同校验，不能只用关键词或前缀放宽验收。
+        sample = self.driver.observe("return (()=>{const n=document.querySelector(" + json.dumps(selector) + ");if(!n)return null;const r=n.getBoundingClientRect(),s=getComputedStyle(n);return {text:n.textContent,visible:r.width>0&&r.height>0&&r.top>=0&&r.bottom<=innerHeight&&s.visibility==='visible'&&s.display!=='none'&&s.opacity!=='0',unclipped:n.scrollHeight<=n.clientHeight+1};})()")
+        return bool(sample and sample["text"] == expected and sample["visible"] and sample["unclipped"])
+
     def cli_result(self, *args):
         return json.loads(run(str(self.cli), "--vault", str(self.vault), "--json", *args))["result"]
 
@@ -265,13 +271,19 @@ class ConnectedJourney(FirstUseJourney):
         assert saved[0]["metadata"]["exclude_from_automatic_memory"] is True and not self.memories()
         browser.type("#global-search", "合成AI回答")
         run("xdotool", "key", "Return")
-        wait_for(lambda: self.content(reply), "已保存回答可按原文找回")
-        browser.click(".search-result")
-        wait_for(lambda: self.content("手动保存的 AI 回答") and self.content(reply), "搜索结果打开真实助手来源")
+        search_selector = '.search-result[data-reference="event:' + saved[0]["id"] + '"]'
+        wait_for(lambda: self.exact_visible_text(search_selector + " p", reply), "搜索结果绑定已保存Event且完整原文可见")
+        rendered_exact = reply in browser.text(search_selector)
+        browser.click(search_selector)
+        source_selector = '.source-message[data-reference="event:' + saved[0]["id"] + '"]'
+        wait_for(lambda: self.exact_visible_text(source_selector + " .prose p", reply), "返回同一助手Event且完整原文可见")
+        assert browser.observe("return Boolean(document.querySelector(" + json.dumps(source_selector + " .role-avatar.assistant") + "))")
+
         self.checkpoint("粘贴回答只追加一条助手来源且可搜索回到原文")
         self.portable_acceptance = {"clipboard_full_match":True,"copy_added_events":0,"cancel_added_events":0,
             "reply_events_added":1,"reply_role":"assistant","reply_original_time_known":False,
-            "automatic_memory":False,"reply_searchable":True,"external_site_used":False}
+            "automatic_memory":False,"reply_searchable":True,"external_site_used":False,
+            "search_dom_exact_visible":True,"source_dom_exact_visible":True,"search_webdriver_rendered_exact":rendered_exact}
 
         browser.close()
         self.driver = None

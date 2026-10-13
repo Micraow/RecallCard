@@ -42,6 +42,7 @@ export function SearchPage({
             <button
               key={row.ref}
               className="search-result"
+              data-reference={row.ref}
               onClick={() =>
                 row.kind === "memory"
                   ? navigate("memories", row.ref.replace(/^memory:/, ""))
