@@ -108,3 +108,6 @@
 .portable-excerpt { display:block; font-size:12px; line-height:1.7; color:var(--text-secondary); margin:6px 0; white-space:pre-wrap; }
 .portable-context [aria-label="本次检索覆盖"] { margin:14px 0; }
 @media(max-width:740px) { .home-question { padding:18px; } .home-question > div { flex-direction:column; align-items:stretch; } }
+/* 覆盖说明逐段阅读，避免通用提示布局将中文挤成并排窄列。 */
+[aria-label="本次检索覆盖"].context-note { display:block; }
+[aria-label="本次检索覆盖"] p + p { margin-top:6px; }

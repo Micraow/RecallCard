@@ -683,16 +683,34 @@ mod tests {
         let (_dir, vault) = vault();
         let runtime = CloudEmbeddingRuntime::new(&vault);
         let grant = runtime.configure("personal", settings()).unwrap();
+        let barrier = std::sync::Barrier::new(3);
         let results = std::thread::scope(|threads| {
             let handles = (0..3)
                 .map(|_| {
                     threads.spawn(|| {
-                        reserve(
-                            &CloudEmbeddingRuntime::new(&vault),
-                            &grant,
-                            EmbeddingData::Query,
-                            1,
-                        )
+                        barrier.wait();
+                        let started = std::time::Instant::now();
+                        loop {
+                            let result = reserve(
+                                &CloudEmbeddingRuntime::new(&vault),
+                                &grant,
+                                EmbeddingData::Query,
+                                1,
+                            );
+                            // 300ms 内的锁忙是明确的可重试结果，不是预算最终判定。
+                            // 重试仍须由同一真实批准/预算路径决定，不能增加配额或吞掉其他错误。
+                            if let Err(error) = &result {
+                                if error.code == ErrorCode::Conflict && error.retryable {
+                                    assert!(
+                                        started.elapsed() < std::time::Duration::from_secs(5),
+                                        "合成预算测试持续锁忙：{error:?}"
+                                    );
+                                    std::thread::sleep(std::time::Duration::from_millis(5));
+                                    continue;
+                                }
+                            }
+                            break result;
+                        }
                     })
                 })
                 .collect::<Vec<_>>();
@@ -706,6 +724,9 @@ mod tests {
             results.into_iter().find_map(|r| r.err()).unwrap().code,
             ErrorCode::BudgetExceeded
         );
+        let usage = runtime.status("personal").unwrap().usage;
+        assert_eq!(usage.reserved_calls, 2);
+        assert_eq!(usage.reserved_bytes, 2);
         let _lock = runtime.lock().unwrap();
         let busy = reserve(&runtime, &grant, EmbeddingData::Query, 1).unwrap_err();
         assert_eq!(busy.code, ErrorCode::Conflict);
