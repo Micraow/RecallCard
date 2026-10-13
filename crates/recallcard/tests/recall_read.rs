@@ -87,3 +87,47 @@ fn escaped_memory_metadata_budget_is_not_reported_as_unavailable() {
     assert_eq!(page["coverage"]["memory_status"], "budget_exhausted");
     assert!(serde_json::to_vec(&page).unwrap().len() <= 8192);
 }
+
+#[test]
+fn mcp_initialize_uses_shared_short_semantics_without_web_ticket_requirements() {
+    let spec: Value =
+        serde_json::from_str(include_str!("../src/recall-capabilities.json")).unwrap();
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n"
+    );
+    let mut output = Vec::new();
+    transport::serve_mcp_service_io(
+        |_, _| panic!("握手和列工具不能读取用户资料"),
+        input.as_bytes(),
+        &mut output,
+    )
+    .unwrap();
+    let messages: Vec<Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(messages.len(), 2);
+    let instructions = messages[0]["result"]["instructions"].as_str().unwrap();
+    assert_eq!(instructions, transport::recall_instructions());
+    assert!(instructions.contains(spec["common"].as_str().unwrap()));
+    assert!(instructions.contains("bootstrap"));
+    assert!(instructions.contains("recall_search(query)"));
+    assert!(instructions.contains("recall_fetch(id)"));
+    assert!(instructions.contains("当前 MCP 使用完整定位符"));
+    assert!(!instructions.contains("RECALLCARD/2"));
+    assert!(instructions.chars().count() < 500);
+    let tools = messages[1]["result"]["tools"].as_array().unwrap();
+    for name in [
+        "bootstrap",
+        "search",
+        "read",
+        "sources",
+        "recall_search",
+        "recall_fetch",
+    ] {
+        assert!(tools.iter().any(|tool| tool["name"] == name));
+    }
+}
