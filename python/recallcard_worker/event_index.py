@@ -20,6 +20,7 @@ import struct
 import sys
 
 from .embedding import EmbeddingError, EmbeddingSpace, canonical, scopes
+from . import event_lexical as lexical
 from .local_query import LocalIndexClient, LocalQueryClient, local_endpoint
 
 SCHEMA = "recallcard.local-event-index/1"
@@ -289,12 +290,16 @@ class EventIndex:
             pending = db.execute("SELECT value FROM metadata WHERE key=?", (f"pending:{build_id}",)).fetchone()
             require(pending is not None, "index_counter_missing")
             result["pending_sources"] = int(pending[0])
+        lex_version = lexical.version(db, build_id)
+        result["lexical_version"] = lex_version
+        result["lexical_status"] = "available" if lex_version else "legacy_unavailable"
         result["vector_count"] = int(db.execute("SELECT value FROM metadata WHERE key='vector_count'").fetchone()[0])
         return result
 
     @staticmethod
     def _gc(db, keep):
         # 只触及这个专用派生数据库；没有外部文件路径或事实源删除操作。
+        lexical.gc(db, keep)
         for table in ("chunks", "sources", "batches"):
             db.execute(f"DELETE FROM {table} WHERE generation NOT IN (SELECT id FROM generations WHERE id IN (?,?))", keep)
         db.execute("DELETE FROM generations WHERE id NOT IN (?,?)", keep)
@@ -306,16 +311,26 @@ class EventIndex:
         require(self.events_approved, "events_not_approved")
         epoch = request["source_epoch"]
         require(valid_hash(epoch), "invalid_source_epoch")
-        build_id = digest(canonical([SCHEMA, self.signature, self.scope, epoch]))
+        lex_version = request.get("lexical_version")
+        require(lex_version is None or lex_version == lexical.VERSION, "lexical_version_unsupported")
+        binding = [SCHEMA, self.signature, self.scope, epoch]
+        if lex_version:
+            binding.append(lex_version)
+        build_id = digest(canonical(binding))
         with self.connection(write=True) as db:
+            # 只有显式versioned begin才创建新派生表，旧索引读取不做词法迁移。
+            if lex_version:
+                lexical.initialize(db)
             old = db.execute("SELECT source_epoch FROM generations WHERE id=?", (build_id,)).fetchone()
             if old is None:
                 self._gc(db, (self._published(db) or "", build_id))
                 receipt = digest(canonical(["begin", build_id]))
                 db.execute("INSERT INTO generations(id,source_epoch,state,receipt) VALUES (?,?,'building',?)", (build_id, epoch, receipt))
                 db.execute("INSERT INTO metadata VALUES (?, '0')", (f"pending:{build_id}",))
+                if lex_version:
+                    db.execute("INSERT INTO lexical_generations(generation,version) VALUES (?,?)", (build_id, lex_version))
             else:
-                require(old[0] == epoch, "generation_conflict")
+                require(old[0] == epoch and lexical.version(db, build_id) == lex_version, "generation_conflict")
             result = self._stats(db, build_id)
         return result
 
@@ -372,15 +387,24 @@ class EventIndex:
         require(isinstance(chunks, list) and 1 <= len(chunks) <= MAX_BATCH, "batch_limit")
         require(len(chunks) * self.dimensions <= 8192, "batch_limit")
         rows = []
+        lexical_rows = {}
+        lexical_contexts = {}
         prepared = {}
         size = 0
         for c in chunks:
-            shape(c, {"ordinal", "start_byte", "end_byte", "text_sha256", "text"})
+            shape(c, {"ordinal", "start_byte", "end_byte", "text_sha256", "text"}, {"lexical_before", "lexical_after"})
             ordinal = integer(c["ordinal"], 0, count-1)
             start = integer(c["start_byte"], 0, source[6]-1)
             end = integer(c["end_byte"], start+1, source[6])
             raw = text(c["text"], MAX_CHUNK_BYTES).encode()
             require(len(raw) == end-start and digest(raw) == c["text_sha256"], "chunk_hash_or_range_mismatch")
+            if "lexical_before" in c or "lexical_after" in c:
+                require("lexical_before" in c and "lexical_after" in c, "lexical_context_required")
+                before = text(c["lexical_before"], lexical.CONTEXT_BYTES, empty=True)
+                after = text(c["lexical_after"], lexical.CONTEXT_BYTES, empty=True)
+                lexical_rows[ordinal] = lexical.terms(c["text"], start=start, end=end,
+                    before=before, after=after, total=source[6])
+                lexical_contexts[ordinal] = digest(canonical([before, after]))
             item = self._prepared(c["text"])
             size += len(item.encode())
             input_hash = digest(item.encode())
@@ -388,10 +412,14 @@ class EventIndex:
             rows.append((ordinal, start, end, c["text_sha256"], input_hash))
         require(len({r[0] for r in rows}) == len(rows) and size <= MAX_BATCH_BYTES, "batch_limit")
         rows.sort()
-        payload = digest(canonical([source, rows]))
+        # 邻接上下文hash绑定batch重试，即使恰好产生相同词项也不能被换掉。
+        payload = digest(canonical([source, rows, sorted(lexical_contexts.items()), sorted(lexical_rows.items())])) if lexical_contexts else digest(canonical([source, rows]))
         with self.connection() as db:
             gen = db.execute("SELECT state FROM generations WHERE id=?", (build_id,)).fetchone()
             require(gen is not None, "unknown_generation")
+            lex_version = lexical.version(db, build_id)
+            require((len(lexical_rows) == len(rows)) if lex_version else not lexical_rows,
+                    "lexical_context_required" if lex_version else "lexical_unavailable")
             prior = db.execute("SELECT payload_hash FROM batches WHERE generation=? AND batch_id=?", (build_id, batch_id)).fetchone()
             if prior:
                 require(prior[0] == payload, "batch_conflict")
@@ -399,9 +427,19 @@ class EventIndex:
             require(gen[0] == "building", "generation_complete")
             existing = db.execute("SELECT ref,content_hash,scope,role,session_ref,occurred_at,text_bytes,expected_chunks FROM sources WHERE generation=? AND ref=?", (build_id, source[0])).fetchone()
             require(existing is None or tuple(existing) == source, "source_conflict")
+            added_terms = 0
             for ordinal, start, end, chunk_hash, input_hash in rows:
                 previous = db.execute("SELECT start_byte,end_byte,text_sha256,input_hash FROM chunks WHERE generation=? AND source_ref=? AND ordinal=?", (build_id, source[0], ordinal)).fetchone()
                 require(previous is None or tuple(previous) == (start, end, chunk_hash, input_hash), "chunk_conflict")
+                if previous is None and lex_version:
+                    added_terms += len(lexical_rows[ordinal])
+                if previous is not None and lex_version:
+                    prior_terms = db.execute("SELECT term_count,terms_hash FROM lexical_chunks WHERE generation=? AND source_ref=? AND ordinal=?", (build_id, source[0], ordinal)).fetchone()
+                    require(prior_terms is not None and tuple(prior_terms) == (len(lexical_rows[ordinal]), digest(canonical(lexical_rows[ordinal]))), "lexical_chunk_conflict")
+            if lex_version:
+                term_count = db.execute("SELECT term_count FROM lexical_generations WHERE generation=?", (build_id,)).fetchone()[0]
+                require(type(term_count) is int and 0 <= term_count <= lexical.MAX_TOTAL_TERMS, "corrupt_lexical_index")
+                require(term_count + added_terms <= lexical.MAX_TOTAL_TERMS, "lexical_index_term_limit")
             cached = {h: row[0] for h in prepared if (row := db.execute("SELECT vector FROM vectors WHERE input_hash=?", (h,)).fetchone())}
         for blob in cached.values():
             decode_blob(blob, self.dimensions)
@@ -411,7 +449,7 @@ class EventIndex:
         cached.update(zip(missing, encoded))
         with self.connection(write=True) as db:
             gen = db.execute("SELECT state,receipt,source_count,chunk_count FROM generations WHERE id=?", (build_id,)).fetchone()
-            require(gen is not None and gen[0] == "building", "generation_changed")
+            require(gen is not None and gen[0] == "building" and lexical.version(db, build_id) == lex_version, "generation_changed")
             prior = db.execute("SELECT payload_hash FROM batches WHERE generation=? AND batch_id=?", (build_id, batch_id)).fetchone()
             if prior:
                 require(prior[0] == payload, "batch_conflict")
@@ -428,6 +466,9 @@ class EventIndex:
             for ordinal, start, end, chunk_hash, input_hash in rows:
                 previous = db.execute("SELECT start_byte,end_byte,text_sha256,input_hash FROM chunks WHERE generation=? AND source_ref=? AND ordinal=?", (build_id, source[0], ordinal)).fetchone()
                 require(previous is None or tuple(previous) == (start, end, chunk_hash, input_hash), "chunk_conflict")
+                if previous is not None and lex_version:
+                    prior_terms = db.execute("SELECT term_count,terms_hash FROM lexical_chunks WHERE generation=? AND source_ref=? AND ordinal=?", (build_id, source[0], ordinal)).fetchone()
+                    require(prior_terms is not None and tuple(prior_terms) == (len(lexical_rows[ordinal]), digest(canonical(lexical_rows[ordinal]))), "lexical_chunk_conflict")
                 if previous is not None:
                     continue
                 require(gen[3] + added < MAX_CHUNKS, "chunk_limit")
@@ -440,6 +481,8 @@ class EventIndex:
                 if inserted:
                     db.execute("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='vector_count'")
                 db.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?,?)", (build_id, source[0], ordinal, start, end, chunk_hash, input_hash))
+                if lex_version:
+                    lexical.insert_chunk(db, build_id, source[0], ordinal, lexical_rows[ordinal])
                 added += 1
             db.execute("UPDATE sources SET received_chunks=received_chunks+? WHERE generation=? AND ref=?", (added, build_id, source[0]))
             if old_received < count and old_received + added == count:
@@ -465,6 +508,7 @@ class EventIndex:
             actual = db.execute("SELECT COUNT(*) FROM chunks WHERE generation=?", (request["build_id"],)).fetchone()[0]
             require(actual == result["chunk_count"], "snapshot_count_mismatch")
             require(not db.execute("SELECT 1 FROM chunks c LEFT JOIN vectors v ON v.input_hash=c.input_hash WHERE c.generation=? AND v.input_hash IS NULL LIMIT 1", (request["build_id"],)).fetchone(), "incomplete_vectors")
+            lexical.verify(db, request["build_id"], result["chunk_count"], self.scope)
             db.execute("UPDATE generations SET state='complete' WHERE id=?", (request["build_id"],))
             db.execute("INSERT INTO metadata VALUES ('published',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (request["build_id"],))
             self._gc(db, (request["build_id"], request["build_id"]))
@@ -506,7 +550,11 @@ class EventIndex:
         require(row is not None and valid_hash(row[0]) and row[3] == "complete"
                 and valid_hash(row[4]) and type(row[1]) is int and 0 <= row[1] <= MAX_SOURCES
                 and type(row[2]) is int and 0 <= row[2] <= MAX_CHUNKS, "corrupt_snapshot")
-        require(generation == digest(canonical([SCHEMA, self.signature, self.scope, row[0]])), "corrupt_snapshot")
+        binding = [SCHEMA, self.signature, self.scope, row[0]]
+        lex_version = lexical.version(db, generation)
+        if lex_version:
+            binding.append(lex_version)
+        require(generation == digest(canonical(binding)), "corrupt_snapshot")
         require(db.execute("SELECT COUNT(*) FROM sources WHERE generation=?", (generation,)).fetchone()[0] == row[1]
                 and db.execute("SELECT COUNT(*) FROM chunks WHERE generation=?", (generation,)).fetchone()[0] == row[2], "corrupt_snapshot")
         # SQL只返回常量；在读取TEXT/BLOB到Python之前检查类型和字节界限。
@@ -538,6 +586,7 @@ class EventIndex:
                 OR typeof(v.vector) != 'blob' OR length(v.vector) != ?
             ) LIMIT 1""", (generation, MAX_CHUNK_BYTES, self.dimensions * 4)).fetchone()
         require(invalid_chunk is None, "corrupt_snapshot")
+        lexical.verify(db, generation, row[2], self.scope)
         source_hash = hashlib.sha256()
         source_hash.update(b"[")
         first = True
@@ -553,6 +602,8 @@ class EventIndex:
         require(self.query_approved, "query_not_approved")
         query = text(request["query"], 4096)
         limit = integer(request.get("limit", 10), 1, MAX_RESULTS)
+        retrieval_mode = request.get("retrieval_mode", "hybrid")
+        require(retrieval_mode in ("hybrid", "semantic_only"), "invalid_request")
         expected = request.get("expected_generation")
         require(expected is None or valid_hash(expected), "invalid_generation")
         with self.connection() as db:
@@ -560,18 +611,31 @@ class EventIndex:
             require(initial is not None, "index_unavailable")
             require(expected is None or expected == initial, "generation_mismatch")
             self._verified_published(db, initial)
+            lex_version = lexical.version(db, initial)
+        # 查询词数超限在任何编码前返回；不静默截断为另一条查询。
+        query_terms = lexical.terms(query, query=True) if lex_version and retrieval_mode == "hybrid" else []
         vector, mode = self._query_vector(query)
         heap = []
         scanned = 0
+        channel_limit = lexical.CHANNEL_LIMIT if lex_version else limit
         with self.connection() as db:
             generation = self._published(db)
             require(generation == initial, "generation_changed")
             row, source_set_hash = self._verified_published(db, generation)
+            if lex_version and retrieval_mode == "hybrid":
+                lex_candidates, lexical_coverage = lexical.candidates(db, generation, self.scope, query_terms)
+            else:
+                lex_candidates = []
+                lexical_coverage = {"status": "available" if lex_version else "legacy_unavailable",
+                                    "version": lex_version, "query_terms": 0,
+                                    "disabled": retrieval_mode == "semantic_only"}
+            lexical_keys = {(r[0], r[1]) for r in lex_candidates}
+            lexical_items = {}
             cursor = db.execute("SELECT c.source_ref,s.content_hash,c.start_byte,c.end_byte,c.text_sha256,v.vector,c.ordinal,s.role,s.session_ref,s.occurred_at FROM chunks c JOIN sources s ON s.generation=c.generation AND s.ref=c.source_ref JOIN vectors v ON v.input_hash=c.input_hash WHERE c.generation=? AND s.scope=? ORDER BY c.source_ref,c.ordinal", (generation, self.scope))
             best = None
             previous_range = None
             def add_candidate(item):
-                if len(heap) < limit:
+                if len(heap) < channel_limit:
                     heapq.heappush(heap, item)
                 elif item[:3] > heap[0][:3]:
                     heapq.heapreplace(heap, item)
@@ -581,8 +645,10 @@ class EventIndex:
                     score = sum(a*b for a, b in zip(vector, values))
                     require(math.isfinite(score) and -1.00001 <= score <= 1.00001, "corrupt_vector")
                     score = max(-1.0, min(1.0, score))
-                    # ref+ordinal是稳定且唯一的并列顺序，不混用词法分数。
+                    # semantic路线独立按原cosine排序；ref+ordinal沿用原稳定并列顺序。
                     item = (score, ref, -ordinal, source_hash, start, end, chunk_hash, role, session, occurred)
+                    if (ref, ordinal) in lexical_keys:
+                        lexical_items[ref] = item
                     scanned += 1
                     if best is None or ref != best[1]:
                         if best is not None:
@@ -596,12 +662,40 @@ class EventIndex:
             if best is not None:
                 add_candidate(best)
             require(scanned == row[2], "corrupt_snapshot")
+            semantic = sorted(heap, key=lambda r:r[:3], reverse=True)
+            sem_by_ref = {r[1]: (rank, r) for rank, r in enumerate(semantic, 1)}
+            lex_by_ref = {r[0]: (rank, r) for rank, r in enumerate(lex_candidates, 1)}
+            require(len(lexical_items) == len(lex_by_ref), "corrupt_lexical_index")
+            union = set(sem_by_ref) | set(lex_by_ref)
+            require(len(union) <= 2 * lexical.CHANNEL_LIMIT, "candidate_limit")
+            fused = {}
+            for ref in union:
+                semantic_rank = sem_by_ref[ref][0] if ref in sem_by_ref else None
+                lexical_rank = lex_by_ref[ref][0] if ref in lex_by_ref else None
+                fused[ref] = (1 / (60 + semantic_rank) if semantic_rank else 0) + (1 / (60 + lexical_rank) if lexical_rank else 0)
+            if lex_version and retrieval_mode == "hybrid":
+                ordered = sorted(union, key=lambda ref: (-fused[ref], lex_by_ref[ref][0] if ref in lex_by_ref else 101,
+                    sem_by_ref[ref][0] if ref in sem_by_ref else 101, ref))
+            else:
+                ordered = [r[1] for r in semantic]
             results = []
-            response_bytes = 2048  # 为envelope、generation和coverage留出余量。
+            response_bytes = 4096  # envelope、generation、coverage与新增两路证据余量。
             response_limited = False
-            for r in sorted(heap, key=lambda r:r[:3], reverse=True):
+            for fused_rank, ref in enumerate(ordered[:limit], 1):
+                r = lexical_items[ref] if ref in lex_by_ref else sem_by_ref[ref][1]
+                semantic_rank, sem = sem_by_ref.get(ref, (None, None))
+                lexical_rank, lex = lex_by_ref.get(ref, (None, None))
+                semantic_evidence = {"start_byte": sem[4], "end_byte": sem[5], "text_sha256": sem[6], "score": sem[0]} if sem else None
+                lexical_evidence = dict(zip(("start_byte", "end_byte", "text_sha256"), lex[3])) if lex else None
                 candidate = {"ref": r[1], "content_hash": r[3], "start_byte": r[4], "end_byte": r[5], "text_sha256": r[6], "score": r[0],
-                             "role": r[7], "session_ref": r[8], "occurred_at": r[9]}
+                             "role": r[7], "session_ref": r[8], "occurred_at": r[9],
+                             "retrieval": {"semantic_rank": semantic_rank, "lexical_rank": lexical_rank,
+                                 "lexical_matched_terms": lex[2] if lex else 0, "lexical_query_terms": len(query_terms),
+                                 "fused_rank": fused_rank, "fusion_score": fused[ref],
+                                 "semantic_evidence": semantic_evidence, "lexical_evidence": lexical_evidence}}
+                if not lex_version:
+                    # 旧协议候选字段与响应窗口保持原状；coverage诚实注明词法不可用。
+                    del candidate["retrieval"]
                 size = len(canonical(candidate)) + 1
                 if response_bytes + size > MAX_RESPONSE:
                     response_limited = True
@@ -612,7 +706,9 @@ class EventIndex:
                 "next_cursor": None, "coverage": {"status": "indexed_snapshot_requires_host_revalidation", "indexed_sources": row[1],
                 "indexed_chunks": row[2], "scanned_chunks": scanned, "query_encoding": mode, "candidate_limit": limit,
                 "candidates_truncated": row[1] > len(results), "response_limited": response_limited,
-                "chunk_selection": "per_event_best_chunk",
+                "chunk_selection": "per_event_best_chunk", "lexical": lexical_coverage,
+                "fusion": lexical.FUSION if lex_version and retrieval_mode == "hybrid" else "semantic_only",
+                "semantic_candidates": len(semantic), "lexical_candidates": len(lex_candidates), "union_candidates": len(union),
                 "local_only": True, "external_calls": 0, "page_rows": QUERY_PAGE}}
 
     def status(self, request):
@@ -635,7 +731,7 @@ class EventIndex:
             "status": set(),
         }
         require(op in required, "unknown_operation")
-        shape(request, common | required[op], {"limit", "expected_generation"} if op == "query" else ())
+        shape(request, common | required[op], {"limit", "expected_generation", "retrieval_mode"} if op == "query" else {"lexical_version"} if op == "begin" else ())
         return getattr(self, op)(request)
 
     def execute(self, request):
@@ -647,7 +743,7 @@ class EventIndex:
             result = {"schema": SCHEMA, "id": ident, "ok": True, "result": self.dispatch(request)}
             require(len(canonical(result)) <= MAX_RESPONSE, "output_limit")
             return result
-        except EventIndexError as error:
+        except (EventIndexError, lexical.LexicalError) as error:
             code = error.code
         except EmbeddingError as error:
             code = error.code if error.code in {"local_provider_unavailable", "local_provider_error", "redirect_blocked", "response_limit", "local_budget_exhausted"} else "local_encoding_failed"

@@ -11,6 +11,8 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
 };
+mod evidence;
+mod lexical_context;
 pub(crate) mod ranking;
 mod snapshot;
 mod worker;
@@ -252,7 +254,7 @@ impl<'a> LocalEvents<'a> {
         };
         let began = worker::exchange(
             &self.config,
-            json!({"op":"begin","source_epoch":manifest.epoch}),
+            json!({"op":"begin","source_epoch":manifest.epoch,"lexical_version":lexical_context::VERSION}),
         )?;
         let build_id = began["build_id"]
             .as_str()
@@ -295,14 +297,17 @@ impl<'a> LocalEvents<'a> {
                     65536
                         / (self.config.settings.chunk_bytes
                             + self.config.settings.document_instruction.len()
-                            + 1),
+                            + 513),
                 ))
                 .ok_or("local_event_progress_invalid")?
                 .min(ranges.len());
             if end == progress.chunk_pos {
                 return Err("local_event_batch_limit".into());
             }
-            let chunks:Vec<_>=ranges[progress.chunk_pos..end].iter().enumerate().map(|(n,(start,end))|json!({"ordinal":progress.chunk_pos+n,"start_byte":start,"end_byte":end,"text_sha256":hash(&text.as_bytes()[*start..*end]),"text":&text[*start..*end]})).collect();
+            let chunks:Vec<_>=ranges[progress.chunk_pos..end].iter().enumerate().map(|(n,(start,end))| {
+                let (before, after) = lexical_context::neighbors(&text, *start, *end);
+                json!({"ordinal":progress.chunk_pos+n,"start_byte":start,"end_byte":end,"text_sha256":hash(&text.as_bytes()[*start..*end]),"text":&text[*start..*end],"lexical_before":before,"lexical_after":after})
+            }).collect();
             let result = worker::exchange(
                 &self.config,
                 json!({"op":"upsert","build_id":build_id,
@@ -496,20 +501,27 @@ impl<'a> LocalEvents<'a> {
             {
                 return Err("local_event_candidate_source_mismatch".into());
             }
-            let snippet = crate::context::truncate_utf8(&text[start..end], 2048).to_owned();
-            let excerpt_end = start + snippet.len();
+            let retrieval = evidence::verify(
+                &text,
+                row,
+                semantic_index,
+                status["lexical_version"].is_string(),
+            )?;
+            let (excerpt_start, excerpt_end) =
+                lexical_context::excerpt_range(&text, start, end, retrieval.lexical_range);
+            let snippet = text[excerpt_start..excerpt_end].to_owned();
             let support = ranking::assess_excerpt(
                 query,
                 &snippet,
-                ranking::separate_boundary(text[..start].chars().next_back()),
+                ranking::separate_boundary(text[..excerpt_start].chars().next_back()),
                 ranking::separate_boundary(text[excerpt_end..].chars().next()),
             );
             let value = json!({"ref":reference,"kind":"event","scope":event.data.scope,"role":event.data.role,
                 "snapshot":crate::model::record_snapshot(&event)?,"content_hash":hash(text.as_bytes()),
                 "text_hash":hash(snippet.as_bytes()),"matched_chunk":{"start_byte":start,"end_byte":end,"text_hash":row["text_sha256"]},
-                "text":snippet,"text_range":{"start_byte":start,"end_byte":start+snippet.len(),"total_bytes":text.len(),"projection":"event.text"},"text_truncated":start!=0||start+snippet.len()!=text.len(),
-                "score":score,"score_kind":"cosine","semantic_rank":semantic_index+1,
-                "retrieval_support":{"kind":if support.complete{"protected_anchor_match"}else{"semantic_candidate"},"match_scope":"returned_excerpt","case_policy":"protected_case_sensitive_ascii_support_case_insensitive","protected":support.complete,"protected_anchors":support.protected_anchors,"matched_protected_anchors":support.matched_protected_anchors,"ascii_terms":support.ascii_terms,"matched_ascii_terms":support.matched_ascii_terms,"limited":support.limited},
+                "text":snippet,"text_range":{"start_byte":excerpt_start,"end_byte":excerpt_end,"total_bytes":text.len(),"projection":"event.text"},"text_truncated":excerpt_start!=0||excerpt_end!=text.len(),
+                "score":score,"score_kind":"cosine","semantic_rank":retrieval.semantic_rank,"retrieval":retrieval.metadata,
+                "retrieval_support":{"kind":if support.complete{"protected_anchor_match"}else if retrieval.lexical_range.is_some(){"lexical_candidate"}else{"semantic_candidate"},"match_scope":"returned_excerpt","case_policy":"protected_case_sensitive_ascii_support_case_insensitive","protected":support.complete,"protected_anchors":support.protected_anchors,"matched_protected_anchors":support.matched_protected_anchors,"ascii_terms":support.ascii_terms,"matched_ascii_terms":support.matched_ascii_terms,"limited":support.limited},
                 "relevance":"unassessed","state":"captured","evidence":format!("{:?}/{:?}",event.data.role,event.data.origin),"evidence_refs":[reference],
                 "session_ref":event.data.session_key(),"occurred_at":event.data.occurred_at,"time_note":if event.data.occurred_at.is_none(){"发生时间未知；捕获时间不代表发生时间"}else{""}});
             verified_bytes += serde_json::to_vec(&value)
@@ -517,7 +529,7 @@ impl<'a> LocalEvents<'a> {
                 .len();
             verified.push(value);
         }
-        // Stable ordering preserves the original semantic rank within each tier.
+        // Stable ordering preserves the original fused (or legacy semantic) order within each tier.
         // This can only rearrange the returned, source-verified candidate window.
         verified.sort_by_key(|row| row["retrieval_support"]["protected"] != true);
         let scanned = verified.len();
@@ -539,7 +551,7 @@ impl<'a> LocalEvents<'a> {
             "truncated":rows.len()>results.len()||rejected>0||verification_limited||candidates["coverage"]["candidates_truncated"]==true,"coverage":{"event_search":"local_semantic","semantic_search":"local_event_index",
             "local_event_semantic":true,"semantic_query_encoding":candidates["coverage"]["query_encoding"],"event_index_generation":generation,
             "event_index_snapshot":manifest.epoch,"local_config_identity":self.config_hash,"source_verification":"current_event_hash_and_utf8_range","rejected_candidates":rejected,
-            "partial":rejected>0||verification_limited,"candidate_policy":"verified_excerpt_anchors_then_semantic/v1","verified_candidates":scanned,"candidate_window_limit":100,"candidate_reordering_enabled":reorder,"candidate_verification_limited":verification_limited,"candidate_text_bytes":source_bytes,"chunk_selection":"per_event_best_chunk","note":"本机向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}),
+            "partial":rejected>0||verification_limited,"candidate_policy":"verified_excerpt_anchors_then_channel_order/v2","lexical":candidates["coverage"]["lexical"],"fusion":candidates["coverage"]["fusion"],"verified_candidates":scanned,"candidate_window_limit":100,"candidate_reordering_enabled":reorder,"candidate_verification_limited":verification_limited,"candidate_text_bytes":source_bytes,"chunk_selection":candidates["coverage"]["chunk_selection"],"note":"本机向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}),
         )
     }
 }
