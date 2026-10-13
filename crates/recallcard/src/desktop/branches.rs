@@ -22,7 +22,9 @@ pub(super) struct ConversationBranches {
 impl ConversationBranches {
     pub fn new(events: Vec<Event>) -> Result<Self> {
         let explicit_graph = events.iter().any(|event| {
-            (event.data.metadata["deepseek"].is_object() || event.data.metadata["qwen"].is_object())
+            (event.data.metadata["deepseek"].is_object()
+                || event.data.metadata["qwen"].is_object()
+                || event.data.metadata["chatgpt"].is_object())
                 || event.data.metadata.get("previous_message_id").is_some()
         });
         if !explicit_graph {
@@ -45,6 +47,8 @@ impl ConversationBranches {
         for (index, event) in events.iter().enumerate() {
             let graph = if event.data.metadata["qwen"].is_object() {
                 &event.data.metadata["qwen"]
+            } else if event.data.metadata["chatgpt"].is_object() {
+                &event.data.metadata["chatgpt"]
             } else {
                 &event.data.metadata["deepseek"]
             };
@@ -64,6 +68,8 @@ impl ConversationBranches {
             let metadata = &event.data.metadata;
             let deepseek = if metadata["qwen"].is_object() {
                 &metadata["qwen"]
+            } else if metadata["chatgpt"].is_object() {
+                &metadata["chatgpt"]
             } else {
                 &metadata["deepseek"]
             };

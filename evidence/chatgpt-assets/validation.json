@@ -1,0 +1,69 @@
+{
+  "schema": "recallcard.chatgpt-archive-attachments-validation/1",
+  "fixtures": "independent_synthetic_only",
+  "scope": [
+    "ordinary_chatgpt_conversations",
+    "message_attachment_association",
+    "opaque_local_asset_storage",
+    "source_attachment_status_ui",
+    "filename_lexical_recall"
+  ],
+  "full_rust_workspace": {
+    "passed": 753,
+    "failed": 14,
+    "ignored": 0,
+    "all_passed": false,
+    "failed_targets": {
+      "ipc": 11,
+      "ipc_bridges": 3
+    },
+    "reason": "Unix domain socket bind is denied by this execution environment (Operation not permitted)."
+  },
+  "focused_attachment_tests": {
+    "passed": 16,
+    "failed": 0
+  },
+  "frontend_contracts": {
+    "passed": 57,
+    "failed": 0
+  },
+  "desktop_node": {
+    "passed": 20,
+    "failed": 0
+  },
+  "desktop_python": {
+    "passed": 70,
+    "failed": 0
+  },
+  "python": {
+    "passed": 169,
+    "skipped": 1,
+    "failed": 0
+  },
+  "format_check_exit": 0,
+  "strict_all_target_clippy_exit": 0,
+  "typescript_and_vite_build_exit": 0,
+  "version_check_exit": 0,
+  "recovered_environment_attempts": [
+    "Initial full-suite hard-link test failed with EXDEV. Moving both test temporary and app-state directories onto the workspace filesystem resolved this setup failure without product changes."
+  ],
+  "synthetic_security_review": [
+    "Independently authored attack fixtures exposed cross-root association, late normalized metadata overflow, and Unicode member alias validation gaps; all three were fixed.",
+    "Final behavioral owner replay rejects multi-root ambiguity, Unicode path contradictions, symlinks, and late oversized metadata with zero canonical Events and objects. Cross-root payloads are not joined; valid source attachments remain explicitly missing.",
+    "Thin-to-full synthetic CLI import appends one audited revision; a new-request repeat adds zero events and reports one duplicate."
+  ],
+  "not_claimed": [
+    "real supplied .dat bytes validation",
+    "attachment extraction OCR or semantic indexing",
+    "file citation page/line mapping",
+    "browser visual acceptance (local socket startup blocked)",
+    "installed extension in logged-in ChatGPT",
+    "ChatGPT hosted MCP connection",
+    "full desktop packaging acceptance"
+  ],
+  "non_targets": [
+    "group_chats",
+    "pages"
+  ],
+  "private_corpus_or_source_identifiers_in_public_evidence": false
+}

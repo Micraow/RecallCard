@@ -12,7 +12,7 @@ recallcard --vault <目录> read <evt_编号>
 recallcard --vault <目录> doctor
 ```
 
-每个导入文件必须由使用者明确指定。程序不自动扫描任何 Agent 的私有会话目录。ChatGPT 导入使用用户主动下载的 `conversations.json`，只沿 `current_node` 的 parent 链选择当前分支；没有可靠分支信息就拒绝，不把重新生成的多条分支拼成同一段事实。
+每个导入文件必须由使用者明确指定。程序不自动扫描任何 Agent 的私有会话目录。ChatGPT 官方 ZIP/JSON 推荐使用 `recallcard --vault <目录> import <文件>` 或桌面来源页：保留所有导出的可见分支，按原始 parent 关联，不把替代回答拼成同一条路径。旧 `--file` 兼容入口仍只选择当前分支。附件状态、原件保留与验收步骤见 [官方归档与附件](chatgpt-archive-attachments.md)。
 
 导入格式存在版本差异。当前只覆盖测试 fixture 所描述的字段，未知内容明确跳过或报错，不保证全量工具、文件、引用和分支捕获。
 

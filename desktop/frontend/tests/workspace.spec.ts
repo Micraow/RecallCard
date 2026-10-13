@@ -332,7 +332,7 @@ test("导入完成明细区分正文、引用、附件元数据和未导入内�
   await openDemo(page, "normal", "activity");
   await page.getByRole("button", { name: "处理明细" }).click();
   await expect(page.locator(".import-coverage")).toContainText(
-    "3 条附件元数据，导出未包含文件原件",
+    "3 条附件引用（按消息计数，非独立原件数）",
   );
   await expect(page.locator(".import-coverage")).toContainText(
     "2 条工具记录仅保留类型",
@@ -348,7 +348,7 @@ test("纯附件和工具占位可见，引用空标题使用网址且不自动�
   await openDemo(page, "assets", "sources");
   const assets = page.locator(".message-assets").first();
   await expect(assets).toContainText("autumn-report-v3.pdf");
-  await expect(assets).toContainText("导出未包含文件内容");
+  await expect(assets).toContainText("旧记录仅有元数据，可重新导入所提供归档以核对原件");
   await expect(assets).toContainText("https://reference.example/report-method");
   await expect(assets).toContainText("导出未包含工具正文");
   await expect(assets.locator("a")).toHaveCount(0);

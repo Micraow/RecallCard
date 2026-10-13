@@ -7,6 +7,7 @@ pub mod imports;
 pub use imports::{ImportResult, ImportService};
 pub mod background_memory;
 
+pub(crate) mod chatgpt_assets;
 mod source_assets;
 
 pub mod runtime;

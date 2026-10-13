@@ -319,7 +319,25 @@ impl<'a> Context<'a> {
                 },
                 evidence: format!("{:?}/{:?}", event.data.role, event.data.origin),
                 labels: vec![],
-                entities: vec![],
+                // 仅词法检索别名；不拼进正文，不改变向量块或原文坐标。
+                entities: event.data.metadata["source_assets"]["files"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|file| {
+                        [
+                            "name",
+                            "library_name",
+                            "archive_name_alias",
+                            "source_file_id",
+                        ]
+                        .into_iter()
+                        .filter_map(move |key| file[key].as_str())
+                    })
+                    .map(str::to_owned)
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
                 protected: false,
             });
         }

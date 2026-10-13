@@ -1077,3 +1077,16 @@ fn missing_credential_keeps_one_queued_input_and_recovers_without_charging_a_req
     assert_eq!(after.state, JobState::Completed);
     assert_eq!(provider.calls, 1);
 }
+
+#[test]
+fn chatgpt_do_not_remember_is_preserved_but_never_auto_consolidated() {
+    let (_dir, vault) = vault();
+    vault.capture(serde_json::from_value(json!({"role":"user","origin":"user_input","content":"合成偏好，仅保留来源","source":{"platform":"chatgpt-export","conversation_id":"private-source","message_id":"flagged"},"metadata":{"chatgpt":{"on_current_path":true,"is_do_not_remember":true}}})).unwrap()).unwrap();
+    let runtime = MemoryRuntime::new(&vault);
+    runtime.configure(config()).unwrap();
+    let mut provider = fake();
+    assert!(runtime.tick(&mut provider).unwrap().is_none());
+    assert_eq!(provider.calls, 0);
+    assert_eq!(vault.events().unwrap().len(), 1);
+    assert!(vault.memories().unwrap().is_empty());
+}

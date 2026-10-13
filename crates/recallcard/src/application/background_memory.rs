@@ -1703,7 +1703,10 @@ impl<'a> MemoryRuntime<'a> {
 
 fn current_branch(event: &Event) -> bool {
     event.data.metadata.pointer("/chatgpt/on_current_path") != Some(&serde_json::Value::Bool(false))
+        && event.data.metadata.pointer("/chatgpt/is_do_not_remember")
+            != Some(&serde_json::Value::Bool(true))
 }
+
 fn is_echo(event: &Event) -> bool {
     matches!(
         event.data.origin,

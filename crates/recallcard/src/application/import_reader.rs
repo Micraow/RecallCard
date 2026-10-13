@@ -1,5 +1,7 @@
 //! 官方导出增量读取：一次只持有一个有界会话，不建立整份 JSON 树。
 //! sink 只能写预检暂存；成员 CRC 和整包校验完成前不允许写入事实源。
+pub use super::chatgpt_assets::AssetPayload;
+use super::chatgpt_assets::{self, Catalog};
 use super::{AppError, AppResult, ErrorCode, ImportLimits};
 use crate::{
     import::{parse_chatgpt_conversation_all, ChatgptCoverage},
@@ -27,6 +29,12 @@ pub struct ReadReport {
     pub unsupported_fragments: u64,
     pub omitted_messages: u64,
     pub file_references: u64,
+    #[serde(default)]
+    pub attachment_payloads_retained: u64,
+    #[serde(default)]
+    pub attachment_payloads_missing: u64,
+    #[serde(default)]
+    pub unsupported_archive_sources: Vec<String>,
     pub citations: u64,
     pub trace_placeholders: u64,
     #[serde(default)]
@@ -75,13 +83,39 @@ pub fn read_source<R, S, P>(
     format: &str,
     scope: &str,
     limits: ImportLimits,
-    mut sink: S,
-    mut probe: P,
+    sink: S,
+    probe: P,
 ) -> AppResult<ReadReport>
 where
     R: Read + Seek,
     S: FnMut(ImportedConversation) -> AppResult<()>,
     P: FnMut(&ReadReport) -> AppResult<()>,
+{
+    read_source_with_assets(
+        reader,
+        format,
+        scope,
+        limits,
+        sink,
+        probe,
+        |_, size, reader| chatgpt_assets::consume(reader, size, None, || Ok(())),
+    )
+}
+
+pub fn read_source_with_assets<R, S, P, A>(
+    reader: &mut R,
+    format: &str,
+    scope: &str,
+    limits: ImportLimits,
+    mut sink: S,
+    mut probe: P,
+    mut asset_sink: A,
+) -> AppResult<ReadReport>
+where
+    R: Read + Seek,
+    S: FnMut(ImportedConversation) -> AppResult<()>,
+    P: FnMut(&ReadReport) -> AppResult<()>,
+    A: FnMut(&str, u64, &mut dyn Read) -> AppResult<AssetPayload>,
 {
     crate::validate_scope(scope).map_err(|_| {
         AppError::new(
@@ -118,24 +152,161 @@ where
             return Err(invalid_archive("ZIP 含重复或冲突条目"));
         }
         report.archive_entries = directory.len() as u64;
+        let mut catalog = Catalog::default();
+        let mut consumed = BTreeSet::new();
+        // 普通对话导出根由明确入口定位。Pages 自带 manifest 不能冒充聊天附件目录。
+        let conversation_roots: BTreeSet<_> = directory
+            .iter()
+            .filter(|entry| entry.name.rsplit('/').next() == Some("conversations.json"))
+            .map(|entry| {
+                entry
+                    .name
+                    .strip_suffix("conversations.json")
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        let catalog_roots: BTreeSet<_> = directory
+            .iter()
+            .filter_map(|entry| {
+                let name = entry.name.rsplit('/').next().unwrap_or("");
+                ["library_files.json", "conversation_asset_file_names.json"]
+                    .contains(&name)
+                    .then(|| entry.name.strip_suffix(name).unwrap().to_owned())
+            })
+            .collect();
+        let catalog_root = if conversation_roots.len() == 1 {
+            conversation_roots.first().cloned()
+        } else if conversation_roots.is_empty() && catalog_roots.len() == 1 {
+            catalog_roots.first().cloned()
+        } else {
+            None
+        };
+        // 元数据先读，成员顺序不参与消息—文件身份推断。
         for (i, entry) in directory.iter().enumerate() {
+            let name = entry.name.rsplit('/').next().unwrap_or("");
+            if ![
+                "library_files.json",
+                "conversation_asset_file_names.json",
+                "export_manifest.json",
+            ]
+            .contains(&name)
+            {
+                continue;
+            }
+            let root = entry.name.strip_suffix(name).unwrap_or("");
+            if catalog_root.as_deref().unwrap_or("") != root {
+                continue;
+            }
+            if entry.size > limits.conversation_bytes as u64 {
+                return Err(resource("附件目录超过元数据上限"));
+            }
+            let mut file = archive
+                .by_index(i)
+                .map_err(|_| invalid_archive("附件目录无法读取"))?;
+            validate_member(&file, entry)?;
+            let mut bytes = Vec::new();
+            (&mut file)
+                .take(entry.size + 1)
+                .read_to_end(&mut bytes)
+                .map_err(io_error)?;
+            if bytes.len() as u64 != entry.size {
+                return Err(invalid_archive("附件目录大小不一致"));
+            }
+            catalog.metadata(
+                name,
+                import_bundle::strict_json(&bytes).map_err(|_| invalid_json())?,
+            )?;
+            account(bytes.len(), limits, &mut report, &mut probe)?;
+            consumed.insert(i);
+        }
+        catalog.prepare_members();
+        for (i, entry) in directory.iter().enumerate() {
+            probe(&report)?;
+            let Some(member) = entry
+                .name
+                .strip_prefix(catalog_root.as_deref().unwrap_or(""))
+            else {
+                continue;
+            };
+            let ids = catalog.member_ids(member);
+            if ids.is_empty() {
+                continue;
+            }
+            let mut file = archive
+                .by_index(i)
+                .map_err(|_| invalid_archive("附件原件无法读取"))?;
+            validate_member(&file, entry)?;
+            let payload = asset_sink(&entry.name, entry.size, &mut file)?;
+            // sink 必须读至 EOF，确保 zip crate 的 CRC 校验发生。
+            let mut tail = [0u8; 1];
+            if file.read(&mut tail).map_err(io_error)? != 0 || payload.byte_count != entry.size {
+                return Err(invalid_archive("附件原件未完整读取"));
+            }
+            catalog.add_payload(member, &ids, payload)?;
+            account(
+                usize::try_from(entry.size).map_err(|_| resource("附件大小不可表示"))?,
+                limits,
+                &mut report,
+                &mut probe,
+            )?;
+            consumed.insert(i);
+        }
+        for (i, entry) in directory.iter().enumerate() {
+            if consumed.contains(&i) {
+                continue;
+            }
+            let unsupported = if entry.name.rsplit('/').next() == Some("group_chats.json") {
+                Some("group_chats")
+            } else if entry
+                .name
+                .split('/')
+                .any(|part| part.eq_ignore_ascii_case("pages"))
+            {
+                Some("pages")
+            } else {
+                None
+            };
+            if let Some(kind) = unsupported {
+                if !report
+                    .unsupported_archive_sources
+                    .iter()
+                    .any(|value| value == kind)
+                {
+                    report.unsupported_archive_sources.push(kind.into());
+                }
+            }
             probe(&report)?;
             let mut file = archive
                 .by_index(i)
                 .map_err(|_| invalid_archive("ZIP 成员无法读取"))?;
-            if file.name() != entry.name
-                || file.size() != entry.size
-                || file.encrypted()
-                || file.is_symlink()
-                || !matches!(
-                    file.compression(),
-                    CompressionMethod::Stored | CompressionMethod::Deflated
-                )
-            {
-                return Err(invalid_archive("ZIP 成员属性与已核验目录不一致"));
-            }
+            validate_member(&file, entry)?;
             let member = entry.name.clone();
             let before = report.expanded_bytes;
+            let mut asset_report = ReadReport::default();
+            let mut decorated_sink = |mut conversation: ImportedConversation| {
+                if conversation.platform == "chatgpt-export" {
+                    let member_root = entry
+                        .name
+                        .rsplit_once('/')
+                        .map(|(root, _)| format!("{root}/"))
+                        .unwrap_or_default();
+                    if catalog_root.as_deref().unwrap_or("") != member_root {
+                        return Err(invalid_archive(
+                            "会话与附件目录不在同一归档根；未跨目录关联",
+                        ));
+                    }
+                    let mut budget = crate::import::NormalizedBudget::default();
+                    for event in &mut conversation.events {
+                        catalog.enrich(event, &mut asset_report)?;
+                        crate::capture::redact_event(event)
+                            .map_err(|e| adapter_error(e, "ChatGPT"))?;
+                        event.validate().map_err(|e| adapter_error(e, "ChatGPT"))?;
+                        budget.add(event).map_err(|e| adapter_error(e, "ChatGPT"))?;
+                    }
+                }
+                sink(conversation)
+            };
             let result = if !file.is_dir() && entry.name.to_ascii_lowercase().ends_with(".json") {
                 read_json_stream(
                     &mut file,
@@ -143,7 +314,7 @@ where
                     scope,
                     limits,
                     &mut report,
-                    &mut sink,
+                    &mut decorated_sink,
                     &mut probe,
                 )
             } else {
@@ -152,6 +323,9 @@ where
                 }
                 drain(&mut file, limits, &mut report, &mut probe)
             };
+            report.file_references += asset_report.file_references;
+            report.attachment_payloads_retained += asset_report.attachment_payloads_retained;
+            report.attachment_payloads_missing += asset_report.attachment_payloads_missing;
             result.map_err(|mut e| {
                 e.member = Some(member);
                 e
@@ -162,15 +336,31 @@ where
             }
         }
     } else {
+        let catalog = Catalog::default();
+        let mut asset_report = ReadReport::default();
         read_json_stream(
             reader,
             format,
             scope,
             limits,
             &mut report,
-            &mut sink,
+            &mut |mut conversation: ImportedConversation| {
+                if conversation.platform == "chatgpt-export" {
+                    let mut budget = crate::import::NormalizedBudget::default();
+                    for event in &mut conversation.events {
+                        catalog.enrich(event, &mut asset_report)?;
+                        crate::capture::redact_event(event)
+                            .map_err(|e| adapter_error(e, "ChatGPT"))?;
+                        event.validate().map_err(|e| adapter_error(e, "ChatGPT"))?;
+                        budget.add(event).map_err(|e| adapter_error(e, "ChatGPT"))?;
+                    }
+                }
+                sink(conversation)
+            },
             &mut probe,
         )?;
+        report.file_references += asset_report.file_references;
+        report.attachment_payloads_missing += asset_report.attachment_payloads_missing;
     }
     probe(&report)?;
     Ok(report)
@@ -612,6 +802,24 @@ fn process_value<S: FnMut(ImportedConversation) -> AppResult<()>>(
     report.omitted_messages += conversation.qwen_coverage.empty_messages_skipped as u64;
     report.file_references += conversation.qwen_coverage.attachment_references as u64;
     sink(conversation)
+}
+
+fn validate_member<R: Read + ?Sized>(
+    file: &zip::read::ZipFile<'_, R>,
+    entry: &ZipEntry,
+) -> AppResult<()> {
+    if file.name() != entry.name
+        || file.size() != entry.size
+        || file.encrypted()
+        || file.is_symlink()
+        || !matches!(
+            file.compression(),
+            CompressionMethod::Stored | CompressionMethod::Deflated
+        )
+    {
+        return Err(invalid_archive("ZIP 成员属性与已核验目录不一致"));
+    }
+    Ok(())
 }
 
 struct ZipEntry {

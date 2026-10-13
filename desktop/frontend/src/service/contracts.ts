@@ -124,6 +124,9 @@ export interface ImportCoverage {
   unsupported_fragments: number;
   omitted_messages: number;
   file_references: number;
+  attachment_payloads_retained?: number;
+  attachment_payloads_missing?: number;
+  unsupported_archive_sources?: string[];
   citations: number;
   trace_placeholders: number;
 }
@@ -132,8 +135,13 @@ export interface ImportResult {
   coverage: ImportCoverage;
 }
 export function coverageNotes(coverage: ImportCoverage): string[] {
-  const fields: [keyof ImportCoverage, string][] = [
-    ["file_references", "条附件元数据，导出未包含文件原件"],
+  const fields: [
+    Exclude<keyof ImportCoverage, "unsupported_archive_sources">,
+    string,
+  ][] = [
+    ["file_references", "条附件引用（按消息计数，非独立原件数）"],
+    ["attachment_payloads_retained", "条附件引用已保留原始字节，未提取或索引正文"],
+    ["attachment_payloads_missing", "条附件引用在所提供归档中未找到原件"],
     ["citations", "条引用记录"],
     ["trace_placeholders", "条工具记录仅保留类型，没有工具输出正文"],
     ["hidden_fragments", "个隐藏推理片段未收集"],
@@ -142,7 +150,14 @@ export function coverageNotes(coverage: ImportCoverage): string[] {
     ["ignored_files", "个非会话文件未导入"],
     ["ignored_values", "个不支持的数据项未导入"],
   ];
-  return fields
-    .filter(([key]) => coverage[key] > 0)
-    .map(([key, label]) => `${coverage[key].toLocaleString()} ${label}`);
+  const notes = fields
+    .filter(([key]) => (coverage[key] ?? 0) > 0)
+    .map(([key, label]) => `${(coverage[key] ?? 0).toLocaleString()} ${label}`);
+  const unsupported = new Set(coverage.unsupported_archive_sources ?? []);
+  if (unsupported.has("group_chats")) notes.push("群聊记录在当前支持范围外，已跳过");
+  if (unsupported.has("pages")) notes.push("Pages 在当前支持范围外，已跳过");
+  if ([...unsupported].some((source) => !["group_chats", "pages"].includes(source))) {
+    notes.push("另有未支持的归档来源，本轮未导入");
+  }
+  return notes;
 }

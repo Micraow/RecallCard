@@ -101,7 +101,17 @@ export interface SourceAssets {
     source_file_id: string | null;
     name: string | null;
     byte_count: number | null;
-    payload_status: "not_in_export";
+    payload_status:
+      | "retained"
+      | "missing"
+      | "available_not_retained"
+      | "not_in_export";
+    declared_media_type?: string | null;
+    library_media_type?: string | null;
+    detected_media_type?: string | null;
+    declared_media_type_conflict?: boolean;
+    object_sha256?: string | null;
+    archive_name_alias?: string | null;
   }[];
   citations: { url: string; title: string | null }[];
   tool_trace: {
@@ -114,6 +124,29 @@ export interface SourceAssets {
   trace_total: number;
   unsupported_total: number;
   truncated: boolean;
+}
+/** 只解释导入时记录的状态，不从文件名、类型或哈希推断原件已经存在。 */
+export function attachmentStatus(
+  status: SourceAssets["files"][number]["payload_status"],
+) {
+  switch (status) {
+    case "retained":
+      return { label: "原件已保留", detail: "已在本机保留原始字节" };
+    case "missing":
+      return { label: "原件缺失", detail: "所提供归档中未找到原件" };
+    case "available_not_retained":
+      return {
+        label: "未保留原件",
+        detail: "只读解析已发现原始字节，本次未保留",
+      };
+    case "not_in_export":
+      return {
+        label: "旧版引用记录",
+        detail: "旧记录仅有元数据，可重新导入所提供归档以核对原件",
+      };
+    default:
+      return { label: "状态未知", detail: "未提供可识别的原件状态" };
+  }
 }
 export interface Message {
   ref: string;

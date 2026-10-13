@@ -3,6 +3,7 @@ import type { ScopedService } from "../service/client";
 import { appError, type AppError, type JobStatus } from "../service/contracts";
 import { useResource } from "../service/hooks";
 import {
+  attachmentStatus,
   dateLabel,
   platformLabel,
   type Conversation,
@@ -423,7 +424,7 @@ function MessageView({
   );
 }
 
-function MessageAssets({ assets }: { assets: SourceAssets }) {
+export function MessageAssets({ assets }: { assets: SourceAssets }) {
   const sizeLabel = (bytes: number | null) =>
     bytes == null || !Number.isFinite(bytes) || bytes < 0
       ? "大小未提供"
@@ -434,16 +435,41 @@ function MessageAssets({ assets }: { assets: SourceAssets }) {
           : `${(bytes / 1048576).toFixed(1)} MB`;
   return (
     <div className="message-assets" aria-label="消息中的附件与引用">
-      {assets.files.map((file, index) => (
-        <div className="asset-row" key={`file-${index}`}>
-          <Icon name="file" size={18} />
-          <div>
-            <strong>{file.name?.trim() || "未命名附件"}</strong>
-            <p>{sizeLabel(file.byte_count)} · 导出未包含文件内容</p>
+      {assets.files.length > 0 && (
+        <p className="asset-coverage">
+          以下附件关联此条原始消息。仅显示元数据，未提取、索引或发送附件正文。
+        </p>
+      )}
+      {assets.files.map((file, index) => {
+        const status = attachmentStatus(file.payload_status);
+        return (
+          <div className="asset-row" key={`file-${index}`}>
+            <Icon name="file" size={18} />
+            <div>
+              <strong>{file.name?.trim() ? file.name : "未命名附件"}</strong>
+              <p>{sizeLabel(file.byte_count)} · {status.detail}</p>
+              {file.source_file_id && <p>消息附件 ID：{file.source_file_id}</p>}
+              {file.archive_name_alias && (
+                <p>归档文件名：{file.archive_name_alias}</p>
+              )}
+              {file.declared_media_type && (
+                <p>消息声明类型：{file.declared_media_type}</p>
+              )}
+              {file.library_media_type && (
+                <p>文件库声明类型：{file.library_media_type}</p>
+              )}
+              {file.detected_media_type && (
+                <p>字节头识别类型：{file.detected_media_type}（未解析正文）</p>
+              )}
+              {file.declared_media_type_conflict && (
+                <p>消息与文件库的类型声明不一致，请谨慎核对。</p>
+              )}
+              {file.object_sha256 && <p>原件 SHA-256：{file.object_sha256}</p>}
+            </div>
+            <Badge>{status.label}</Badge>
           </div>
-          <Badge>仅元数据</Badge>
-        </div>
-      ))}
+        );
+      })}
       {assets.citations.map((citation, index) => (
         <div className="asset-row citation-row" key={`citation-${index}`}>
           <Icon name="book" size={18} />

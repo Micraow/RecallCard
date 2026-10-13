@@ -114,13 +114,14 @@ test("损坏来源必须重新选择，暂停任务才可以继续", () => {
   );
 });
 
-test("导入覆盖明确文件元数据和缺失正文，不声称附件原件已保存", () => {
+test("旧版导入覆盖只统计附件引用，不推断归档缺少或已保留原件", () => {
   const notes = coverageNotes({
     file_references: 3,
     trace_placeholders: 2,
     hidden_fragments: 4,
   } as any);
-  assert.ok(notes.some((note) => note.includes("导出未包含文件原件")));
+  assert.ok(notes.some((note) => note.includes("3 条附件引用（按消息计数，非独立原件数）")));
+  assert.ok(notes.every((note) => !/原件已保存|已保留原始字节|未找到原件|导出未包含/.test(note)));
   assert.ok(notes.some((note) => note.includes("没有工具输出正文")));
   assert.ok(notes.some((note) => note.includes("隐藏推理片段未收集")));
 });

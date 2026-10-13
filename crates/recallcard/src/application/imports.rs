@@ -727,6 +727,7 @@ impl ImportService {
         self.check_pause(m, directory)?;
         let files = stages(directory, m.staged)?;
         let mut digest = crate::hash(b"");
+        let mut assets = BTreeMap::new();
         // 提交前核验完整暂存链；任何损坏都不能让此前无写入的任务部分落盘。
         for (_, path, expected) in &files {
             self.check_pause(m, directory)?;
@@ -739,6 +740,42 @@ impl ImportService {
                 ));
             }
             digest = chain(&digest, expected);
+            let staged: StagedConversation =
+                serde_json::from_slice(&bytes).map_err(|_| storage())?;
+            for event in &staged.events {
+                if event.scope != m.status.scope || event.validate().is_err() {
+                    return Err(error(
+                        ErrorCode::SourceChanged,
+                        "暂存事件范围或内容无效",
+                        "重新选择来源；尚未开始事实提交",
+                    ));
+                }
+                if let Some(files) = event.metadata["source_assets"]["files"].as_array() {
+                    for file in files {
+                        if file["payload_status"] != "retained" {
+                            continue;
+                        }
+                        let hash = file["object_sha256"]
+                            .as_str()
+                            .filter(|h| {
+                                h.len() == 64
+                                    && h.bytes()
+                                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                            })
+                            .ok_or_else(storage)?;
+                        let size = file["byte_count"].as_u64().ok_or_else(storage)?;
+                        if assets
+                            .insert(hash.to_owned(), size)
+                            .is_some_and(|old| old != size)
+                        {
+                            return Err(changed());
+                        }
+                    }
+                }
+            }
+        }
+        for (hash, size) in &assets {
+            verify_asset(&directory.join("assets").join(hash), hash, *size)?;
         }
         if digest != m.staged_hash {
             return Err(error(
@@ -762,6 +799,11 @@ impl ImportService {
                 e
             }
         })?;
+        // 原件先完整核验并原子落入内容寻址目录；未完成事务最多留下无引用对象。
+        for (hash, size) in &assets {
+            self.check_pause(m, directory)?;
+            retain_asset(&vault, &directory.join("assets").join(hash), hash, *size)?;
+        }
         let mut replay = ImportProgress::default();
         let mut chunk = Vec::new();
         let mut bytes = 0;
@@ -879,7 +921,7 @@ impl ImportService {
         for i in 0..m.sources.len() {
             let f = m.sources[i].clone();
             let mut file = open_local_file(&f.path).map_err(|_| changed())?;
-            let result = import_reader::read_source(
+            let result = import_reader::read_source_with_assets(
                 &mut file,
                 &m.format,
                 &m.status.scope,
@@ -965,6 +1007,27 @@ impl ImportService {
                         st.4 = Instant::now();
                     }
                     Ok(())
+                },
+                |_, size, reader| {
+                    let st = state.borrow();
+                    if st
+                        .0
+                        .status
+                        .progress
+                        .expanded_bytes_read
+                        .checked_add(size)
+                        .is_none_or(|total| total > st.0.limits.expanded_bytes)
+                    {
+                        return Err(error(
+                            ErrorCode::ResourceLimit,
+                            "多文件附件展开总量超过配置上限",
+                            "当前原件尚未暂存；查看导入资源设置",
+                        ));
+                    }
+                    drop(st);
+                    stage_asset(directory, reader, size, || {
+                        self.check_pause(&state.borrow().0, directory)
+                    })
                 },
             );
             match result {
@@ -1079,6 +1142,13 @@ fn merge_report(total: &mut ReadReport, part: &ReadReport) {
     total.unsupported_fragments += part.unsupported_fragments;
     total.omitted_messages += part.omitted_messages;
     total.file_references += part.file_references;
+    total.attachment_payloads_retained += part.attachment_payloads_retained;
+    total.attachment_payloads_missing += part.attachment_payloads_missing;
+    for kind in &part.unsupported_archive_sources {
+        if !total.unsupported_archive_sources.contains(kind) {
+            total.unsupported_archive_sources.push(kind.clone());
+        }
+    }
     total.citations += part.citations;
     total.trace_placeholders += part.trace_placeholders;
     total.qwen.add(&part.qwen);
@@ -1107,4 +1177,65 @@ fn encode_stage(staged: &StagedConversation) -> AppResult<Vec<u8>> {
         )
     })?;
     Ok(out.0)
+}
+
+// 原件始终作为不透明数据；不使用导出文件名构造落盘路径。
+fn verify_asset(path: &Path, hash: &str, size: u64) -> AppResult<()> {
+    reject_symlink(path).map_err(|_| storage())?;
+    let mut file = open_local_file(path).map_err(|_| storage())?;
+    let meta = file.metadata().map_err(|_| storage())?;
+    if !meta.is_file() || meta.len() != size {
+        return Err(changed());
+    }
+    let result = super::chatgpt_assets::consume(&mut file, size, None, || Ok(()))?;
+    if result.sha256 != hash {
+        return Err(changed());
+    }
+    Ok(())
+}
+fn stage_asset(
+    directory: &Path,
+    reader: &mut dyn Read,
+    size: u64,
+    check: impl FnMut() -> AppResult<()>,
+) -> AppResult<import_reader::AssetPayload> {
+    let assets = directory.join("assets");
+    reject_symlink(&assets).map_err(|_| storage())?;
+    fs::create_dir_all(&assets).map_err(|_| storage())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&assets, fs::Permissions::from_mode(0o700)).map_err(|_| storage())?;
+    }
+    let mut temp = tempfile::NamedTempFile::new_in(&assets).map_err(|_| storage())?;
+    let payload = super::chatgpt_assets::consume(reader, size, Some(temp.as_file_mut()), check)?;
+    temp.as_file().sync_all().map_err(|_| storage())?;
+    let path = assets.join(&payload.sha256);
+    reject_symlink(&path).map_err(|_| storage())?;
+    if path.exists() {
+        verify_asset(&path, &payload.sha256, size)?;
+    } else {
+        temp.persist_noclobber(&path).map_err(|_| storage())?;
+        sync_parent(&path).map_err(|_| storage())?;
+    }
+    Ok(payload)
+}
+fn retain_asset(vault: &Vault, source: &Path, hash: &str, size: u64) -> AppResult<()> {
+    let directory = vault.root().join("objects");
+    reject_symlink(&directory).map_err(|_| storage())?;
+    let target = directory.join(hash);
+    reject_symlink(&target).map_err(|_| storage())?;
+    if target.exists() {
+        return verify_asset(&target, hash, size);
+    }
+    let mut input = open_local_file(source).map_err(|_| storage())?;
+    let mut temp = tempfile::NamedTempFile::new_in(&directory).map_err(|_| storage())?;
+    let actual =
+        super::chatgpt_assets::consume(&mut input, size, Some(temp.as_file_mut()), || Ok(()))?;
+    if actual.sha256 != hash {
+        return Err(changed());
+    }
+    temp.as_file().sync_all().map_err(|_| storage())?;
+    temp.persist_noclobber(&target).map_err(|_| storage())?;
+    sync_parent(&target).map_err(|_| storage())
 }

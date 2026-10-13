@@ -252,7 +252,7 @@ impl DesktopSession {
     }
 }
 
-/// 只返回受限引用元数据，不打开网址、不推测或下载附件正文。
+/// 只返回受限引用、原件状态和类型元数据，不打开网址、原件或提取附件正文。
 pub(super) fn source_assets(event: &crate::Event) -> Value {
     let assets = &event.data.metadata["source_assets"];
     if !assets.is_object() {
@@ -287,6 +287,24 @@ pub(super) fn source_assets(event: &crate::Event) -> Value {
                     row.insert(field.into(), json!(value));
                 }
             }
+            if key == "files" {
+                for field in [
+                    "declared_media_type",
+                    "library_media_type",
+                    "detected_media_type",
+                    "object_sha256",
+                    "archive_name_alias",
+                ] {
+                    if let Some(value) = entry[field].as_str() {
+                        let clipped = truncate_utf8(value, 200);
+                        truncated |= clipped.len() != value.len();
+                        row.insert(field.into(), json!(clipped));
+                    }
+                }
+                if let Some(value) = entry["declared_media_type_conflict"].as_bool() {
+                    row.insert("declared_media_type_conflict".into(), json!(value));
+                }
+            }
             let row = Value::Object(row);
             let bytes = row.to_string().len();
             if output.len() >= 20 || used + bytes > 6000 {
@@ -303,4 +321,86 @@ pub(super) fn source_assets(event: &crate::Event) -> Value {
     let tool_trace = project("tool_trace");
     let total = |key: &str| assets[key].as_array().map_or(0, Vec::len);
     json!({"files":files,"citations":citations,"tool_trace":tool_trace,"files_total":total("files"),"citations_total":total("citations"),"trace_total":total("tool_trace"),"unsupported_total":total("unsupported_fragments"),"truncated":truncated})
+}
+
+#[cfg(test)]
+mod attachment_projection_tests {
+    use super::*;
+
+    fn synthetic_event(assets: Value) -> Event {
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "id": "evt_synthetic_attachment_projection",
+            "captured_at": "2026-01-01T00:00:00Z",
+            "role": "user",
+            "source": {"platform": "chatgpt", "conversation_id": "synthetic", "message_id": "message"},
+            "metadata": {"source_assets": assets}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn attachment_projection_preserves_status_name_alias_and_metadata_without_payload() {
+        let files: Vec<_> = ["retained", "missing", "available_not_retained", "not_in_export"]
+            .iter()
+            .map(|status| {
+                json!({
+                    "source_file_id": "file_synthetic", "name": "<script>message-name.pdf</script>",
+                    "byte_count": 512, "payload_status": status,
+                    "declared_media_type": "application/pdf", "library_media_type": "application/octet-stream",
+                    "detected_media_type": "application/zip", "declared_media_type_conflict": true,
+                    "object_sha256": "a".repeat(64), "archive_name_alias": "file_synthetic.dat",
+                    "local_path": "/synthetic/not-for-ui", "content": "do not project raw bytes",
+                    "payload": "synthetic opaque bytes", "extracted_text": "not indexed"
+                })
+            })
+            .collect();
+        let projection = source_assets(&synthetic_event(json!({"files": files})));
+        assert_eq!(projection["files_total"], 4);
+        assert_eq!(projection["truncated"], false);
+        for (index, status) in [
+            "retained",
+            "missing",
+            "available_not_retained",
+            "not_in_export",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let row = &projection["files"][index];
+            assert_eq!(row["payload_status"], *status);
+            assert_eq!(row["name"], "<script>message-name.pdf</script>");
+            assert_eq!(row["archive_name_alias"], "file_synthetic.dat");
+            assert_eq!(row["source_file_id"], "file_synthetic");
+            assert_eq!(row["declared_media_type"], "application/pdf");
+            assert_eq!(row["library_media_type"], "application/octet-stream");
+            assert_eq!(row["detected_media_type"], "application/zip");
+            assert_eq!(row["declared_media_type_conflict"], true);
+            assert_eq!(row["object_sha256"], "a".repeat(64));
+            for field in ["local_path", "content", "payload", "extracted_text"] {
+                assert!(row.get(field).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn attachment_projection_keeps_existing_utf8_count_and_byte_limits() {
+        let row = json!({
+            "name": "合成".repeat(200), "archive_name_alias": "别名".repeat(200),
+            "payload_status": "retained", "object_sha256": "a".repeat(64),
+            "declared_media_type_conflict": "not a boolean"
+        });
+        let projection = source_assets(&synthetic_event(json!({"files": vec![row; 25]})));
+        assert_eq!(projection["files_total"], 25);
+        assert_eq!(projection["truncated"], true);
+        let rows = projection["files"].as_array().unwrap();
+        assert!(rows.len() <= 20);
+        assert!(rows.iter().map(|row| row.to_string().len()).sum::<usize>() <= 6000);
+        for row in rows {
+            assert!(row["name"].as_str().unwrap().len() <= 200);
+            assert!(row["archive_name_alias"].as_str().unwrap().len() <= 200);
+            assert!(row.get("declared_media_type_conflict").is_none());
+        }
+        assert!(source_assets(&synthetic_event(Value::Null)).is_null());
+    }
 }

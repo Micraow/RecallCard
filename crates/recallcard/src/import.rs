@@ -296,6 +296,7 @@ fn parse_chatgpt_conversation_mode(
             .filter(|(id, item)| !seen.contains(id.as_str()) && !item["message"].is_null())
             .count()
     };
+    let graph_order: Vec<_> = chain.iter().map(|(id, _)| *id).collect();
     for (node_id, item) in chain {
         let message = &item["message"];
         if message.is_null() {
@@ -341,9 +342,15 @@ fn parse_chatgpt_conversation_mode(
             out.coverage.unsupported_messages_skipped += 1;
             continue;
         }
+        let attachments = crate::application::chatgpt_assets::references(message);
         let content = if let Some(parts) = message["content"]["parts"].as_array() {
-            out.coverage.unsupported_content_parts_skipped +=
-                parts.iter().filter(|part| !part.is_string()).count();
+            out.coverage.unsupported_content_parts_skipped += parts
+                .iter()
+                .filter(|part| {
+                    !part.is_string()
+                        && crate::application::chatgpt_assets::pointer_id(part).is_none()
+                })
+                .count();
             parts
                 .iter()
                 .filter_map(Value::as_str)
@@ -352,7 +359,7 @@ fn parse_chatgpt_conversation_mode(
         } else {
             message["content"]["text"].as_str().unwrap_or("").to_owned()
         };
-        if content.trim().is_empty() {
+        if content.trim().is_empty() && attachments.is_empty() {
             out.coverage.empty_messages_skipped += 1;
             continue;
         }
@@ -376,13 +383,24 @@ fn parse_chatgpt_conversation_mode(
             json!({"branch":"current_node", "conversation_title":out.title,
                 "citations":metadata["citations"]}),
         )?;
+        if !attachments.is_empty() {
+            if event.content.trim().is_empty() {
+                event.kind = "file".into();
+            }
+            event.metadata["source_assets"] =
+                json!({"schema":"recallcard.source-assets/1","files":attachments});
+        }
         if all {
             event.metadata["branch"] = json!("all_exported_nodes");
             event.metadata["previous_message_id"] = item["parent"]
                 .as_str()
                 .and_then(|p| mapping[p]["message"]["id"].as_str())
                 .into();
-            event.metadata["chatgpt"] = json!({"node_id":node_id,"parent_id":item["parent"],"children_ids":graph_children.get(node_id).cloned().unwrap_or_default(),"on_current_path":on_current_path});
+            event.metadata["chatgpt"] = json!({"node_id":node_id,"parent_id":item["parent"],"children_ids":graph_children.get(node_id).cloned().unwrap_or_default(),"on_current_path":on_current_path,"current_node":conv["current_node"],"is_do_not_remember":conv["is_do_not_remember"],"memory_scope":conv["memory_scope"],"message_metadata_parent_id":metadata["parent_id"]});
+        }
+        if let Some(parts) = message["content"]["parts"].as_array() {
+            let layout: Vec<_> = parts.iter().enumerate().map(|(index,part)|json!({"index":index,"kind":if part.is_string(){"text"}else if crate::application::chatgpt_assets::pointer_id(part).is_some(){"asset_pointer"}else{"unsupported"},"source_file_id":crate::application::chatgpt_assets::pointer_id(part)})).collect();
+            event.metadata["content_part_layout"] = json!(layout);
         }
         event.validate()?;
         budget.add(&event)?;
@@ -390,6 +408,53 @@ fn parse_chatgpt_conversation_mode(
             out.coverage.other_branch_messages_imported += 1;
         }
         out.events.push(event);
+    }
+    if all {
+        let saved: BTreeSet<_> = out
+            .events
+            .iter()
+            .filter_map(|e| e.metadata["chatgpt"]["node_id"].as_str())
+            .collect();
+        let mut nearest = BTreeMap::new();
+        let mut omitted = BTreeMap::new();
+        for id in graph_order {
+            let parent = mapping[id]["parent"].as_str();
+            let visible = if saved.contains(id) {
+                Some(id)
+            } else {
+                parent.and_then(|p| nearest.get(p).copied().flatten())
+            };
+            let gap =
+                if saved.contains(id) || (parent.is_none() && mapping[id]["message"].is_null()) {
+                    0u64
+                } else {
+                    parent.and_then(|p| omitted.get(p).copied()).unwrap_or(0) + 1
+                };
+            nearest.insert(id, visible);
+            omitted.insert(id, gap);
+        }
+        let annotations: Vec<_> = out
+            .events
+            .iter()
+            .map(|event| {
+                let id = event.metadata["chatgpt"]["node_id"].as_str().unwrap();
+                let parent = mapping[id]["parent"].as_str();
+                (
+                    parent
+                        .and_then(|p| nearest.get(p).copied().flatten())
+                        .map(str::to_owned),
+                    parent.and_then(|p| omitted.get(p).copied()).unwrap_or(0),
+                    parent.is_some_and(|p| {
+                        mapping[p]["message"].is_null() && mapping[p]["parent"].is_null()
+                    }),
+                )
+            })
+            .collect();
+        for (event, (parent, gap, root)) in out.events.iter_mut().zip(annotations) {
+            event.metadata["chatgpt"]["nearest_visible_parent_id"] = json!(parent);
+            event.metadata["chatgpt"]["omitted_parent_nodes"] = json!(gap);
+            event.metadata["chatgpt"]["parent_is_structural_root"] = json!(root);
+        }
     }
     Ok(out)
 }
