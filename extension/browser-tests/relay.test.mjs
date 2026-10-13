@@ -27,11 +27,26 @@ for (const platform of ['chatgpt', 'deepseek']) {
 test('已闭合请求块仍无完成凭据时不执行；只观察输入变化不读取剪贴板', async () => {
   const h = await relayHarness(browser);
   try {
-    await h.settle(); await h.sendDraft('u1'); const reads = h.calls.filter(r => r.action === 'authorized_read').length;
+    await h.settle(); await h.sendDraft('u1'); const start = h.calls.length, writes = h.writes.length;
     await h.turn('assistant', 'streaming', JSON.stringify(h.action('r_wait', {})), { rendered: true, complete: false }); await h.settle(); await h.settle();
-    assert.equal(h.calls.filter(r => r.action === 'authorized_read').length, reads); assert.equal(h.state().relay.phase, 'waiting_reply');
+    // 独立背景新鲜度核验不等于执行模型的未完成请求；逐次约束新增读取的动作和参数。
+    const pendingCalls = h.calls.slice(start);
+    assert.ok(pendingCalls.every(r => ['connection', 'automatic_capture', 'authorized_read'].includes(r.action)));
+    const checks = pendingCalls.filter(r => r.action === 'authorized_read');
+    for (const request of checks) {
+      assert.equal(request.arguments.action, 'bootstrap');
+      assert.deepEqual(request.arguments.arguments, {});
+      assert.equal(request.arguments.permission_revision, 1);
+    }
+    assert.equal(h.state().used.includes('r_wait'), false);
+    assert.equal(h.writes.length, writes);
+    assert.equal(await h.page.evaluate(() => window.websiteSends), 0);
+    assert.equal(h.state().relay.phase, 'waiting_reply');
+    console.log(JSON.stringify({check:'incomplete_assistant_request_not_executed',model_request_id:'r_wait',model_request_consumed:false,new_read_actions:checks.map(r=>r.arguments.action),additional_drafts:h.writes.length-writes}));
     await h.page.locator('[data-message-id="streaming"]').evaluate(node => node.setAttribute('data-is-streaming', 'false')); await h.settle();
     assert.equal(h.state().preview.id, 'r_wait'); assert.equal(await h.page.evaluate(() => window.clipboardReads), 0);
+    assert.equal(h.calls.slice(start).filter(r => r.action === 'authorized_read' && r.arguments.action === 'read').length, 2);
+    assert.equal(await h.page.evaluate(() => window.websiteSends), 0);
   } finally { await h.page.close(); }
 });
 test('用户异步编辑后保留全文，显式复制；暂停/恢复/开关不重放同轮', async () => {
