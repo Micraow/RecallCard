@@ -47,3 +47,22 @@
 `python3 -m unittest discover -s scripts/real_encoder -p 'test_*.py' -v`
 
 这些单测不加载 FastEmbed、不下载模型、不监听端口。它们验证 hash、门禁、prefix、防截断计数、维度/范数、合成白名单、指标口径等纯代码合同；不能替代真实 CI 模型质量结果。
+
+## 独立附件批准的固定留出配对（2026-10-14）
+
+当前 CI 显式使用 `--suite attachment-holdout`；旧 `legacy` 驱动仍保留。只回放 `scripts/query_diagnostics/holdout.json` 的原创合成 24 源／64 问，其完整原始字节 SHA256 固定为 `c2c130e503bc8e753884865f48bed5fddc2dc95c1ddb0f6947b5a9e131883515`。该集此前已用于词法诊断，不能再称为新的盲测。问题文本、scope、角色、撤销标记和相关来源标注均不改；适配后完整 JSON 另算 canonical SHA256，结果再逐问核对原标注与范围。
+
+同一临时 Vault 保留 12 个 Event 与 12 个附件，两个固定阶段依次执行：
+
+1. `events_semantic_attachment_lexical`：只批准 Event 正文编码；附件仍可经既有本机词法入口读取。
+2. `events_and_attachments_semantic`：明确增加本轮合成附件的独立批准，模型、文本和问题不变；复用 Event 和问题向量。
+
+附件父事件正文为空，文件名、父 scope 和独立引用保留；附件正文保持 role:null，助手 Event 仍是 assistant。两个撤销来源在建索引前通过真实 Vault 抑制。6 个原始 scope 一一映射为 `project:synthetic-<原scope>`，每问严格使用原可见范围。此 fixture 提供的是 UTF-8 正文，即使文件名以 `.pdf` 结尾也只写成已知合成文本原件，绝不声称测试了 PDF 提取或 OCR。对话 title 保存在元数据中，当前生产路线不索引 title，这一差距不修订 qrels 来掩盖。
+
+词法搜索可能返回附件父 Event 的文件名别名；它以 `parent:ATT-*` / `attachment_parent` 单独记录，按非标注候选计数，不转换为附件正文命中，也不删除它以改善精确率。两套词法基线使用 `lexical_intent`，不把 where/decision 等语义标签误当词法策略。
+
+原集 42 个正例、22 个无答案问题，其中 20 个只需 Event、20 个只需附件、2 个任一类可答。真正运行语义路线的有 59 问；Q59/Q61 是空输入拒绝，Q60/Q62/Q63 有 5 个 scope，按现有最多 4 scope 门槛拒绝，不静默缩小范围。摘要同时给出全量、已执行、未执行、来源种类、问题类型及状态分组，不能把入口拒绝算成模型正确拒答。
+
+同时报告 Top1/3/5 标注来源命中、无答案非空率、非预期候选、基于现有标注的候选 precision，以及逐问配对新增／丢失命中与新增／消除无答案候选。所有返回来源都经真实 scope/撤销/角色核验和 `recall_fetch` 原文字节／快照复核。指标仅指候选相关性；不生成或评分答案，不事后调阈值。
+
+固定数据的理论新编码上限为 22 个未撤销文档＋59 个唯一 scope/query＝81 次输入／请求，单 scope 问题最多 13 条，第二阶段逐 scope 断言问题向量来自缓存。因此继续使用原 128 请求／256 输入、240 秒、1280 MiB 采样 RSS 和 100 MiB 模型下载限制。语料、文件、驱动、二进制、模型锁及实际运行时身份均写入脱敏摘要。实际运行状态和质量必须以对应提交 CI 产物为准；本段记录方案，不预填成绩。

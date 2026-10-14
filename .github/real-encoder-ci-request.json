@@ -1,11 +1,15 @@
 {
   "schema": "recallcard.real-encoder-request/1",
-  "request_id": "synthetic-bge-small-zh-v1-20261013",
-  "purpose": "一次固定官方小模型的原始Event召回与资源基线",
+  "request_id": "synthetic-bge-attachment-holdout-20261014",
+  "purpose": "固定原创24源64问留出集的普通Event语义与独立批准附件语义配对观测",
   "synthetic_only": true,
   "model_revision": "46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59",
   "model_download_limit_bytes": 104857600,
   "runtime_limit_seconds": 240,
   "external_inference": false,
-  "private_data": false
+  "private_data": false,
+  "suite": "attachment-holdout",
+  "holdout_sha256": "c2c130e503bc8e753884865f48bed5fddc2dc95c1ddb0f6947b5a9e131883515",
+  "attachment_encoding_approval": "synthetic_fixture_only",
+  "production_defaults_changed": false
 }
