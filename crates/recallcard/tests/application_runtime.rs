@@ -265,6 +265,7 @@ fn one_service_lease_prevents_duplicate_runtime_hosts() {
     let root = tempfile::tempdir().unwrap();
     let vault = Vault::init(&root.path().join("vault")).unwrap();
     let path = vault.root().to_path_buf();
+    let launched_at = Utc::now();
     let thread = std::thread::spawn(move || {
         let vault = Vault::open_existing(&path).unwrap();
         run_service(
@@ -288,7 +289,19 @@ fn one_service_lease_prevents_duplicate_runtime_hosts() {
     )
     .unwrap();
     assert!(second.running);
+    // 租约只用于上面的重复实例断言；启动仍会清理旧停止标记。
+    // 发送本次停止请求前，等同一实例完整发布启动，避免请求被启动清理覆盖。
+    wait_started(&vault, std::process::id(), launched_at, None);
     request_service_stop(&vault).unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !thread.is_finished() {
+        assert!(
+            Instant::now() < until,
+            "服务收到停止请求后未在预算内退出，状态 (running, startup_published, stop_requested)：{:?}",
+            service_status(&vault).map(|status| (status.running, status.startup_published(), status.stop_requested))
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     thread.join().unwrap();
 }
 #[test]
