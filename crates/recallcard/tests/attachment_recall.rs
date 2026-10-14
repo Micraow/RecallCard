@@ -312,3 +312,37 @@ fn shared_object_uses_first_verified_supported_association_in_search_and_fetch()
     .unwrap();
     assert_eq!(read["results"][0]["text"], "SHARED_OBJECT_64");
 }
+
+#[test]
+fn unsupported_lexical_query_does_not_abort_shared_event_route() {
+    let (_dir, v) = fixture();
+    attachment(
+        &v,
+        "personal",
+        b"SYNTHETIC_BODY_91",
+        "punctuation",
+        "text/plain",
+    );
+    for target in ["all", "events", "memories"] {
+        let context = Context::new(&v, Access::new(vec!["personal".into()]).unwrap());
+        for empty in ["", " \n\t "] {
+            assert!(context.recall_question(empty, target).is_err());
+        }
+        let unknown = context
+            .recall_question("UNKNOWN_ATTACHMENT_945", target)
+            .unwrap();
+        assert!(unknown["results"].as_array().unwrap().is_empty());
+        let page = context.recall_question("🙂！？---", target).unwrap();
+        assert!(page["results"].as_array().unwrap().is_empty());
+        assert_eq!(page["coverage"]["cloud_fallback"], false);
+        if target != "memories" {
+            assert_eq!(
+                page["coverage"]["attachments"]["status"],
+                "unsupported_query"
+            );
+        }
+        if target != "events" {
+            assert_eq!(page["coverage"]["memory_status"], "unsupported_query");
+        }
+    }
+}

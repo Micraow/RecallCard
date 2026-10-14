@@ -235,6 +235,17 @@ impl Context<'_> {
             {
                 continue;
             }
+            // 可选词法通道没有支持的词项时，只报告该通道未覆盖；
+            // 不能让纯标点/表情问题中断已完成的 Event 候选路线。
+            if search::ranking_terms(query, "natural_question").is_empty() {
+                if lexical_target == "memories" {
+                    memory_status = json!("unsupported_query");
+                } else {
+                    attachment_status = json!({"status":"unsupported_query","semantic":false,"mode":"bounded_local_lexical_scan"});
+                }
+                partial = true;
+                continue;
+            }
             let local = Context::new(self.vault, self.access.clone());
             let args=serde_json::from_value(json!({"query":query,"target":lexical_target,"lexical_match":"natural_question","limit":10,"budget_bytes":8192})).map_err(|_|"内部检索参数无效")?;
             let page = local.search(args)?;
