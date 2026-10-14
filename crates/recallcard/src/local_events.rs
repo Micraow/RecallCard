@@ -440,6 +440,10 @@ impl<'a> LocalEvents<'a> {
         {
             return Err("local_event_coverage_mismatch".into());
         }
+        let lexical_only = evidence::lexical_only(
+            &candidates["coverage"],
+            status["lexical_version"].is_string(),
+        )?;
         let query_support = ranking::assess(query, "");
         let reorder = !query_support.limited && query_support.protected_anchors > 0;
         let mut verified = Vec::new();
@@ -487,17 +491,13 @@ impl<'a> LocalEvents<'a> {
             let end = row["end_byte"]
                 .as_u64()
                 .ok_or("local_event_response_invalid")? as usize;
-            let score = row["score"]
-                .as_f64()
-                .ok_or("local_event_response_invalid")?;
+            let score = evidence::candidate_score(row, lexical_only)?;
             if row["content_hash"] != hash(text.as_bytes())
                 || start >= end
                 || end > text.len()
                 || !text.is_char_boundary(start)
                 || !text.is_char_boundary(end)
                 || row["text_sha256"] != hash(&text.as_bytes()[start..end])
-                || !score.is_finite()
-                || score.abs() > 1.001
             {
                 return Err("local_event_candidate_source_mismatch".into());
             }
@@ -521,7 +521,7 @@ impl<'a> LocalEvents<'a> {
                 "snapshot":crate::model::record_snapshot(&event)?,"content_hash":hash(text.as_bytes()),
                 "text_hash":hash(snippet.as_bytes()),"matched_chunk":{"start_byte":start,"end_byte":end,"text_hash":row["text_sha256"]},
                 "text":snippet,"text_range":{"start_byte":excerpt_start,"end_byte":excerpt_end,"total_bytes":text.len(),"projection":"event.text"},"text_truncated":excerpt_start!=0||excerpt_end!=text.len(),
-                "score":score,"score_kind":"cosine","semantic_rank":retrieval.semantic_rank,"retrieval":retrieval.metadata,
+                "score":score,"score_kind":if lexical_only{"unavailable"}else{"cosine"},"semantic_rank":retrieval.semantic_rank,"retrieval":retrieval.metadata,
                 "retrieval_support":{"kind":if support.complete{"protected_anchor_match"}else if retrieval.lexical_range.is_some(){"lexical_candidate"}else{"semantic_candidate"},"match_scope":"returned_excerpt","case_policy":"protected_case_sensitive_ascii_support_case_insensitive","protected":support.complete,"protected_anchors":support.protected_anchors,"matched_protected_anchors":support.matched_protected_anchors,"ascii_terms":support.ascii_terms,"matched_ascii_terms":support.matched_ascii_terms,"limited":support.limited},
                 "relevance":"unassessed","state":"captured","evidence":format!("{:?}/{:?}",event.data.role,event.data.origin),"evidence_refs":[reference],
                 "session_ref":event.data.session_key(),"occurred_at":event.data.occurred_at,"time_note":if event.data.occurred_at.is_none(){"发生时间未知；捕获时间不代表发生时间"}else{""}});
@@ -548,11 +548,11 @@ impl<'a> LocalEvents<'a> {
             results.push(value);
         }
         Ok(
-            json!({"query":query,"results":results,"match_count":results.len(),"status":if results.is_empty(){"no_verified_candidates"}else{"ok"},
-            "truncated":rows.len()>results.len()||rejected>0||verification_limited||candidates["coverage"]["candidates_truncated"]==true||candidates["coverage"]["lexical"]["candidates_truncated"]==true,"coverage":{"event_search":"local_semantic","semantic_search":"local_event_index",
-            "local_event_semantic":true,"semantic_query_encoding":candidates["coverage"]["query_encoding"],"event_index_generation":generation,
+            json!({"query":query,"results":results,"match_count":results.len(),"status":if lexical_only{if results.is_empty(){"unavailable"}else{"partial"}}else if results.is_empty(){"no_verified_candidates"}else{"ok"},
+            "truncated":rows.len()>results.len()||rejected>0||verification_limited||candidates["coverage"]["candidates_truncated"]==true||candidates["coverage"]["lexical"]["candidates_truncated"]==true,"coverage":{"event_search":if lexical_only{"local_lexical_fallback"}else{"local_semantic"},"semantic_search":if lexical_only{"unavailable"}else{"local_event_index"},
+            "local_event_semantic":!lexical_only,"semantic":candidates["coverage"]["semantic"],"semantic_query_encoding":candidates["coverage"]["query_encoding"],"event_index_generation":generation,
             "event_index_snapshot":manifest.epoch,"local_config_identity":self.config_hash,"source_verification":"current_event_hash_and_utf8_range","rejected_candidates":rejected,
-            "partial":rejected>0||verification_limited,"candidate_policy":"verified_excerpt_anchors_then_channel_order/v2","lexical":candidates["coverage"]["lexical"],"fusion":candidates["coverage"]["fusion"],"verified_candidates":scanned,"candidate_window_limit":100,"candidate_reordering_enabled":reorder,"candidate_verification_limited":verification_limited,"candidate_text_bytes":source_bytes,"chunk_selection":candidates["coverage"]["chunk_selection"],"note":"本机向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}),
+            "partial":lexical_only||rejected>0||verification_limited,"candidate_policy":"verified_excerpt_anchors_then_channel_order/v2","lexical":candidates["coverage"]["lexical"],"fusion":candidates["coverage"]["fusion"],"verified_candidates":scanned,"candidate_window_limit":100,"candidate_reordering_enabled":reorder,"candidate_verification_limited":verification_limited,"candidate_text_bytes":source_bytes,"chunk_selection":candidates["coverage"]["chunk_selection"],"note":if lexical_only{"本机编码服务不可用；仅返回有界词法候选，语义路线未执行。无命中不代表没有相关历史。"}else{"本机向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}}),
         )
     }
 }

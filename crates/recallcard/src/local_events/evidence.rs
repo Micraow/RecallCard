@@ -43,6 +43,43 @@ fn cosine(value: &Value) -> Result<f64> {
         .filter(|v| v.is_finite() && v.abs() <= 1.001)
         .ok_or_else(|| "local_event_retrieval_invalid".into())
 }
+/// 只有完整、显式的单路降级信封才允许缺失cosine分数。
+pub(super) fn lexical_only(coverage: &Value, versioned: bool) -> Result<bool> {
+    if coverage["fusion"] != "lexical_only" {
+        if coverage["semantic"]["status"] == "unavailable"
+            || coverage["query_encoding"] == "unavailable"
+        {
+            return Err("local_event_retrieval_invalid".into());
+        }
+        return Ok(false);
+    }
+    if !versioned
+        || coverage["semantic"]["status"] != "unavailable"
+        || !matches!(
+            coverage["semantic"]["reason"].as_str(),
+            Some("local_provider_unavailable" | "local_provider_error")
+        )
+        || coverage["query_encoding"] != "unavailable"
+        || coverage["semantic_candidates"] != 0
+        || coverage["partial"] != true
+    {
+        return Err("local_event_retrieval_invalid".into());
+    }
+    Ok(true)
+}
+pub(super) fn candidate_score(row: &Value, lexical_only: bool) -> Result<Option<f64>> {
+    if lexical_only {
+        if !row["score"].is_null()
+            || !row["retrieval"]["semantic_rank"].is_null()
+            || !row["retrieval"]["semantic_evidence"].is_null()
+        {
+            return Err("local_event_retrieval_invalid".into());
+        }
+        Ok(None)
+    } else {
+        cosine(&row["score"]).map(Some)
+    }
+}
 pub(super) fn verify(
     query: &str,
     text: &str,
@@ -136,6 +173,38 @@ mod tests {
             "retrieval":{"semantic_rank":null,"lexical_rank":1,"lexical_matched_terms":1,"lexical_query_terms":1,
             "fused_rank":1,"fusion_score":1.0/61.0,"semantic_evidence":null,
             "lexical_evidence":{"start_byte":1,"end_byte":11,"text_sha256":hash(b"E_PIPE_710")}}})
+    }
+    #[test]
+    fn lexical_fallback_requires_consistent_channel_status_and_null_semantic_values() {
+        let coverage = json!({"fusion":"lexical_only","semantic":{"status":"unavailable","reason":"local_provider_unavailable"},
+            "query_encoding":"unavailable","semantic_candidates":0,"partial":true});
+        assert!(lexical_only(&coverage, true).unwrap());
+        assert!(lexical_only(&coverage, false).is_err());
+        for (key, value) in [
+            ("fusion", json!("rrf/1:k=60")),
+            ("query_encoding", json!("cache")),
+            ("semantic_candidates", json!(1)),
+            ("partial", json!(false)),
+            (
+                "semantic",
+                json!({"status":"unavailable","reason":"redirect_blocked"}),
+            ),
+        ] {
+            let mut changed = coverage.clone();
+            changed[key] = value;
+            assert!(lexical_only(&changed, true).is_err());
+        }
+        let mut row = row();
+        assert!(candidate_score(&row, true).is_err());
+        row["score"] = Value::Null;
+        assert_eq!(candidate_score(&row, true).unwrap(), None);
+        assert!(candidate_score(&row, false).is_err());
+        verify("E_PIPE_710", " E_PIPE_710 rest", &row, 0, true).unwrap();
+        row["retrieval"]["semantic_rank"] = json!(1);
+        assert!(candidate_score(&row, true).is_err());
+        row["retrieval"]["semantic_rank"] = Value::Null;
+        row["retrieval"]["semantic_evidence"] = json!({});
+        assert!(candidate_score(&row, true).is_err());
     }
     #[test]
     fn cross_chunk_lexical_evidence_keeps_null_semantic_rank_and_exact_source_span() {

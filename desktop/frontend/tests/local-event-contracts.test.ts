@@ -53,3 +53,16 @@ test('独立词法覆盖经共享入口显示旧库、长问句退回与候选�
  const direct=recallCoverageNotes({results:[],coverage:{local_event_semantic:true,lexical:{status:'limited_query'}}}).join('\n');
  assert.match(direct,/没有截短或改写问题/);
 });
+
+test('编码器离线词法降级不宣称语义成功或只因未配置',()=>{
+ const scope={scope:'personal',state:'degraded',query_encoding:'unavailable',fusion:'lexical_only',semantic:{status:'unavailable',reason:'local_provider_unavailable'},lexical:{status:'available'}};
+ const notes=recallCoverageNotes({results:[],coverage:{local_event_semantic:false,cloud_fallback:false,scopes:[scope]}}).join('\n');
+ assert.match(notes,/本机编码服务不可用/);assert.match(notes,/没有语义分数/);assert.match(notes,/不会改用云编码/);assert.match(notes,/未命中不表示/);
+ assert.doesNotMatch(notes,/已直接参与本机语义|尚未配置|已发送到|结合语义排序/);
+ const limited=recallCoverageNotes({results:[],coverage:{fusion:'lexical_only',lexical:{status:'limited_query'}}}).join('\n');
+ assert.match(limited,/未能执行这两条候选路线/);assert.doesNotMatch(limited,/完整问题仍用于语义/);
+ const unsupported=recallCoverageNotes({results:[],coverage:{scopes:[{...scope,lexical:{status:'unsupported_query'}}]}}).join('\n');
+ assert.match(unsupported,/没有可用的候选路线/);
+ const mixed=recallCoverageNotes({results:[],coverage:{local_event_semantic:true,scopes:[scope,{scope:'project:ok',state:'ready',query_encoding:'cache',lexical:{status:'available'}}]}}).join('\n');
+ assert.match(mixed,/本机编码服务不可用/);assert.match(mixed,/已缓存/);assert.match(mixed,/独立寻找完整编号/);
+});

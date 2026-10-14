@@ -15,6 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from recallcard_worker.event_index import EventIndex, SCHEMA, canonical, digest
 from recallcard_worker import event_lexical as lexical
+from recallcard_worker.embedding import EmbeddingError
 from test_event_index import settings, Encoder
 
 
@@ -73,6 +74,98 @@ class EventLexicalTests(unittest.TestCase):
 
     def finish(self, result):
         return self.ok("finish", **{key: result[key] for key in ("build_id", "source_epoch", "receipt", "source_count", "chunk_count")})
+
+    def test_unavailable_encoder_keeps_independent_lexical_without_fake_cosine(self):
+        body = "prefix ZXQ-714 suffix"
+        self.finish(self.put(self.begin(), "target", body, [0, 11, len(body)]))
+        for code in ("local_provider_unavailable", "local_provider_error"):
+            with self.subTest(code=code), patch.object(self.worker, "_encode", side_effect=EmbeddingError(code, "private-provider-detail")) as encode:
+                page = self.ok("query", query="ZXQ-714")
+                self.assertEqual(encode.call_count, 1)
+                self.assertEqual(page["coverage"]["semantic"], {"status": "unavailable", "reason": code})
+                self.assertEqual(page["coverage"]["query_encoding"], "unavailable")
+                self.assertEqual(page["coverage"]["fusion"], "lexical_only")
+                self.assertTrue(page["coverage"]["partial"])
+                self.assertEqual(page["coverage"]["semantic_candidates"], 0)
+                self.assertEqual(page["coverage"]["union_candidates"], 1)
+                row = page["results"][0]
+                self.assertEqual(row["ref"], "event:target")
+                self.assertIsNone(row["score"])
+                self.assertIsNone(row["retrieval"]["semantic_rank"])
+                self.assertIsNone(row["retrieval"]["semantic_evidence"])
+                self.assertEqual(row["retrieval"]["lexical_rank"], 1)
+                evidence = row["retrieval"]["lexical_evidence"]
+                self.assertEqual(body[evidence["start_byte"]:evidence["end_byte"]], "ZXQ-714")
+                self.assertNotIn("private-provider-detail", json.dumps(page))
+                with sqlite3.connect(self.config["database"]) as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM queries").fetchone()[0], 0)
+        # 服务恢复时自动恢复两路；没有写入伪查询向量或粘滞退化态。
+        healthy = self.ok("query", query="ZXQ-714")
+        self.assertEqual(healthy["coverage"]["semantic"]["status"], "available")
+        self.assertEqual(healthy["coverage"]["fusion"], lexical.FUSION)
+        self.assertIsInstance(healthy["results"][0]["score"], float)
+        with patch.object(self.worker, "_encode", side_effect=AssertionError("must use cache")):
+            self.assertEqual(self.ok("query", query="ZXQ-714")["coverage"]["query_encoding"], "cache")
+
+    def test_encoding_integrity_and_authorization_errors_never_become_lexical_success(self):
+        self.finish(self.put(self.begin(), "target", "ZXQ-714"))
+        for code in ("redirect_blocked", "response_limit", "local_budget_exhausted", "query_not_approved", "invalid_response", "invalid_vector"):
+            with self.subTest(code=code), patch.object(self.worker, "_encode", side_effect=EmbeddingError(code, "synthetic")):
+                expected = code if code in ("redirect_blocked", "response_limit", "local_budget_exhausted") else "local_encoding_failed"
+                self.error(expected, "query", query="ZXQ-714")
+        self.worker.query_approved = False
+        with patch.object(self.worker, "_encode", side_effect=AssertionError("no encoding after revocation")):
+            self.error("query_not_approved", "query", query="ZXQ-714")
+
+    def test_legacy_and_semantic_only_queries_do_not_silently_change_mode(self):
+        self.finish(self.put(self.begin(), "target", "ZXQ-714"))
+        with patch.object(self.worker, "_encode", side_effect=EmbeddingError("local_provider_unavailable", "synthetic")):
+            self.error("local_provider_unavailable", "query", query="ZXQ-714", retrieval_mode="semantic_only")
+        self.finish(self.put(self.begin("legacy", version=None), "target", "ZXQ-714", contexts=False))
+        with patch.object(self.worker, "_encode", side_effect=EmbeddingError("local_provider_unavailable", "synthetic")):
+            self.error("local_provider_unavailable", "query", query="ZXQ-714")
+
+    def test_fallback_rechecks_configuration_and_generation_after_provider_failure(self):
+        path = self.root / "worker.json"
+        path.write_bytes(canonical(self.config)); path.chmod(0o600)
+        self.worker = EventIndex(self.config, encoder=self.encoder, config_path=path)
+        self.finish(self.put(self.begin(), "target", "ZXQ-714"))
+        def revoked(*_):
+            path.write_bytes(canonical({**self.config, "query_approved": False}))
+            raise EmbeddingError("local_provider_unavailable", "synthetic")
+        with patch.object(self.worker, "_encode", side_effect=revoked):
+            self.error("configuration_changed", "query", query="ZXQ-714")
+        path.write_bytes(canonical(self.config))
+        def changed(*_):
+            with sqlite3.connect(self.config["database"]) as db:
+                db.execute("DELETE FROM metadata WHERE key='published'")
+            raise EmbeddingError("local_provider_unavailable", "synthetic")
+        with patch.object(self.worker, "_encode", side_effect=changed):
+            self.error("generation_changed", "query", query="ZXQ-714")
+
+    def test_fallback_empty_and_limited_queries_report_missing_channel(self):
+        self.finish(self.put(self.begin(), "target", "ZXQ-714"))
+        with patch.object(self.worker, "_encode", side_effect=EmbeddingError("local_provider_unavailable", "synthetic")):
+            for query, status in (("missing-code", "available"), ("😀", "unsupported_query"), ("a" * 129, "limited_query")):
+                with self.subTest(query=query):
+                    page = self.ok("query", query=query)
+                    self.assertEqual(page["results"], [])
+                    self.assertEqual(page["coverage"]["lexical"]["status"], status)
+                    self.assertTrue(page["coverage"]["partial"])
+                    self.assertEqual(page["coverage"]["fusion"], "lexical_only")
+
+    def test_fallback_does_not_bypass_corrupt_vectors_or_source_scope(self):
+        self.finish(self.put(self.begin(), "target", "ZXQ-714"))
+        pristine = Path(self.config["database"]).read_bytes()
+        for mutation, code in (("UPDATE sources SET scope='forbidden'", "corrupt_snapshot"),
+                               ("UPDATE vectors SET vector=zeroblob(16)", "corrupt_vector"),
+                               ("DELETE FROM lexical_terms", "corrupt_lexical_index")):
+            with self.subTest(mutation=mutation):
+                Path(self.config["database"]).write_bytes(pristine)
+                with sqlite3.connect(self.config["database"]) as db:
+                    db.execute(mutation)
+                with patch.object(self.worker, "_encode", side_effect=EmbeddingError("local_provider_unavailable", "synthetic")):
+                    self.error(code, "query", query="ZXQ-714")
 
     def test_independent_identifier_recalls_semantic_rank101_and_preserves_cosine(self):
         self.encoder.vectors["ZXQ-714"] = [1, 0, 0, 0]

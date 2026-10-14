@@ -201,7 +201,7 @@ export interface SearchRow {
 }
 export interface EventLexicalCoverage {status?:string;version?:string|null;reason?:string;candidates_truncated?:boolean;query_terms?:number;postings_scanned?:number;query_terms_visited?:number;}
 export interface SearchPage {
-  coverage?: {event_search?: string; cloud_fallback?: boolean; scopes?: {scope:string;state:string;query_encoding?:string;verification_limited?:boolean;lexical?:EventLexicalCoverage;fusion?:string}[]; lexical?:EventLexicalCoverage; fusion?:string; candidate_verification_limited?:boolean; local_event_semantic?: boolean; memory_search?: string; chunk_selection?: string; semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string; semantic_coverage?: string; lexical_matching?: string; lexical_match?: string};
+  coverage?: {event_search?: string; cloud_fallback?: boolean; scopes?: {scope:string;state:string;query_encoding?:string;verification_limited?:boolean;lexical?:EventLexicalCoverage;fusion?:string;semantic?:{status?:string;reason?:string|null}}[]; lexical?:EventLexicalCoverage; fusion?:string; candidate_verification_limited?:boolean; local_event_semantic?: boolean; memory_search?: string; chunk_selection?: string; semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string; semantic_coverage?: string; lexical_matching?: string; lexical_match?: string};
   results: SearchRow[];
   truncated?: boolean;
 }

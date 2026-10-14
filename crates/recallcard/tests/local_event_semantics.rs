@@ -503,3 +503,71 @@ fn lexical_cross_chunk_preview_and_shared_fetch_keep_complete_original_identifie
         "lexical_query_term_limit"
     );
 }
+
+#[test]
+fn stopped_encoder_keeps_verified_lexical_source_and_current_authorization() {
+    use recallcard::{context::Context, policy::Access, transport};
+    let (server, endpoint) = server();
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let body = format!("{}E_PIPE_710 tail", " ".repeat(247));
+    let target = event(&vault, "personal", &body, "user_input");
+    let hidden = event(&vault, "project:hidden", "E_PIPE_710 hidden", "user_input");
+    let index = LocalEvents::configure(
+        &vault,
+        "personal",
+        setup(endpoint),
+        "python3".into(),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python")
+            .canonicalize()
+            .unwrap(),
+    )
+    .unwrap();
+    refresh(&index);
+    drop(server);
+    let direct = index.search("E_PIPE_710", 10).unwrap();
+    assert_eq!(direct["coverage"]["event_search"], "local_lexical_fallback");
+    assert_eq!(direct["status"], "partial");
+    assert_eq!(
+        direct["coverage"]["semantic"]["reason"],
+        "local_provider_unavailable"
+    );
+    assert_eq!(direct["coverage"]["local_event_semantic"], false);
+    assert_eq!(direct["coverage"]["partial"], true);
+    let row = &direct["results"][0];
+    assert_eq!(row["ref"], target);
+    assert_eq!(row["score_kind"], "unavailable");
+    assert!(row["score"].is_null());
+    assert!(row["semantic_rank"].is_null());
+    assert!(row["retrieval"]["semantic_evidence"].is_null());
+    assert_eq!(
+        row["retrieval"]["lexical_evidence_verification"],
+        "one_complete_query_term"
+    );
+    assert!(row["text"].as_str().unwrap().contains("E_PIPE_710"));
+    let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+    let page = transport::invoke(&context, "recall_search", json!({"query":"E_PIPE_710"})).unwrap();
+    assert_eq!(page["status"], "partial");
+    assert_eq!(page["coverage"]["local_event_semantic"], false);
+    assert_eq!(page["coverage"]["scopes"][0]["state"], "degraded");
+    assert_eq!(page["coverage"]["scopes"][0]["fusion"], "lexical_only");
+    assert!(!page.to_string().contains(&hidden));
+    let id = page["results"][0]["id"].clone();
+    let fetched = transport::invoke(&context, "recall_fetch", json!({"id":id})).unwrap();
+    assert!(fetched["results"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("E_PIPE_710"));
+    let absent =
+        transport::invoke(&context, "recall_search", json!({"query":"missing-code"})).unwrap();
+    assert_eq!(absent["status"], "unavailable");
+    assert_eq!(absent["results"], json!([]));
+    assert_eq!(
+        absent["coverage"]["scopes"][0]["semantic"]["status"],
+        "unavailable"
+    );
+    LocalEvents::disable(&vault, "personal").unwrap();
+    assert!(index.search("E_PIPE_710", 10).is_err());
+    assert!(transport::invoke(&context, "recall_fetch", json!({"id":id})).is_err());
+}

@@ -145,6 +145,7 @@ impl Context<'_> {
         let mut bindings = vec![];
         let mut coverage = vec![];
         let mut partial = false;
+        let mut semantic_available = false;
         let mut budget_limited = false;
         let mut memory_status = json!("not_requested");
         let scopes_digest = scopes_hash(&self.access);
@@ -203,8 +204,9 @@ impl Context<'_> {
                             row["id"] = json!(locator.id());
                             row["relevance"] = json!("unassessed");
                         }
-                        partial |= page["truncated"] == true;
-                        coverage.push(json!({"scope":scope,"state":"ready","candidates":rows.len(),"truncated":page["truncated"],"query_encoding":page["coverage"]["semantic_query_encoding"],"candidate_policy":page["coverage"]["candidate_policy"],"verified_candidates":page["coverage"]["verified_candidates"],"verification_limited":page["coverage"]["candidate_verification_limited"],"lexical":page["coverage"]["lexical"],"fusion":page["coverage"]["fusion"]}));
+                        partial |= page["truncated"] == true || page["coverage"]["partial"] == true;
+                        semantic_available |= page["coverage"]["local_event_semantic"] == true;
+                        coverage.push(json!({"scope":scope,"state":if page["coverage"]["fusion"]=="lexical_only"{"degraded"}else{"ready"},"semantic":page["coverage"]["semantic"],"candidates":rows.len(),"truncated":page["truncated"],"query_encoding":page["coverage"]["semantic_query_encoding"],"candidate_policy":page["coverage"]["candidate_policy"],"verified_candidates":page["coverage"]["verified_candidates"],"verification_limited":page["coverage"]["candidate_verification_limited"],"lexical":page["coverage"]["lexical"],"fusion":page["coverage"]["fusion"]}));
                         bindings.push((index, epoch, config));
                         groups.push(rows);
                     }
@@ -279,7 +281,7 @@ impl Context<'_> {
         let candidate_count: usize = groups.iter().map(Vec::len).sum();
         let rows = merge_candidates(&groups);
         partial |= rows.len() < candidate_count;
-        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"budget_limited":budget_limited,"local_event_semantic":!bindings.is_empty(),"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"protected_excerpt_tiers_then_stable_round_robin_not_cross_model_score","note":"候选不是答案；未配置或未覆盖不表示没有历史。精确锚点只在有界候选预览中核对，语义相近也可能完全无关；尚无经过校准的相关性或可回答性判定。旧search仍可显式进行关键词检索。"}});
+        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"budget_limited":budget_limited,"local_event_semantic":semantic_available,"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"protected_excerpt_tiers_then_stable_round_robin_not_cross_model_score","note":"候选不是答案；未配置或未覆盖不表示没有历史。精确锚点只在有界候选预览中核对，语义相近也可能完全无关；尚无经过校准的相关性或可回答性判定。旧search仍可显式进行关键词检索。"}});
         if result["results"].as_array().unwrap().is_empty() && partial {
             result["status"] = json!(if budget_limited {
                 "budget_exhausted"

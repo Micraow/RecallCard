@@ -35,6 +35,7 @@ MAX_SOURCES = 100_000
 MAX_CHUNKS = 1_000_000
 QUERY_PAGE = 256
 MAX_RESULTS = 100
+QUERY_TIMEOUT = 5.0  # 为15秒宿主预算中的词法降级和正本核验留出余量。
 # 单个合法SQLite行远小于此值（最大向量为8192*4字节）。必须在取行前
 # 限制SQLite自身分配，不能依赖fetchmany之后的Python字段检查。
 MAX_SQLITE_VALUE = 64 * 1024
@@ -368,7 +369,7 @@ class EventIndex:
         if self.encoder is not None:
             output = self.encoder(kind, texts)
         elif kind == "query":
-            client = LocalQueryClient(self.space["endpoint"], [self.scope], max_calls=1, max_bytes=MAX_BATCH_BYTES)
+            client = LocalQueryClient(self.space["endpoint"], [self.scope], max_calls=1, max_bytes=MAX_BATCH_BYTES, timeout=QUERY_TIMEOUT)
             output = client.embed(self.embedding_space, texts, [self.scope], "query")
         else:
             client = LocalIndexClient(self.space["endpoint"], [self.scope], max_calls=1, max_bytes=MAX_BATCH_BYTES)
@@ -623,7 +624,18 @@ class EventIndex:
                 if error.code not in ("lexical_query_term_limit", "lexical_query_term_length_limit"):
                     raise
                 lexical_query_limit = error.code
-        vector, mode = self._query_vector(query)
+        semantic_coverage = {"status": "available", "reason": None}
+        try:
+            vector, mode = self._query_vector(query)
+        except EmbeddingError as error:
+            # 只有可识别的服务不可用错误可降级；拒绝重定向、响应损坏、
+            # 权限、预算及索引错误绝不变成成功。旧代次没有独立词法路由。
+            if (not lex_version or retrieval_mode != "hybrid"
+                    or error.code not in ("local_provider_unavailable", "local_provider_error")):
+                raise
+            vector, mode = None, "unavailable"
+            semantic_coverage = {"status": "unavailable", "reason": error.code}
+        self._current_config()
         heap = []
         scanned = 0
         channel_limit = lexical.CHANNEL_LIMIT if lex_version else limit
@@ -653,16 +665,18 @@ class EventIndex:
             while page := cursor.fetchmany(QUERY_PAGE):
                 for ref, source_hash, start, end, chunk_hash, blob, ordinal, role, session, occurred in page:
                     values = decode_blob(blob, self.dimensions)
-                    score = sum(a*b for a, b in zip(vector, values))
-                    require(math.isfinite(score) and -1.00001 <= score <= 1.00001, "corrupt_vector")
-                    score = max(-1.0, min(1.0, score))
+                    score = None
+                    if vector is not None:
+                        score = sum(a*b for a, b in zip(vector, values))
+                        require(math.isfinite(score) and -1.00001 <= score <= 1.00001, "corrupt_vector")
+                        score = max(-1.0, min(1.0, score))
                     # semantic路线独立按原cosine排序；ref+ordinal沿用原稳定并列顺序。
                     item = (score, ref, -ordinal, source_hash, start, end, chunk_hash, role, session, occurred)
                     if (ref, ordinal) in lexical_keys:
                         lexical_items[ref] = item
                     scanned += 1
                     if best is None or ref != best[1]:
-                        if best is not None:
+                        if best is not None and vector is not None:
                             add_candidate(best)
                         best = item
                         previous_range = None
@@ -670,7 +684,7 @@ class EventIndex:
                     previous_range = (start, end)
                     if item[:3] > best[:3]:
                         best = item
-            if best is not None:
+            if best is not None and vector is not None:
                 add_candidate(best)
             require(scanned == row[2], "corrupt_snapshot")
             semantic = sorted(heap, key=lambda r:r[:3], reverse=True)
@@ -718,7 +732,8 @@ class EventIndex:
                 "indexed_chunks": row[2], "scanned_chunks": scanned, "query_encoding": mode, "candidate_limit": limit,
                 "candidates_truncated": row[1] > len(results), "response_limited": response_limited,
                 "chunk_selection": "lexical_primary_else_semantic_best" if lex_version and retrieval_mode == "hybrid" else "per_event_best_chunk", "lexical": lexical_coverage,
-                "fusion": lexical.FUSION if lex_version and retrieval_mode == "hybrid" else "semantic_only",
+                "fusion": "lexical_only" if vector is None else lexical.FUSION if lex_version and retrieval_mode == "hybrid" else "semantic_only",
+                "semantic": semantic_coverage, "partial": vector is None,
                 "semantic_candidates": len(semantic), "lexical_candidates": len(lex_candidates), "union_candidates": len(union),
                 "local_only": True, "external_calls": 0, "page_rows": QUERY_PAGE}}
 
