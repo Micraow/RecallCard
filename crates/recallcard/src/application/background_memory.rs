@@ -1171,12 +1171,7 @@ impl<'a> MemoryRuntime<'a> {
         let config = self.read_config()?;
         config.authorized()?;
         if config.paused
-            || self
-                .vault
-                .state_dir()
-                .map_err(storage)?
-                .join("runtime/stop.json")
-                .exists()
+            || super::runtime::current_stop_requested(self.vault)?
             || matches!(
                 self.load(&record.status.job_id)?.status.state,
                 JobState::Paused | JobState::Cancelled
@@ -1337,6 +1332,10 @@ impl<'a> MemoryRuntime<'a> {
         };
         let output = provider
             .execute_with_extraction(&config, &record.projection, extraction, &|| {
+                // 停止已持久化但 pause 尚在等 state 写锁时，也能取消进行中的请求。
+                if super::runtime::current_stop_requested(self.vault)? {
+                    return Ok(true);
+                }
                 let _state = match self.read_lock() {
                     Ok(guard) => guard,
                     Err(error) if error.code == ErrorCode::Conflict && error.retryable => {

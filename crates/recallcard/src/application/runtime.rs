@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     filesystem::{file_identity, open_local_file},
-    vault::{read_json, reject_symlink},
+    vault::reject_symlink,
     Vault,
 };
 use chrono::{DateTime, Utc};
@@ -16,6 +16,8 @@ use std::{
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
+
+mod lifecycle;
 
 const SCHEMA: &str = "recallcard.local-service/1";
 /// 启动包含本地 worker 预检与完整程序摘要校验。慢 CPU 上的 debug 程序
@@ -41,6 +43,9 @@ pub struct ServiceStatus {
     pub build: serde_json::Value,
     #[serde(default)]
     pub binary_hash: String,
+    /// 每次首次取得服务租约生成独立代次；旧状态可缺省。
+    #[serde(default)]
+    pub generation: Option<String>,
     #[serde(default)]
     pub credential: super::credentials::CredentialStatus,
     #[serde(default)]
@@ -62,6 +67,7 @@ impl Default for ServiceStatus {
             schema: SCHEMA.into(),
             build: serde_json::json!(crate::build_info()),
             binary_hash: String::new(),
+            generation: None,
             credential: Default::default(),
             provider_ready: false,
             running: false,
@@ -135,17 +141,41 @@ fn try_lease(path: &Path, shared: bool) -> AppResult<Option<ServiceLease>> {
         Err(_) => Err(storage()),
     }
 }
-fn read_status(vault: &Vault) -> AppResult<ServiceStatus> {
-    let path = directory(vault)?.join("status.json");
-    reject_symlink(&path).map_err(|_| storage())?;
+// 启停短锁内只读取有界普通文件；FIFO/设备/链接不能阻塞整个生命周期。
+fn read_state_json<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    limit: u64,
+) -> AppResult<Option<T>> {
+    use std::io::Read;
+    reject_symlink(path).map_err(|_| storage())?;
     if !path.exists() {
-        return Ok(ServiceStatus::default());
+        return Ok(None);
     }
-    if fs::metadata(&path).map_err(|_| storage())?.len() > 128 * 1024 {
+    let file = open_local_file(path).map_err(|_| storage())?;
+    let metadata = file.metadata().map_err(|_| storage())?;
+    if !metadata.is_file() || metadata.len() > limit {
         return Err(storage());
     }
-    let status: ServiceStatus = read_json(&path).map_err(|_| storage())?;
-    if status.schema != SCHEMA {
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| storage())?;
+    if bytes.len() as u64 > limit {
+        return Err(storage());
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| storage())
+}
+fn read_status(vault: &Vault) -> AppResult<ServiceStatus> {
+    let path = directory(vault)?.join("status.json");
+    let status: ServiceStatus = read_state_json(&path, 128 * 1024)?.unwrap_or_default();
+    if status.schema != SCHEMA
+        || status
+            .generation
+            .as_deref()
+            .is_some_and(|id| !lifecycle::valid_id(id))
+    {
         return Err(storage());
     }
     Ok(status)
@@ -157,12 +187,8 @@ fn save_status(vault: &Vault, status: &ServiceStatus) -> AppResult<()> {
 }
 /// running 由实际文件租约确认，旧 pid/旧心跳不被当作当前进程。
 pub fn service_status(vault: &Vault) -> AppResult<ServiceStatus> {
-    let mut status = read_status(vault)?;
-    // 读者之间共享探测；只有服务持有的独占租约会使此探测失败。
-    status.running = try_lease(&directory(vault)?.join("service.lock"), true)?.is_none();
-    let stop = directory(vault)?.join("stop.json");
-    reject_symlink(&stop).map_err(|_| storage())?;
-    status.stop_requested = stop.exists();
+    let _guard = lifecycle::lock(vault)?;
+    let mut status = lifecycle::status_locked(vault)?;
     if !status.running {
         status.pid = None;
         status.provider_ready = false;
@@ -178,18 +204,36 @@ pub fn service_status(vault: &Vault) -> AppResult<ServiceStatus> {
     Ok(status)
 }
 
+/// 独立整理路径与服务共用停止代次；调用时可能已持记忆状态锁。
+pub(crate) fn current_stop_requested(vault: &Vault) -> AppResult<bool> {
+    let _guard = lifecycle::lock(vault)?;
+    Ok(lifecycle::status_locked(vault)?.stop_requested)
+}
+
 struct ImportScheduler {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 impl ImportScheduler {
-    fn start(service: ImportService, interval: Duration) -> AppResult<Self> {
+    fn start(
+        service: ImportService,
+        root: &Path,
+        generation: Option<String>,
+        interval: Duration,
+    ) -> AppResult<Self> {
+        let root = root.to_path_buf();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = stop.clone();
         let handle = std::thread::Builder::new()
             .name("recallcard-import-scheduler".into())
             .spawn(move || {
+                let Ok(vault) = Vault::open_existing(&root) else {
+                    return;
+                };
                 while !flag.load(std::sync::atomic::Ordering::Acquire) {
+                    if lifecycle::for_generation(&vault, generation.as_deref()).unwrap_or(true) {
+                        break;
+                    }
                     let _ = service.start_worker();
                     std::thread::sleep(interval.min(Duration::from_millis(500)));
                 }
@@ -212,15 +256,7 @@ impl Drop for ImportScheduler {
 
 /// 调用方须是已授权本机入口。模型读取协议不导出本函数。
 pub fn request_service_stop(vault: &Vault) -> AppResult<()> {
-    vault
-        .write_replace(
-            &directory(vault)?.join("stop.json"),
-            &serde_json::json!({"requested_at":Utc::now()}),
-        )
-        .map_err(|_| storage())?;
-    MemoryRuntime::new(vault).pause()?;
-    ImportService::new(vault)?.pause_all_pending()?;
-    Ok(())
+    lifecycle::request_stop(vault)
 }
 
 /// 服务进程负责保持导入线程存活；记忆 tick 等待网络时导入仍可继续。
@@ -237,17 +273,14 @@ pub fn run_service<P: MemoryProvider + ?Sized>(
             "使用默认服务配置",
         ));
     }
-    let dir = directory(vault)?;
     let until = Instant::now() + SERVICE_STARTUP_TIMEOUT;
-    let _lease = loop {
-        if let Some(lease) = try_lease(&dir.join("service.lock"), false)? {
-            break lease;
+    let (_lease, mut status) = loop {
+        match lifecycle::begin(vault)? {
+            lifecycle::Start::Owned(lease, status) => break (lease, *status),
+            lifecycle::Start::Existing(status) if status.running => return Ok(*status),
+            lifecycle::Start::Existing(_) => {}
         }
-        let existing = service_status(vault)?;
-        if existing.running {
-            return Ok(existing);
-        }
-        // 独占失败而共享探测成功，只代表有状态读者；不能因此退出启动进程。
+        // 独占失败而共享探测成功只表示有状态读者；有界等待后再试。
         if Instant::now() >= until {
             let mut error = AppError::new(
                 ErrorCode::Conflict,
@@ -259,22 +292,6 @@ pub fn run_service<P: MemoryProvider + ?Sized>(
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    let started = Utc::now();
-    let mut status = ServiceStatus {
-        running: true,
-        pid: Some(std::process::id()),
-        started_at: Some(started),
-        heartbeat_at: Some(started),
-        ..Default::default()
-    };
-    // 取得租约后立即清除旧进程身份，再恢复事务、预检 worker 与核验完整 hash。
-    // 空 hash 表示尚在初始化，不能被当成与现有发行物版本不同。
-    save_status(vault, &status)?;
-    let stop = dir.join("stop.json");
-    reject_symlink(&stop).map_err(|_| storage())?;
-    if stop.exists() {
-        fs::remove_file(&stop).map_err(|_| storage())?;
-    }
     let root_identity = file_identity(&open_local_file(vault.root()).map_err(|_| storage())?)
         .map_err(|_| storage())?;
     let marker = file_identity(
@@ -300,6 +317,8 @@ pub fn run_service<P: MemoryProvider + ?Sized>(
     let imports = ImportService::new(vault)?;
     let scheduler = ImportScheduler::start(
         imports.clone(),
+        vault.root(),
+        status.generation.clone(),
         Duration::from_millis(options.poll_interval_ms),
     )?;
     let configuration = MemoryRuntime::new(vault).configuration()?;
@@ -333,7 +352,7 @@ pub fn run_service<P: MemoryProvider + ?Sized>(
             ));
             break;
         }
-        if stop.exists() {
+        if lifecycle::for_generation(vault, status.generation.as_deref())? {
             imports.pause_all_pending()?;
             break;
         }
@@ -371,7 +390,7 @@ pub fn run_service<P: MemoryProvider + ?Sized>(
         std::thread::sleep(Duration::from_millis(options.poll_interval_ms));
     }
     status.running = false;
-    status.stop_requested = stop.exists();
+    status.stop_requested = lifecycle::for_generation(vault, status.generation.as_deref())?;
     status.pid = None;
     status.heartbeat_at = Some(Utc::now());
     save_status(vault, &status)?;
