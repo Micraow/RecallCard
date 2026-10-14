@@ -140,3 +140,16 @@ test('真实附件复制预览优先附件标签，不把上传者角色当正�
   const html=render(item);
   assert.match(html,/附件正文，非用户原话/); assert.doesNotMatch(html,/>用户原话</);
 });
+
+
+test('真实上下文入口说明可选本机和云来源及独立批准，条件提示不冒称当前已外发',async()=>{
+ const bundle=await build({stdin:{contents:`import {createElement} from 'react'; import {renderToStaticMarkup} from 'react-dom/server'; import {PortableContextDialog} from './src/components/PortableContext.tsx'; export const render=service=>renderToStaticMarkup(createElement(PortableContextDialog,{service,initialGoal:'合成问题',close:()=>{}}));`,resolveDir:new URL('..',import.meta.url).pathname,loader:'tsx'},bundle:true,platform:'node',format:'esm',write:false,loader:{'.css':'empty'},define:{'process.env.NODE_ENV':'"production"'},banner:{js:`import {createRequire} from 'node:module'; const require=createRequire(${JSON.stringify(import.meta.url)});`}});
+ const {render}=await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
+ for(const scope of ['personal','project:synthetic']) {
+  let calls=0;
+  const html=render({scope,searchQuestion:()=>{calls++;throw new Error('本合同只渲染条件说明，不执行检索');}});
+  for(const text of ['当前范围明确选择的本机或云来源索引','普通对话、附件与新问题分别独立批准','未配置来源索引时只做本地关键词查找','不会自动回退到云编码','若已选择云提供器并批准新问题','未缓存的问题可能发送到该云接口','是否实际发送以本次检索覆盖为准'])assert.ok(html.includes(text),text);
+  assert.doesNotMatch(html,/问题仅使用.*本机普通对话索引|此入口不会改用云编码|问题已发送|问题已经发送|已按独立云批准编码/);
+  assert.equal(calls,0);
+ }
+});

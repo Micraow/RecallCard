@@ -11,6 +11,25 @@ from connected_context_native import ConnectedJourney, ORIGINAL, UPDATE, ATTACHM
 
 
 class CanonicalEvidenceTest(unittest.TestCase):
+    def test_lexical_coverage_requires_one_complete_rendered_snapshot(self):
+        expected = [
+            "用户原话",
+            "本次没有成功的来源语义检索，本次只在本地按关键词寻找原话和记忆。",
+            "此入口不会改用云编码作自动回退；这不表示未配置独立批准的云提供器。未命中或未覆盖不表示没有相关历史。",
+            "按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。",
+        ]
+        journey = object.__new__(ConnectedJourney)
+        journey.driver = Mock()
+        journey.driver.text.return_value = "\n".join(expected)
+        self.assertTrue(journey.lexical_coverage_visible())
+        journey.driver.text.assert_called_once_with("body")
+        for missing in range(len(expected)):
+            journey.driver.text.return_value = "\n".join(value for i, value in enumerate(expected) if i != missing)
+            with self.subTest(missing=missing):
+                self.assertFalse(journey.lexical_coverage_visible())
+        journey.driver.click.assert_not_called()
+        journey.driver.command.assert_not_called()
+
     def test_stale_source_selection_relocates_only_the_same_read_only_row(self):
         journey = object.__new__(ConnectedJourney)
         journey.driver = Mock()

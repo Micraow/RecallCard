@@ -22,6 +22,19 @@ ATTACHMENT_TEXT = ATTACHMENT_QUERY + "\n合成独立附件正文🙂。内容只
 
 
 class ConnectedJourney(FirstUseJourney):
+    def lexical_coverage_visible(self):
+        """一次实际渲染快照必须同时说明候选、词法路径和无自动云回退。"""
+        text = self.driver.text("body")
+        if not isinstance(text, str):
+            return False
+        expected = (
+            "用户原话",
+            "本次没有成功的来源语义检索，本次只在本地按关键词寻找原话和记忆。",
+            "此入口不会改用云编码作自动回退；这不表示未配置独立批准的云提供器。未命中或未覆盖不表示没有相关历史。",
+            "按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。",
+        )
+        return all(value in text for value in expected)
+
     def select_source_message(self, selector):
         """Retry only a stale read-only source-row selection, never a mutation."""
         assert selector.startswith(".source-message[data-reference='event:") and selector.endswith("']")
@@ -498,10 +511,8 @@ class ConnectedJourney(FirstUseJourney):
         # 平台无关闭环：真实 React → Tauri → 正本 → 系统剪贴板；无外部网站或模型。
         browser.type("#recall-question", "周四回访何时安排")
         browser.button("准备这次对话")
-        wait_for(lambda: self.content("用户原话")
-                 and self.content("尚未配置普通对话本机索引，本次只在本地按关键词寻找原话和记忆。")
-                 and self.content("此入口不会改用云编码；未命中或未覆盖不表示没有相关历史。"),
-                 "首页问题实际检索并明确未配置索引、关键词路径与无云回退")
+        wait_for(self.lexical_coverage_visible,
+                 "首页问题实际检索并完整说明词法路径、候选限制与无自动云回退")
         browser.button("预览将复制的内容", "//dialog")
         wait_for(lambda: bool(browser.observe("return document.querySelector('#portable-preview')?.value")), "问题A已有完整预览")
         assert len(self.events()) == 4 and not self.memories()
