@@ -1,0 +1,50 @@
+name: 合成查询改写诊断
+on:
+  workflow_dispatch:
+  push:
+    branches: ["recovery/native-20261011"]
+    paths:
+      - 'scripts/query_diagnostics/**'
+      - 'crates/recallcard/tests/fixtures/short-question/**'
+      - 'docs/query-normalization-diagnostics.md'
+      - 'crates/recallcard/src/context.rs'
+      - 'crates/recallcard/src/context/search.rs'
+      - '.github/workflows/query-diagnostics.yml'
+  pull_request:
+    paths:
+      - 'scripts/query_diagnostics/**'
+      - 'crates/recallcard/tests/fixtures/short-question/**'
+      - 'crates/recallcard/src/context.rs'
+      - 'crates/recallcard/src/context/search.rs'
+      - '.github/workflows/query-diagnostics.yml'
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 真实排名核与方法合同
+        run: |
+          rustfmt --edition 2021 --check scripts/query_diagnostics/rank_io.rs
+          python3 -m unittest discover -s scripts/query_diagnostics -p 'test_*.py' -v
+      - name: 冻结候选与独立留出集复现
+        run: |
+          PYTHONHASHSEED=1 python3 scripts/query_diagnostics/evaluate.py --out /tmp/recall-query-first
+          PYTHONHASHSEED=2 python3 scripts/query_diagnostics/evaluate.py --out /tmp/recall-query-second
+          cmp /tmp/recall-query-first/results.json /tmp/recall-query-second/results.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-query-diagnostics-${{ github.sha }}
+          path: |
+            /tmp/recall-query-first/summary.json
+            /tmp/recall-query-first/results.json
+          if-no-files-found: error
+          retention-days: 7

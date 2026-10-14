@@ -1,0 +1,1221 @@
+{
+  "schema_version": "recall-query-holdout-v1",
+  "dataset_id": "synthetic-independent-query-holdout-20261014",
+  "description": "原创合成中文检索盲测集。未读取现有评测语料、查询或候选实现；全部人物、项目和记录均为虚构。",
+  "evaluation_contract": {
+    "expected_sources": "所有能够直接回答该查询、位于visible_scopes内且revoked为false的来源。仅同对象、同标题或同词不算相关。expected_sources为空时，应弃答且不得引用来源。",
+    "scope_rule": "每条query的visible_scopes是完整可见范围；未列出的scope不可检索或引用。scope_positive_control与对应scope_negative使用相同问题，仅改变可见范围。",
+    "revocation_rule": "revoked为true的来源始终不可返回，包括用户询问旧内容时。",
+    "role_rule": "event.role标明实际发言角色。attachment.role为null，附件正文不可伪装为用户原话或用户已作决定；助手未被确认的建议也不可视为用户决定。",
+    "metadata_rule": "title、filename均是可检索字段；event没有filename，attachment没有对话role。字段事实可以回答明确的文件查找问题。",
+    "multi_source_rule": "expected_sources包含多个元素表示这些来源各自独立足以回答，而非必须拼接；相关性评估应把列出的任一来源视为相关，完整召回另行计算。",
+    "normalization_rule": "全角兼容字符和外围空白可规范化，但不得把不同编号、版本、路径、否定对象或消息角色合并。",
+    "temporal_rule": "本数据是静态快照；更正均在单条原文内明确，不要求推断没有给出的时间先后。",
+    "privacy_rule": "仅合成数据，不含用户私人资料、真实凭据或生产资料。"
+  },
+  "sources": [
+    {
+      "source_id": "EVT-01",
+      "kind": "event",
+      "scope": "workshop",
+      "revoked": false,
+      "role": "user",
+      "title": "河湾摄影课通知",
+      "filename": null,
+      "text": "更正一下，河湾摄影课这周六改为上午9:20在文化馆东门碰头。先前写的9:00和南门都不算了。费用仍是每人80元，器材借用另外登记。"
+    },
+    {
+      "source_id": "ATT-02",
+      "kind": "attachment",
+      "scope": "workshop",
+      "revoked": false,
+      "role": null,
+      "title": "河湾摄影课通知",
+      "filename": "河湾摄影课_流程_v2.txt",
+      "text": "河湾摄影课流程：室内静物拍摄60分钟，户外练习45分钟，最后点评15分钟。器材箱从文化馆北门送入。此表只列教学环节，没有学员集合信息，也未列授课老师姓名。"
+    },
+    {
+      "source_id": "ATT-03",
+      "kind": "attachment",
+      "scope": "workshop",
+      "revoked": false,
+      "role": null,
+      "title": "摄影器材借用单",
+      "filename": "河湾摄影课_器材单_v2.csv",
+      "text": "河湾摄影课借用记录。L-208：三脚架，柜位B-08，周三17:00前归还。L-280：灯架，柜位B-80，周四18:30前归还。两项的借用编号、柜位和归还时间不能互换。"
+    },
+    {
+      "source_id": "EVT-04",
+      "kind": "event",
+      "scope": "workshop",
+      "revoked": false,
+      "role": "assistant",
+      "title": "河湾摄影课建议",
+      "filename": null,
+      "text": "如果明年再办河湾摄影课，我建议在文化馆南门9:00集合，方便器材车。L-208三脚架还可以加装脚垫。这些只是我给下一届的建议，用户尚未确认下一届的地点和时间。"
+    },
+    {
+      "source_id": "EVT-05",
+      "kind": "event",
+      "scope": "release",
+      "revoked": false,
+      "role": "user",
+      "title": "青禾数据包交付",
+      "filename": null,
+      "text": "青禾本次交付固定用2.4.1，不是2.4.10。2.3的候选方案已作废。演示样例不要混进交付包；样例输入仍放在lab/A07/samples，正式输入在lab/A70/input。"
+    },
+    {
+      "source_id": "ATT-06",
+      "kind": "attachment",
+      "scope": "release",
+      "revoked": false,
+      "role": null,
+      "title": "青禾数据包交付",
+      "filename": "qinghe-2.4.10-notes.txt",
+      "text": "青禾2.4.10试验包记录：缓存上限为512项，新增分段导出。本试验包不用于本次交付。2.4.1仅列在兼容检查清单里，本记录没有写2.4.1的缓存上限。"
+    },
+    {
+      "source_id": "ATT-07",
+      "kind": "attachment",
+      "scope": "release",
+      "revoked": false,
+      "role": null,
+      "title": "部署小抄",
+      "filename": "qinghe-2.4.1-install.txt",
+      "text": "青禾2.4.1安装步骤：先校验压缩包摘要，通过后再解压。配置清单的完整路径为/srv/qinghe/releases/2.4.1/index.json。目录名是复数releases；/srv/qinghe/release/2.4.1/index.json不是本包使用的位置。"
+    },
+    {
+      "source_id": "EVT-08",
+      "kind": "event",
+      "scope": "release",
+      "revoked": false,
+      "role": "assistant",
+      "title": "青禾数据包排障",
+      "filename": null,
+      "text": "关于青禾2.4.1，我建议将来把回滚备份保留3份，便于检查，不是要求现在立即改配置。用户还没有确认这项建议。这个排障讨论没有记录交付验收人。"
+    },
+    {
+      "source_id": "EVT-09",
+      "kind": "event",
+      "scope": "travel",
+      "revoked": false,
+      "role": "user",
+      "title": "云杉营地周末行程",
+      "filename": null,
+      "text": "10月24日去云杉营地的交通改成坐62路公交，不是26路，在西站下车。取消自驾，也不用去北站接车。具体哪一班车还没定。"
+    },
+    {
+      "source_id": "ATT-10",
+      "kind": "attachment",
+      "scope": "travel",
+      "revoked": false,
+      "role": null,
+      "title": "云杉营地周末行程",
+      "filename": "云杉营地_活动安排_1024.pdf",
+      "text": "10月24日云杉营地活动安排。晴天在露台做烘焙；下雨则把烘焙移到玻璃棚，活动照常进行。其他项目到场后安排。这份活动表未写公交发车时间或集合时刻。"
+    },
+    {
+      "source_id": "ATT-11",
+      "kind": "attachment",
+      "scope": "travel",
+      "revoked": false,
+      "role": null,
+      "title": "云杉营地订位回执",
+      "filename": "booking-C7106.pdf",
+      "text": "订位号C-7106：10月24日19:10，6人，东区长桌。C-7160属于另一张订单，不适用本回执的日期、人数和座位。本回执未写取消截止时间。"
+    },
+    {
+      "source_id": "EVT-12",
+      "kind": "event",
+      "scope": "travel",
+      "revoked": false,
+      "role": "user",
+      "title": "云杉营地安排",
+      "filename": null,
+      "text": "云杉营地另一单C-7160是10月25日，4人，19:40到南区。别拿C-7106的六人长桌回执套在这张单上，两笔预订都保留。"
+    },
+    {
+      "source_id": "EVT-13",
+      "kind": "event",
+      "scope": "home",
+      "revoked": false,
+      "role": "user",
+      "title": "海盐烤箱退货",
+      "filename": null,
+      "text": "海盐K20这次我选退货退款，不再换同款。店家答应承担退货运费。退货单R-019还没有寄出，别把“已建退货单”记成“已寄出”。仓库名称看退货凭证。"
+    },
+    {
+      "source_id": "ATT-14",
+      "kind": "attachment",
+      "scope": "home",
+      "revoked": false,
+      "role": null,
+      "title": "海盐烤箱退货",
+      "filename": "return-R019.pdf",
+      "text": "退货凭证：R-019对应海盐K20，收件仓名称为西河仓。对照旧单：R-091对应海盐K02，收件仓名称为北河仓。两张单号的末三位顺序不同，仓库不可通用。"
+    },
+    {
+      "source_id": "ATT-15",
+      "kind": "attachment",
+      "scope": "home",
+      "revoked": false,
+      "role": null,
+      "title": "海盐烤箱使用说明",
+      "filename": "K02-guide.pdf",
+      "text": "本说明书适用于海盐K02。标准预热需要12分钟，烤盘放第二层。K20只出现在配件兼容型号一栏，未给出K20的预热时长，也没有任何退货状态。"
+    },
+    {
+      "source_id": "EVT-16",
+      "kind": "event",
+      "scope": "home",
+      "revoked": false,
+      "role": "assistant",
+      "title": "海盐烤箱购买建议",
+      "filename": null,
+      "text": "比较海盐K02与K20后，我建议买K20，颜色可以选黑色，比较耐看。这是我的购买建议；没有收到用户选择黑色或其他颜色的确认。"
+    },
+    {
+      "source_id": "EVT-17",
+      "kind": "event",
+      "scope": "archive",
+      "revoked": false,
+      "role": "user",
+      "title": "橙盒照片备份",
+      "filename": null,
+      "text": "橙盒这次照片导出要PNG，不用JPEG。本次只备份收藏夹，不备份整个图库。清理后保留的原始照片目录是/exports/originals，名字末尾有s，别动它。"
+    },
+    {
+      "source_id": "ATT-18",
+      "kind": "attachment",
+      "scope": "archive",
+      "revoked": false,
+      "role": null,
+      "title": "橙盒照片备份",
+      "filename": "orangebox-export-v4.txt",
+      "text": "橙盒导出手册v4：可以选择PNG或JPEG。希望保留透明背景时应选PNG。此手册介绍软件能力，不规定用户这次备份的格式与范围，也没有记录压缩包大小。"
+    },
+    {
+      "source_id": "ATT-19",
+      "kind": "attachment",
+      "scope": "archive",
+      "revoked": false,
+      "role": null,
+      "title": "橙盒清理记录",
+      "filename": "orangebox-cleanup-20261012.csv",
+      "text": "橙盒清理记录：保留 /exports/originals，原始照片；删除 /exports/original，试导出副本。上述两个目录不同。回收站里的项目可在30日内恢复。"
+    },
+    {
+      "source_id": "EVT-20",
+      "kind": "event",
+      "scope": "archive",
+      "revoked": false,
+      "role": "user",
+      "title": "橙盒归档备注",
+      "filename": null,
+      "text": "橙盒最终压缩包我定名为相册备份_A-17.zip，不是相册备份_A-71.zip。另附一个说明文件。这里尚未记录压缩包的大小和最终打包日期。"
+    },
+    {
+      "source_id": "EVT-21",
+      "kind": "event",
+      "scope": "private-plan",
+      "revoked": false,
+      "role": "user",
+      "title": "青禾数据包交付",
+      "filename": null,
+      "text": "仅内部计划可见的青禾交付备注：验收人是岑工，代号为雨燕。不要据公开排障讨论猜验收人。这里没有记录本次交付的版本号。"
+    },
+    {
+      "source_id": "ATT-22",
+      "kind": "attachment",
+      "scope": "private-plan",
+      "revoked": false,
+      "role": null,
+      "title": "云杉营地周末行程",
+      "filename": "云杉_内部订位补充.csv",
+      "text": "云杉营地内部订位补充：C-7106的免费取消截止为10月22日18:00；该信息只在内部计划范围可见。此表不涉及C-7160。"
+    },
+    {
+      "source_id": "EVT-23",
+      "kind": "event",
+      "scope": "workshop",
+      "revoked": true,
+      "role": "user",
+      "title": "河湾摄影课通知",
+      "filename": null,
+      "text": "河湾摄影课通知：寄物牌使用紫色，备用雨棚编号P-307。遇到阵雨时按编号找雨棚。"
+    },
+    {
+      "source_id": "ATT-24",
+      "kind": "attachment",
+      "scope": "archive",
+      "revoked": true,
+      "role": null,
+      "title": "橙盒照片备份",
+      "filename": "orangebox-old-offline-v1.txt",
+      "text": "橙盒离线副本说明v1：离线副本保留11天；迁移目标为/vault/orangebox-old。迁移后按相册名称分目录。"
+    }
+  ],
+  "queries": [
+    {
+      "id": "Q01",
+      "query": "这周六河湾那堂拍照课，大家在哪儿碰面？",
+      "intent": "where",
+      "category": "natural_paraphrase",
+      "expected_sources": [
+        "EVT-01"
+      ],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "用户更正直接给出现行集合地点；流程和下一届建议均不能替代。",
+      "tags": [
+        "same_object_distractors"
+      ],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q02",
+      "query": "摄影课改完后到底几点报到？",
+      "intent": "when",
+      "category": "negation_correction",
+      "expected_sources": [
+        "EVT-01"
+      ],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "更正信息明确排除了旧时间，并给出新时间。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q03",
+      "query": "这周六河湾摄影课还是南门九点集合吗？",
+      "intent": "verify",
+      "category": "negation_correction",
+      "expected_sources": [
+        "EVT-01"
+      ],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "能据用户更正回答否定并给出现行安排；下一届建议不是本次安排。",
+      "tags": [
+        "role_disambiguation"
+      ],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q04",
+      "query": "河湾摄影课拍静物那一段要持续多久？",
+      "intent": "duration",
+      "category": "synonym",
+      "expected_sources": [
+        "ATT-02"
+      ],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "附件流程中的室内静物环节给出了具体时长。",
+      "tags": [
+        "same_title_distractor"
+      ],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q05",
+      "query": "河湾摄影课的授课老师叫什么？",
+      "intent": "who",
+      "category": "same_title_no_answer",
+      "expected_sources": [],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "同标题通知和流程都没有老师姓名，不能凭课程名称补全。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q06",
+      "query": "借用号 L-208 的东西放在几号柜？",
+      "intent": "where",
+      "category": "identifier_precision",
+      "expected_sources": [
+        "ATT-03"
+      ],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "借用单把该编号映射到其专属柜位，近邻编号的柜位不同。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q07",
+      "query": "L-280 最晚什么时候还回去？",
+      "intent": "deadline",
+      "category": "identifier_precision",
+      "expected_sources": [
+        "ATT-03"
+      ],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "借用单明确给出灯架对应编号的归还期限。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q08",
+      "query": "我问的是 L-208，不是 L-280，它要哪天归还？",
+      "intent": "deadline",
+      "category": "negation_correction",
+      "expected_sources": [
+        "ATT-03"
+      ],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "查询显式更正目标编号，借用单可以逐项区分。",
+      "tags": [
+        "identifier_precision"
+      ],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q09",
+      "query": "你给下一届河湾摄影课提的集合建议是什么？",
+      "intent": "assistant_suggestion",
+      "category": "role_provenance",
+      "expected_sources": [
+        "EVT-04"
+      ],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "只有助手消息提出了下一届建议；现行用户安排不回答该归因。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q10",
+      "query": "我最终确定的明年摄影课集合地点在哪里？",
+      "intent": "user_decision",
+      "category": "role_no_answer",
+      "expected_sources": [],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "现有南门说法仅是助手未获确认的下一届建议。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q11",
+      "query": "青禾这批最终该交哪个版本？",
+      "intent": "decision",
+      "category": "natural_paraphrase",
+      "expected_sources": [
+        "EVT-05"
+      ],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "用户明确锁定本次交付版本，并排除容易混淆的近邻版本。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q12",
+      "query": "青禾 ２．４．１ 安装时先做哪一步？",
+      "intent": "procedure",
+      "category": "unicode_normalization",
+      "expected_sources": [
+        "ATT-07"
+      ],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "全角版本写法指向同一安装版本，安装步骤给出首步。",
+      "tags": [
+        "version_precision"
+      ],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q13",
+      "query": "青禾 2.4.1 的配置清单存在哪个完整路径？",
+      "intent": "where",
+      "category": "path_precision",
+      "expected_sources": [
+        "ATT-07"
+      ],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "安装附件明确写出完整清单路径，包含复数目录名。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q14",
+      "query": "青禾的清单在 /srv/qinghe/release/2.4.1/index.json，对吗？",
+      "intent": "verify",
+      "category": "path_precision",
+      "expected_sources": [
+        "ATT-07"
+      ],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "附件直接否定该单数目录路径，并提供正确位置。",
+      "tags": [
+        "negation_correction"
+      ],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q15",
+      "query": "解开青禾安装包之前，要先核对什么？",
+      "intent": "procedure",
+      "category": "synonym",
+      "expected_sources": [
+        "ATT-07"
+      ],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "安装步骤要求解压前校验摘要，表达不同但操作顺序明确。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q16",
+      "query": "青禾 2.4.10 试验包最多缓存多少项？",
+      "intent": "quantity",
+      "category": "version_precision",
+      "expected_sources": [
+        "ATT-06"
+      ],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "试验包说明给出该精确版本的缓存上限。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q17",
+      "query": "青禾 2.4.1 最多缓存多少项？",
+      "intent": "quantity",
+      "category": "neighbor_version_no_answer",
+      "expected_sources": [],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "缓存数只针对2.4.10，不能转用到相邻的交付版本。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q18",
+      "query": "你曾建议青禾留几份回滚备份？",
+      "intent": "assistant_suggestion",
+      "category": "role_provenance",
+      "expected_sources": [
+        "EVT-08"
+      ],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "助手消息明确包含建议数量，问的是建议而非已执行配置。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q19",
+      "query": "我已经决定青禾保留几份回滚备份？",
+      "intent": "user_decision",
+      "category": "role_no_answer",
+      "expected_sources": [],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "只有助手未获确认的建议，没有用户决定或生效配置。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q20",
+      "query": "青禾本次交付由谁验收？",
+      "intent": "who",
+      "category": "scope_negative",
+      "expected_sources": [],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "可见交付与排障消息没有验收人；答案仅在不可见内部范围。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q21",
+      "query": "青禾本次交付由谁验收？",
+      "intent": "who",
+      "category": "scope_positive_control",
+      "expected_sources": [
+        "EVT-21"
+      ],
+      "visible_scopes": [
+        "release",
+        "private-plan"
+      ],
+      "rationale": "在额外开放内部计划后，用户备注直接提供验收人。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q22",
+      "query": "青禾内部验收人的代号是什么？",
+      "intent": "identity",
+      "category": "scope_negative",
+      "expected_sources": [],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "代号只存在于不可见内部备注，关键词匹配也不得泄漏。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q23",
+      "query": "去云杉营地现在应搭哪路公共汽车？",
+      "intent": "transport",
+      "category": "synonym",
+      "expected_sources": [
+        "EVT-09"
+      ],
+      "visible_scopes": [
+        "travel"
+      ],
+      "rationale": "用户交通更正给出了公交线路，公共汽车与公交同义。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q24",
+      "query": "云杉是坐26路到北站吗，还是后来改了？",
+      "intent": "verify",
+      "category": "negation_correction",
+      "expected_sources": [
+        "EVT-09"
+      ],
+      "visible_scopes": [
+        "travel"
+      ],
+      "rationale": "用户明确否定旧线路和站点，记录了新的交通安排。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q25",
+      "query": "云杉这趟最后决定自己开车还是坐公交？",
+      "intent": "decision",
+      "category": "natural_paraphrase",
+      "expected_sources": [
+        "EVT-09"
+      ],
+      "visible_scopes": [
+        "travel"
+      ],
+      "rationale": "用户取消自驾并选定公交，足以回答出行方式的选择。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q26",
+      "query": "云杉活动遇上下雨，烘焙挪到哪里？",
+      "intent": "where",
+      "category": "synonym",
+      "expected_sources": [
+        "ATT-10"
+      ],
+      "visible_scopes": [
+        "travel"
+      ],
+      "rationale": "活动安排直接给出雨天替代场地。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q27",
+      "query": "云杉的烘焙活动会因为下雨取消吗？",
+      "intent": "verify",
+      "category": "negation_correction",
+      "expected_sources": [
+        "ATT-10"
+      ],
+      "visible_scopes": [
+        "travel"
+      ],
+      "rationale": "附件明确说雨天转移场地且照常进行。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q28",
+      "query": "C-7106 这笔云杉预订是几个人？",
+      "intent": "quantity",
+      "category": "identifier_precision",
+      "expected_sources": [
+        "ATT-11"
+      ],
+      "visible_scopes": [
+        "travel"
+      ],
+      "rationale": "该订单回执明确对应人数，不可借用另一笔预订。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q29",
+      "query": "C-7160 约了多少人？",
+      "intent": "quantity",
+      "category": "identifier_precision",
+      "expected_sources": [
+        "EVT-12"
+      ],
+      "visible_scopes": [
+        "travel"
+      ],
+      "rationale": "用户单独说明该近邻订单人数，另一回执不适用。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q30",
+      "query": "我要查 C-7106，不是 C-7160，约的是几点？",
+      "intent": "when",
+      "category": "negation_correction",
+      "expected_sources": [
+        "ATT-11"
+      ],
+      "visible_scopes": [
+        "travel"
+      ],
+      "rationale": "查询排除了近邻编号，回执可回答指定订单时刻。",
+      "tags": [
+        "identifier_precision"
+      ],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q31",
+      "query": "云杉 C-7160 的位置在东区还是南区？",
+      "intent": "where",
+      "category": "identifier_precision",
+      "expected_sources": [
+        "EVT-12"
+      ],
+      "visible_scopes": [
+        "travel"
+      ],
+      "rationale": "对应用户安排指定了该订单区域；东区属于另一笔。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q32",
+      "query": "云杉行程那班公交具体几点发车？",
+      "intent": "when",
+      "category": "same_title_no_answer",
+      "expected_sources": [],
+      "visible_scopes": [
+        "travel"
+      ],
+      "rationale": "交通消息未选班次，同标题活动安排也不提供发车时间。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q33",
+      "query": "云杉 C-7106 最迟何时能免费取消？",
+      "intent": "deadline",
+      "category": "scope_negative",
+      "expected_sources": [],
+      "visible_scopes": [
+        "travel"
+      ],
+      "rationale": "可见回执没有截止时间；答案只在不可见内部附件中。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q34",
+      "query": "云杉 C-7106 最迟何时能免费取消？",
+      "intent": "deadline",
+      "category": "scope_positive_control",
+      "expected_sources": [
+        "ATT-22"
+      ],
+      "visible_scopes": [
+        "travel",
+        "private-plan"
+      ],
+      "rationale": "开放内部计划后，补充附件提供指定订单的免费取消期限。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q35",
+      "query": "海盐烤箱退回去的快递费谁出？",
+      "intent": "responsibility",
+      "category": "synonym",
+      "expected_sources": [
+        "EVT-13"
+      ],
+      "visible_scopes": [
+        "home"
+      ],
+      "rationale": "用户消息记录店家承担退货运费，快递费指同一费用。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q36",
+      "query": "海盐 K20 我最后选换货还是拿回退款？",
+      "intent": "user_decision",
+      "category": "natural_paraphrase",
+      "expected_sources": [
+        "EVT-13"
+      ],
+      "visible_scopes": [
+        "home"
+      ],
+      "rationale": "用户明确选择退货退款并排除换同款。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q37",
+      "query": "R-019 已经寄回去了吧？",
+      "intent": "status",
+      "category": "negation_correction",
+      "expected_sources": [
+        "EVT-13"
+      ],
+      "visible_scopes": [
+        "home"
+      ],
+      "rationale": "用户明确说明尚未寄出，建单不等于发货。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q38",
+      "query": "R-019 的烤箱该退到哪个仓？",
+      "intent": "where",
+      "category": "identifier_precision",
+      "expected_sources": [
+        "ATT-14"
+      ],
+      "visible_scopes": [
+        "home"
+      ],
+      "rationale": "凭证把该退货单号和指定收件仓关联。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q39",
+      "query": "R-091 那张旧退货单对应哪个收件仓？",
+      "intent": "where",
+      "category": "identifier_precision",
+      "expected_sources": [
+        "ATT-14"
+      ],
+      "visible_scopes": [
+        "home"
+      ],
+      "rationale": "同一凭证的旧单对照条目提供不同仓库，数字换位不可忽略。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q40",
+      "query": "K02-guide.pdf 里说预热要等多久？",
+      "intent": "duration",
+      "category": "filename_field",
+      "expected_sources": [
+        "ATT-15"
+      ],
+      "visible_scopes": [
+        "home"
+      ],
+      "rationale": "文件名指定的说明书正文提供该型号预热时长。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q41",
+      "query": "海盐 K20 的标准预热时间是多少？",
+      "intent": "duration",
+      "category": "neighbor_model_no_answer",
+      "expected_sources": [],
+      "visible_scopes": [
+        "home"
+      ],
+      "rationale": "可见预热时长仅适用于K02，不能因K20出现在兼容表而套用。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q42",
+      "query": "你当时推荐海盐烤箱买什么颜色？",
+      "intent": "assistant_suggestion",
+      "category": "role_provenance",
+      "expected_sources": [
+        "EVT-16"
+      ],
+      "visible_scopes": [
+        "home"
+      ],
+      "rationale": "助手建议明确给出颜色，未要求把它视为用户选择。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q43",
+      "query": "我最终给海盐烤箱选了什么颜色？",
+      "intent": "user_decision",
+      "category": "role_no_answer",
+      "expected_sources": [],
+      "visible_scopes": [
+        "home"
+      ],
+      "rationale": "只有助手颜色建议，没有用户最终颜色决定。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q44",
+      "query": "橙盒照片这回要存成哪种图片格式？",
+      "intent": "user_decision",
+      "category": "natural_paraphrase",
+      "expected_sources": [
+        "EVT-17"
+      ],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "用户指定本次导出格式；通用手册介绍选项不等于本次选择。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q45",
+      "query": "橙盒这次是全部图库都导出成 JPEG 吗？",
+      "intent": "verify",
+      "category": "negation_correction",
+      "expected_sources": [
+        "EVT-17"
+      ],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "用户同时排除了JPEG和整个图库，可以纠正查询两处前提。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q46",
+      "query": "用橙盒导图，想让背景保持透明该选哪种格式？",
+      "intent": "procedure",
+      "category": "synonym",
+      "expected_sources": [
+        "ATT-18"
+      ],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "通用手册明确说明透明背景对应的导出格式。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q47",
+      "query": "橙盒清理以后，原始照片留在哪个目录？",
+      "intent": "where",
+      "category": "multi_source_answer",
+      "expected_sources": [
+        "EVT-17",
+        "ATT-19"
+      ],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "用户决定和清理记录均明确给出同一个保留目录，都直接回答问题。",
+      "tags": [
+        "path_precision"
+      ],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q48",
+      "query": "橙盒的 /exports/original 这个目录处理掉了吗？",
+      "intent": "status",
+      "category": "path_precision",
+      "expected_sources": [
+        "ATT-19"
+      ],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "清理记录精确标明无末尾s的目录已删除；保留路径是另一个目录。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q49",
+      "query": "请找一下：橙盒 /exports/originals ，是保留还是删除？",
+      "intent": "status",
+      "category": "punctuation_normalization",
+      "expected_sources": [
+        "EVT-17",
+        "ATT-19"
+      ],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "空格和句读不改变含末尾s的路径，用户消息和记录均说明保留。",
+      "tags": [
+        "path_precision",
+        "multi_source_answer"
+      ],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q50",
+      "query": "橙盒最后的包名是 A-17 还是 A-71 那个？",
+      "intent": "identity",
+      "category": "identifier_precision",
+      "expected_sources": [
+        "EVT-20"
+      ],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "用户明确确定文件名并排除数字倒序的近邻名称。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q51",
+      "query": "相册备份＿Ａ－１７．ｚｉｐ 是我定的最终文件名吗？",
+      "intent": "verify",
+      "category": "unicode_normalization",
+      "expected_sources": [
+        "EVT-20"
+      ],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "全角字母、数字与符号规范化后对应用户明确选定的文件名。",
+      "tags": [
+        "identifier_precision"
+      ],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q52",
+      "query": "橙盒最终压缩包有多少 MB？",
+      "intent": "quantity",
+      "category": "same_title_no_answer",
+      "expected_sources": [],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "相关用户备注与同标题导出手册都未记录成品大小。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q53",
+      "query": "河湾摄影课的寄物牌是什么颜色？",
+      "intent": "identity",
+      "category": "revoked_negative",
+      "expected_sources": [],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "唯一颜色信息来自已撤销消息；现行来源不能回答。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q54",
+      "query": "旧通知里河湾摄影课的备用雨棚编号是什么？",
+      "intent": "identity",
+      "category": "revoked_negative",
+      "expected_sources": [],
+      "visible_scopes": [
+        "workshop"
+      ],
+      "rationale": "即使查询主动提旧通知，已撤销来源仍不属于可返回证据。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q55",
+      "query": "橙盒离线副本保留多少天？",
+      "intent": "duration",
+      "category": "revoked_negative",
+      "expected_sources": [],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "离线副本保留期限仅存在于已撤销旧附件，回收站期限不是同一概念。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q56",
+      "query": "橙盒旧离线副本要迁移到哪个路径？",
+      "intent": "where",
+      "category": "revoked_negative",
+      "expected_sources": [],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "旧迁移路径仅在撤销附件中，现行可见来源没有确认。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q57",
+      "query": "L-208 要什么时候归还？",
+      "intent": "deadline",
+      "category": "scope_negative",
+      "expected_sources": [],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "借用单位于摄影课范围，不在此次查询可见的交付范围内。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q58",
+      "query": "K02-guide.pdf 的预热时长是多少？",
+      "intent": "duration",
+      "category": "scope_negative",
+      "expected_sources": [],
+      "visible_scopes": [
+        "archive"
+      ],
+      "rationale": "指定文件只属于家居范围，当前归档范围不可见。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q59",
+      "query": "",
+      "intent": "empty",
+      "category": "empty_input",
+      "expected_sources": [],
+      "visible_scopes": [
+        "workshop",
+        "release",
+        "travel",
+        "home",
+        "archive"
+      ],
+      "rationale": "空串没有检索意图，不应返回来源。",
+      "tags": [],
+      "lexical_intent": "exact"
+    },
+    {
+      "id": "Q60",
+      "query": "？！……——（）【】",
+      "intent": "empty",
+      "category": "punctuation_only",
+      "expected_sources": [],
+      "visible_scopes": [
+        "workshop",
+        "release",
+        "travel",
+        "home",
+        "archive"
+      ],
+      "rationale": "纯中文标点不构成实体、问题或可回答内容。",
+      "tags": [],
+      "lexical_intent": "exact"
+    },
+    {
+      "id": "Q61",
+      "query": "\t \n　",
+      "intent": "empty",
+      "category": "whitespace_only",
+      "expected_sources": [],
+      "visible_scopes": [
+        "workshop",
+        "release",
+        "travel",
+        "home",
+        "archive"
+      ],
+      "rationale": "制表、换行、空格和全角空格都不是有效查询。",
+      "tags": [],
+      "lexical_intent": "exact"
+    },
+    {
+      "id": "Q62",
+      "query": "---__///...:::()[]{}",
+      "intent": "empty",
+      "category": "punctuation_only",
+      "expected_sources": [],
+      "visible_scopes": [
+        "workshop",
+        "release",
+        "travel",
+        "home",
+        "archive"
+      ],
+      "rationale": "符号串不应因路径和文件名包含相同符号而命中。",
+      "tags": [],
+      "lexical_intent": "exact"
+    },
+    {
+      "id": "Q63",
+      "query": "帮我找一下",
+      "intent": "unspecified",
+      "category": "intent_only_no_answer",
+      "expected_sources": [],
+      "visible_scopes": [
+        "workshop",
+        "release",
+        "travel",
+        "home",
+        "archive"
+      ],
+      "rationale": "只有检索请求语气，没有待找对象或事实，无法指定相关来源。",
+      "tags": [],
+      "lexical_intent": "question"
+    },
+    {
+      "id": "Q64",
+      "query": "青禾 2.4.1 的安装文件叫什么名字？",
+      "intent": "document_lookup",
+      "category": "filename_field",
+      "expected_sources": [
+        "ATT-07"
+      ],
+      "visible_scopes": [
+        "release"
+      ],
+      "rationale": "版本和安装内容定位附件，其filename字段提供名称，不能用其他版本的说明文件替代。",
+      "tags": [],
+      "lexical_intent": "question"
+    }
+  ]
+}
