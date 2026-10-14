@@ -11,6 +11,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
 };
+mod attachment_sources;
 mod evidence;
 mod lexical_context;
 pub(crate) mod ranking;
@@ -32,6 +33,9 @@ pub struct Setup {
     #[serde(default)]
     pub document_instruction: String,
     pub events_approved: bool,
+    /// 附件原件编码必须单独批准，旧配置绝不继承普通对话批准。
+    #[serde(default)]
+    pub attachments_approved: bool,
     pub query_approved: bool,
     pub chunk_bytes: usize,
     pub disk_cap_mib: usize,
@@ -46,7 +50,7 @@ impl Setup {
             query_instruction: self.query_instruction.clone(),
             document_instruction: self.document_instruction.clone(),
             query_approved: self.query_approved,
-            memory_approved: self.events_approved,
+            memory_approved: self.events_approved || self.attachments_approved,
             resume_background: false,
         };
         target
@@ -142,7 +146,7 @@ impl<'a> LocalEvents<'a> {
         std::fs::create_dir_all(&dir).map_err(|_| "local_event_config_unavailable")?;
         let worker_config = dir.join("worker.json");
         let worker = json!({"schema":"recallcard.local-event-config/1","database":dir.join("index.sqlite"),"scope":scope,
-            "space":space,"events_approved":settings.events_approved,"query_approved":settings.query_approved,
+            "space":space,"events_approved":settings.events_approved,"attachments_approved":settings.attachments_approved,"query_approved":settings.query_approved,
             "disk_cap_bytes":settings.disk_cap_mib*1024*1024,"backend":"python"});
         let config = Config {
             schema: "recallcard.local-event-host/1".into(),
@@ -165,7 +169,10 @@ impl<'a> LocalEvents<'a> {
             return Ok(None);
         }
         let config: Config = read_bounded(&path, 65536)?;
-        if !config.settings.events_approved && !config.settings.query_approved {
+        if !config.settings.events_approved
+            && !config.settings.attachments_approved
+            && !config.settings.query_approved
+        {
             return Ok(None);
         }
         config.settings.validate()?;
@@ -194,11 +201,13 @@ impl<'a> LocalEvents<'a> {
             let _guard = vault.lock()?;
             let mut cfg: Config = read_bounded(&path, 65536)?;
             cfg.settings.events_approved = false;
+            cfg.settings.attachments_approved = false;
             cfg.settings.query_approved = false;
             // 保存明确停用态，不删除原话或派生索引；open 会明确拒绝无范围配置。
             vault.write_replace(&path, &cfg)?;
             let mut worker: Value = read_bounded(&cfg.worker_config, 65536)?;
             worker["events_approved"] = json!(false);
+            worker["attachments_approved"] = json!(false);
             worker["query_approved"] = json!(false);
             vault.write_replace(&cfg.worker_config, &worker)?;
         }
@@ -212,9 +221,13 @@ impl<'a> LocalEvents<'a> {
             return Err("local_event_configuration_changed".into());
         }
         let expected = json!({"schema":"recallcard.local-event-config/1","database":self.dir()?.join("index.sqlite"),"scope":self.config.scope,
-            "space":self.config.settings.space(),"events_approved":self.config.settings.events_approved,"query_approved":self.config.settings.query_approved,
+            "space":self.config.settings.space(),"events_approved":self.config.settings.events_approved,"attachments_approved":self.config.settings.attachments_approved,"query_approved":self.config.settings.query_approved,
             "disk_cap_bytes":self.config.settings.disk_cap_mib*1024*1024,"backend":"python"});
-        let actual: Value = read_bounded(&self.config.worker_config, 65536)?;
+        let mut actual: Value = read_bounded(&self.config.worker_config, 65536)?;
+        // 兼容旧 worker 配置，但缺失字段只等于 false。
+        if actual.get("attachments_approved").is_none() {
+            actual["attachments_approved"] = json!(false);
+        }
         if actual != expected {
             return Err("local_event_configuration_changed".into());
         }
@@ -234,17 +247,17 @@ impl<'a> LocalEvents<'a> {
         status["index_state"] = status["state"].clone();
         let _guard = self.vault.read_guard()?;
         if status["source_epoch"].is_string()
-            && status["source_epoch"] != snapshot::inventory(self.vault)?.0
+            && status["source_epoch"] != snapshot::source_inventory(self)?.0
         {
             status["index_state"] = json!("stale");
         }
         status["state"] = json!("configured");
         status["message"] =
-            json!("仅本机普通对话向量索引；服务配置不代表索引已覆盖或模型质量已核验");
+            json!("仅本机明确批准的普通对话或附件索引；配置不代表索引已覆盖或模型质量已核验");
         Ok(status)
     }
     pub fn refresh_step(&self) -> Result<Value> {
-        if !self.config.settings.events_approved {
+        if !self.config.settings.events_approved && !self.config.settings.attachments_approved {
             return Err("local_event_corpus_not_approved".into());
         }
         self.current()?;
@@ -273,17 +286,19 @@ impl<'a> LocalEvents<'a> {
         }
         if progress.source_pos < manifest.sources.len() {
             let source = &manifest.sources[progress.source_pos];
-            let event = {
+            let (event, text) = {
                 let _guard = self.vault.read_guard()?;
                 self.current()?;
-                if snapshot::inventory(self.vault)?.0 != manifest.epoch
-                    || !snapshot::verified_sources(self, &manifest.epoch)?.contains(&source.id)
+                if snapshot::source_inventory(self)?.0 != manifest.epoch
+                    || !snapshot::verified_sources(self, &manifest.epoch)?
+                        .contains(&source.reference())
                 {
                     return Err("local_event_source_not_current".into());
                 }
-                snapshot::read_source(self.vault, &manifest, source)?
+                let event = snapshot::read_source(self.vault, &manifest, source)?;
+                let text = source.text(self.vault, &event)?;
+                (event, text)
             };
-            let text = event.data.text();
             let ranges = snapshot::ranges(&text, self.config.settings.chunk_bytes);
             if source.chunks != ranges.len() {
                 return Err("local_event_source_changed".into());
@@ -312,8 +327,8 @@ impl<'a> LocalEvents<'a> {
                 &self.config,
                 json!({"op":"upsert","build_id":build_id,
                 "batch_id":format!("{}:{}",progress.source_pos,progress.chunk_pos),"source":{
-                    "ref":format!("event:{}",event.id),"content_hash":hash(text.as_bytes()),"text_bytes":text.len(),
-                    "scope":event.data.scope,"role":event.data.role,"session_ref":event.data.session_key(),"occurred_at":event.data.occurred_at},
+                    "ref":source.reference(),"content_hash":hash(text.as_bytes()),"text_bytes":text.len(),
+                    "scope":event.data.scope,"role":if source.object.is_some(){Value::Null}else{json!(event.data.role)},"session_ref":event.data.session_key(),"occurred_at":event.data.occurred_at},
                 "source_chunk_count":ranges.len(),"chunks":chunks}),
             )?;
             receipt = result["receipt"].clone();
@@ -329,7 +344,7 @@ impl<'a> LocalEvents<'a> {
         }
         let _guard = self.vault.read_guard()?;
         self.current()?;
-        if snapshot::inventory(self.vault)?.0 != manifest.epoch {
+        if snapshot::source_inventory(self)?.0 != manifest.epoch {
             return Err("local_event_source_epoch_changed".into());
         }
         self.vault
@@ -358,17 +373,14 @@ impl<'a> LocalEvents<'a> {
     }
     pub(crate) fn verify_binding(&self, epoch: &str, config: &str) -> Result<()> {
         self.current()?;
-        if config != self.config_hash || snapshot::inventory(self.vault)?.0 != epoch {
+        if config != self.config_hash || snapshot::source_inventory(self)?.0 != epoch {
             return Err("local_event_source_or_configuration_stale".into());
         }
         Ok(())
     }
     pub(crate) fn verify_source(&self, epoch: &str, config: &str, reference: &str) -> Result<()> {
         self.verify_binding(epoch, config)?;
-        let id = reference
-            .strip_prefix("event:")
-            .ok_or("local_event_reference_invalid")?;
-        if !snapshot::verified_sources(self, epoch)?.contains(id) {
+        if !snapshot::verified_sources(self, epoch)?.contains(reference) {
             return Err("local_event_source_not_current".into());
         }
         Ok(())
@@ -389,7 +401,7 @@ impl<'a> LocalEvents<'a> {
         let manifest: Manifest = read_bounded(&self.dir()?.join("manifest.json"), MAX_JSON)?;
         {
             let _guard = self.vault.read_guard()?;
-            if snapshot::inventory(self.vault)?.0 != manifest.epoch {
+            if snapshot::source_inventory(self)?.0 != manifest.epoch {
                 return Err("local_event_index_stale_refresh_required".into());
             }
         }
@@ -409,7 +421,7 @@ impl<'a> LocalEvents<'a> {
         )?;
         let _guard = self.vault.read_guard()?;
         self.current()?;
-        if snapshot::inventory(self.vault)?.0 != manifest.epoch {
+        if snapshot::source_inventory(self)?.0 != manifest.epoch {
             return Err("local_event_source_epoch_changed".into());
         }
         if candidates["source_epoch"] != manifest.epoch
@@ -423,11 +435,8 @@ impl<'a> LocalEvents<'a> {
             return Err("local_event_response_invalid".into());
         }
         let current_sources = snapshot::verified_sources(self, &manifest.epoch)?;
-        let manifest_ids: BTreeSet<_> = manifest.sources.iter().map(|s| s.id.clone()).collect();
-        let source_refs: Vec<_> = current_sources
-            .iter()
-            .map(|id| format!("event:{id}"))
-            .collect();
+        let manifest_ids: BTreeSet<_> = manifest.sources.iter().map(|s| s.reference()).collect();
+        let source_refs: Vec<_> = current_sources.iter().collect();
         if candidates["source_set_hash"]
             != hash(&serde_json::to_vec(&source_refs).map_err(|_| "local_event_response_invalid")?)
             || status["chunk_count"] != json!(manifest.chunk_count()?)
@@ -470,20 +479,16 @@ impl<'a> LocalEvents<'a> {
             if !seen.insert(reference.to_owned()) {
                 continue;
             }
-            let Some(source) = manifest
-                .sources
-                .iter()
-                .find(|s| format!("event:{}", s.id) == reference)
-            else {
+            let Some(source) = manifest.sources.iter().find(|s| s.reference() == reference) else {
                 rejected += 1;
                 continue;
             };
-            if !current_sources.contains(&source.id) {
+            if !current_sources.contains(&source.reference()) {
                 rejected += 1;
                 continue;
             }
             let event = snapshot::read_source(self.vault, &manifest, source)?;
-            let text = event.data.text();
+            let text = source.text(self.vault, &event)?;
             source_bytes = source_bytes.saturating_add(text.len());
             let start = row["start_byte"]
                 .as_u64()
@@ -517,13 +522,13 @@ impl<'a> LocalEvents<'a> {
                 ranking::separate_boundary(text[..excerpt_start].chars().next_back()),
                 ranking::separate_boundary(text[excerpt_end..].chars().next()),
             );
-            let value = json!({"ref":reference,"kind":"event","scope":event.data.scope,"role":event.data.role,
-                "snapshot":crate::model::record_snapshot(&event)?,"content_hash":hash(text.as_bytes()),
+            let value = json!({"ref":reference,"kind":if source.object.is_some(){"attachment"}else{"event"},"scope":event.data.scope,"role":if source.object.is_some(){Value::Null}else{json!(event.data.role)},
+                "snapshot":source.snapshot(&event)?,"content_hash":hash(text.as_bytes()),
                 "text_hash":hash(snippet.as_bytes()),"matched_chunk":{"start_byte":start,"end_byte":end,"text_hash":row["text_sha256"]},
-                "text":snippet,"text_range":{"start_byte":excerpt_start,"end_byte":excerpt_end,"total_bytes":text.len(),"projection":"event.text"},"text_truncated":excerpt_start!=0||excerpt_end!=text.len(),
+                "text":snippet,"text_range":{"start_byte":excerpt_start,"end_byte":excerpt_end,"total_bytes":text.len(),"projection":if source.object.is_some(){crate::context::attachments::PROJECTION}else{"event.text"}},"text_truncated":excerpt_start!=0||excerpt_end!=text.len(),
                 "score":score,"score_kind":if lexical_only{"unavailable"}else{"cosine"},"semantic_rank":retrieval.semantic_rank,"retrieval":retrieval.metadata,
                 "retrieval_support":{"kind":if support.complete{"protected_anchor_match"}else if retrieval.lexical_range.is_some(){"lexical_candidate"}else{"semantic_candidate"},"match_scope":"returned_excerpt","case_policy":"protected_case_sensitive_ascii_support_case_insensitive","protected":support.complete,"protected_anchors":support.protected_anchors,"matched_protected_anchors":support.matched_protected_anchors,"ascii_terms":support.ascii_terms,"matched_ascii_terms":support.matched_ascii_terms,"limited":support.limited},
-                "relevance":"unassessed","state":"captured","evidence":format!("{:?}/{:?}",event.data.role,event.data.origin),"evidence_refs":[reference],
+                "relevance":"unassessed","state":"captured","evidence":if source.object.is_some(){"Attachment/Content".to_owned()}else{format!("{:?}/{:?}",event.data.role,event.data.origin)},"evidence_refs":[if source.object.is_some(){format!("event:{}",event.id)}else{reference.to_owned()}],
                 "session_ref":event.data.session_key(),"occurred_at":event.data.occurred_at,"time_note":if event.data.occurred_at.is_none(){"发生时间未知；捕获时间不代表发生时间"}else{""}});
             verified_bytes += serde_json::to_vec(&value)
                 .map_err(|_| "local_event_response_invalid")?
@@ -547,12 +552,15 @@ impl<'a> LocalEvents<'a> {
             bytes += size;
             results.push(value);
         }
+        let mut attachment_coverage = snapshot::attachment_coverage(self, &manifest.epoch)?;
+        attachment_coverage["semantic"] =
+            json!(self.config.settings.attachments_approved && !lexical_only);
         Ok(
             json!({"query":query,"results":results,"match_count":results.len(),"status":if lexical_only{if results.is_empty(){"unavailable"}else{"partial"}}else if results.is_empty(){"no_verified_candidates"}else{"ok"},
             "truncated":rows.len()>results.len()||rejected>0||verification_limited||candidates["coverage"]["candidates_truncated"]==true||candidates["coverage"]["lexical"]["candidates_truncated"]==true,"coverage":{"event_search":if lexical_only{"local_lexical_fallback"}else{"local_semantic"},"semantic_search":if lexical_only{"unavailable"}else{"local_event_index"},
-            "local_event_semantic":!lexical_only,"semantic":candidates["coverage"]["semantic"],"semantic_query_encoding":candidates["coverage"]["query_encoding"],"event_index_generation":generation,
+            "local_event_semantic":!lexical_only,"attachments":attachment_coverage,"semantic":candidates["coverage"]["semantic"],"semantic_query_encoding":candidates["coverage"]["query_encoding"],"event_index_generation":generation,
             "event_index_snapshot":manifest.epoch,"local_config_identity":self.config_hash,"source_verification":"current_event_hash_and_utf8_range","rejected_candidates":rejected,
-            "partial":lexical_only||rejected>0||verification_limited,"candidate_policy":"verified_excerpt_anchors_then_channel_order/v2","lexical":candidates["coverage"]["lexical"],"fusion":candidates["coverage"]["fusion"],"verified_candidates":scanned,"candidate_window_limit":100,"candidate_reordering_enabled":reorder,"candidate_verification_limited":verification_limited,"candidate_text_bytes":source_bytes,"chunk_selection":candidates["coverage"]["chunk_selection"],"note":if lexical_only{"本机编码服务不可用；仅返回有界词法候选，语义路线未执行。无命中不代表没有相关历史。"}else{"本机向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}}),
+            "partial":lexical_only||rejected>0||verification_limited||attachment_coverage["status"]=="partial","candidate_policy":"verified_excerpt_anchors_then_channel_order/v2","lexical":candidates["coverage"]["lexical"],"fusion":candidates["coverage"]["fusion"],"verified_candidates":scanned,"candidate_window_limit":100,"candidate_reordering_enabled":reorder,"candidate_verification_limited":verification_limited,"candidate_text_bytes":source_bytes,"chunk_selection":candidates["coverage"]["chunk_selection"],"note":if lexical_only{"本机编码服务不可用；仅返回有界词法候选，语义路线未执行。无命中不代表没有相关历史。"}else{"本机向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}}),
         )
     }
 }

@@ -77,9 +77,6 @@ impl Locator {
             }
         } else if reference.starts_with("attachment:") {
             attachments::parse(reference)?;
-            if p[5] != "-" {
-                return Err("附件定位符无效".into());
-            }
         } else if let Some(id) = reference.strip_prefix("memory:") {
             let (id, revision) = id.split_once('@').ok_or("记忆定位符缺少版本")?;
             validate_id(id, "mem_")?;
@@ -107,6 +104,7 @@ impl Locator {
 }
 fn merge_candidates(groups: &[Vec<Value>]) -> Vec<Value> {
     let mut rows = vec![];
+    let mut seen = BTreeSet::new();
     // Never compare cosine across scopes/models. Preserve order within tiers.
     for protected in [true, false] {
         for i in 0..20 {
@@ -116,7 +114,12 @@ fn merge_candidates(groups: &[Vec<Value>]) -> Vec<Value> {
                     .filter(|row| (row["retrieval_support"]["protected"] == true) == protected)
                     .nth(i)
                 {
-                    if rows.len() < LIMIT {
+                    let key = (
+                        row["scope"].clone().to_string(),
+                        row["ref"].clone().to_string(),
+                        row["snapshot"].clone().to_string(),
+                    );
+                    if rows.len() < LIMIT && seen.insert(key) {
                         let mut row = row.clone();
                         row["final_rank"] = json!(rows.len() + 1);
                         rows.push(row);
@@ -151,6 +154,7 @@ impl Context<'_> {
         let mut coverage = vec![];
         let mut partial = false;
         let mut semantic_available = false;
+        let mut attachment_semantic_available = false;
         let mut budget_limited = false;
         let mut memory_status = json!("not_requested");
         let mut attachment_status = json!({"status":"not_requested"});
@@ -212,7 +216,9 @@ impl Context<'_> {
                         }
                         partial |= page["truncated"] == true || page["coverage"]["partial"] == true;
                         semantic_available |= page["coverage"]["local_event_semantic"] == true;
-                        coverage.push(json!({"scope":scope,"state":if page["coverage"]["fusion"]=="lexical_only"{"degraded"}else{"ready"},"semantic":page["coverage"]["semantic"],"candidates":rows.len(),"truncated":page["truncated"],"query_encoding":page["coverage"]["semantic_query_encoding"],"candidate_policy":page["coverage"]["candidate_policy"],"verified_candidates":page["coverage"]["verified_candidates"],"verification_limited":page["coverage"]["candidate_verification_limited"],"lexical":page["coverage"]["lexical"],"fusion":page["coverage"]["fusion"]}));
+                        attachment_semantic_available |=
+                            page["coverage"]["attachments"]["semantic"] == true;
+                        coverage.push(json!({"scope":scope,"state":if page["coverage"]["fusion"]=="lexical_only"{"degraded"}else{"ready"},"semantic":page["coverage"]["semantic"],"candidates":rows.len(),"truncated":page["truncated"],"query_encoding":page["coverage"]["semantic_query_encoding"],"candidate_policy":page["coverage"]["candidate_policy"],"verified_candidates":page["coverage"]["verified_candidates"],"verification_limited":page["coverage"]["candidate_verification_limited"],"lexical":page["coverage"]["lexical"],"fusion":page["coverage"]["fusion"],"attachments":page["coverage"]["attachments"]}));
                         bindings.push((index, epoch, config));
                         groups.push(rows);
                     }
@@ -307,7 +313,19 @@ impl Context<'_> {
             }
             groups.push(rows);
         }
-        let candidate_count: usize = groups.iter().map(Vec::len).sum();
+        attachment_status["semantic"] = json!(attachment_semantic_available);
+        let candidate_count = groups
+            .iter()
+            .flatten()
+            .map(|r| {
+                (
+                    r["scope"].to_string(),
+                    r["ref"].to_string(),
+                    r["snapshot"].to_string(),
+                )
+            })
+            .collect::<BTreeSet<_>>()
+            .len();
         let rows = merge_candidates(&groups);
         partial |= rows.len() < candidate_count;
         let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"attachments":attachment_status,"budget_limited":budget_limited,"local_event_semantic":semantic_available,"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"protected_excerpt_tiers_then_stable_round_robin_not_cross_model_score","note":"候选不是答案；未配置或未覆盖不表示没有历史。精确锚点只在有界候选预览中核对，语义相近也可能完全无关；尚无经过校准的相关性或可回答性判定。旧search仍可显式进行关键词检索。"}});
@@ -342,7 +360,8 @@ impl Context<'_> {
             return Err("资料范围已变化，请重新检索".into());
         }
         let _guard = self.vault.read_guard()?;
-        if crate::local_events::source_epoch(self.vault)? != locator.epoch {
+        if locator.config == "-" && crate::local_events::source_epoch(self.vault)? != locator.epoch
+        {
             return Err("资料来源已变化，请重新检索".into());
         }
         if locator.config != "-" {

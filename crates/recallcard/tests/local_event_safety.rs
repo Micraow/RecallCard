@@ -68,6 +68,7 @@ fn configure<'a>(vault: &'a Vault, endpoint: String) -> LocalEvents<'a> {
             query_instruction: String::new(),
             document_instruction: String::new(),
             events_approved: true,
+            attachments_approved: false,
             query_approved: true,
             chunk_bytes: 256,
             disk_cap_mib: 16,
@@ -316,4 +317,187 @@ main=real.main
         before,
         "撤权后不能开始任何新的embedding POST"
     );
+}
+
+fn attachment_source(
+    vault: &Vault,
+    message: &str,
+    body: &[u8],
+    scope: &str,
+    origin: &str,
+) -> recallcard::Event {
+    let object = hash(body);
+    fs::write(vault.root().join("objects").join(&object), body).unwrap();
+    vault
+        .capture(
+            serde_json::from_value(json!({
+                "scope":scope,"role":"user","origin":origin,
+                "content":format!("PARENT_TEXT_{message}"),
+                "source":{"platform":"synthetic","conversation_id":"attachment-transmission-safety","message_id":message},
+                "metadata":{"source_assets":{"files":[{
+                    "name":"synthetic.txt","payload_status":"retained",
+                    "detected_media_type":"application/octet-stream","declared_media_type":"text/plain",
+                    "object_sha256":object,"byte_count":body.len()
+                }]}}
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn independent_attachment_consent_and_canonical_filters_precede_provider_transmission() {
+    let _serial = SERIAL.lock().unwrap();
+    for attachments_only in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp
+            .path()
+            .join("synthetic-attachment-provider-inputs.jsonl");
+        let (_server, endpoint) = server(&log);
+        let vault = Vault::init(&temp.path().join("vault")).unwrap();
+        event(&vault, "personal", "ORDINARY_EVENT_ONLY_731");
+        attachment_source(
+            &vault,
+            "allowed",
+            b"synthetic-alpha ATTACHMENT_BODY_ALLOWED_731",
+            "personal",
+            "user_input",
+        );
+        attachment_source(
+            &vault,
+            "foreign",
+            b"ATTACHMENT_BODY_FOREIGN_731",
+            "project:hidden",
+            "user_input",
+        );
+        let revised = attachment_source(
+            &vault,
+            "revised",
+            b"ATTACHMENT_BODY_REVISED_731",
+            "personal",
+            "user_input",
+        );
+        let mut replacement = revised.data.clone();
+        replacement.content = "PARENT_TEXT_current_revision".into();
+        replacement.metadata = json!({});
+        replacement.revision_of = Some(revised.id);
+        vault.capture(replacement).unwrap();
+        let suppressed = attachment_source(
+            &vault,
+            "suppressed",
+            b"ATTACHMENT_BODY_SUPPRESSED_731",
+            "personal",
+            "user_input",
+        );
+        vault
+            .suppress(&suppressed.id, "合成附件传输撤回".into())
+            .unwrap();
+        for (message, origin) in [
+            ("injection", "context_injection"),
+            ("dream", "recallcard_dream_job"),
+        ] {
+            attachment_source(
+                &vault,
+                message,
+                format!("ATTACHMENT_BODY_{message}_731").as_bytes(),
+                "personal",
+                origin,
+            );
+        }
+        let part_parent = attachment_source(
+            &vault,
+            "part_injection_original",
+            b"ATTACHMENT_BODY_PART_INJECTION_731",
+            "personal",
+            "user_input",
+        );
+        let mut part_injection = part_parent.data.clone();
+        part_injection.revision_of = Some(part_parent.id);
+        part_injection.content = "PARENT_TEXT_part_injection".into();
+        part_injection.parts = serde_json::from_value(json!([{
+            "text":"PARENT_TEXT_injected_part","origin":"context_injection"
+        }]))
+        .unwrap();
+        vault.capture(part_injection).unwrap();
+        for (message, body) in [
+            (
+                "invalid_utf8",
+                b"ATTACHMENT_BODY_INVALID_UTF8_731\xff".as_slice(),
+            ),
+            ("pdf", b"%PDF-1.7 ATTACHMENT_BODY_PDF_731".as_slice()),
+            ("nul", b"ATTACHMENT_BODY_NUL_731\0".as_slice()),
+        ] {
+            attachment_source(&vault, message, body, "personal", "user_input");
+        }
+        #[cfg(unix)]
+        {
+            let bytes = b"ATTACHMENT_BODY_SYMLINK_731";
+            let symlink = attachment_source(&vault, "symlink", bytes, "personal", "user_input");
+            let object = symlink.data.metadata["source_assets"]["files"][0]["object_sha256"]
+                .as_str()
+                .unwrap();
+            let path = vault.root().join("objects").join(object);
+            fs::remove_file(&path).unwrap();
+            let outside = temp.path().join("synthetic-outside-object");
+            fs::write(&outside, bytes).unwrap();
+            std::os::unix::fs::symlink(outside, path).unwrap();
+        }
+        let index = LocalEvents::configure(
+            &vault,
+            "personal",
+            Setup {
+                endpoint,
+                model: "synthetic-contract".into(),
+                revision: "attachment-safety-fixture-v1".into(),
+                tokenizer: "synthetic-no-tokenizer".into(),
+                dimensions: 2,
+                query_instruction: String::new(),
+                document_instruction: String::new(),
+                events_approved: !attachments_only,
+                attachments_approved: attachments_only,
+                query_approved: false,
+                chunk_bytes: 256,
+                disk_cap_mib: 16,
+            },
+            "python3".into(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../python")
+                .canonicalize()
+                .unwrap(),
+        )
+        .unwrap();
+        refresh(&index);
+        // 只检查实际 HTTP input，不靠返回候选推断正文从未发给提供器。
+        let posted = fs::read_to_string(&log).unwrap();
+        if attachments_only {
+            assert!(posted.contains("ATTACHMENT_BODY_ALLOWED_731"), "{posted}");
+            assert!(!posted.contains("PARENT_TEXT_"), "{posted}");
+            assert!(!posted.contains("ORDINARY_EVENT_ONLY_731"), "{posted}");
+        } else {
+            assert!(posted.contains("ORDINARY_EVENT_ONLY_731"), "{posted}");
+            assert!(posted.contains("PARENT_TEXT_allowed"), "{posted}");
+            assert!(!posted.contains("ATTACHMENT_BODY_"), "{posted}");
+        }
+        for forbidden in [
+            "ATTACHMENT_BODY_FOREIGN_731",
+            "ATTACHMENT_BODY_REVISED_731",
+            "ATTACHMENT_BODY_SUPPRESSED_731",
+            "ATTACHMENT_BODY_injection_731",
+            "ATTACHMENT_BODY_dream_731",
+            "ATTACHMENT_BODY_PART_INJECTION_731",
+            "ATTACHMENT_BODY_INVALID_UTF8_731",
+            "ATTACHMENT_BODY_PDF_731",
+            "ATTACHMENT_BODY_NUL_731",
+            "ATTACHMENT_BODY_SYMLINK_731",
+            "PARENT_TEXT_foreign",
+            "PARENT_TEXT_revised",
+            "PARENT_TEXT_suppressed",
+            "PARENT_TEXT_injection",
+            "PARENT_TEXT_dream",
+            "PARENT_TEXT_part_injection",
+            "PARENT_TEXT_injected_part",
+        ] {
+            assert!(!posted.contains(forbidden), "{forbidden}: {posted}");
+        }
+    }
 }

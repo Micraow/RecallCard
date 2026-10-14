@@ -201,8 +201,14 @@ export interface SearchRow {
   };
 }
 export interface EventLexicalCoverage {status?:string;version?:string|null;reason?:string;candidates_truncated?:boolean;query_terms?:number;postings_scanned?:number;query_terms_visited?:number;}
+/** 顶层计数来自词法扫描，semantic 可合并各范围成功标记；scope 内为附件索引来源覆盖。计数不代表批准或语义成功。 */
+export interface AttachmentCoverage {
+  status?:string; projection?:string; mode?:string; semantic?:boolean;
+  files_examined?:number; documents?:number; skipped?:number; limited?:boolean; bytes_examined?:number;
+  file_bytes_limit?:number; total_bytes_limit?:number; file_limit?:number;
+}
 export interface SearchPage {
-  coverage?: {attachments?:{status?:string;limited?:boolean;skipped?:number;semantic?:boolean};event_search?: string; cloud_fallback?: boolean; scopes?: {scope:string;state:string;query_encoding?:string;verification_limited?:boolean;lexical?:EventLexicalCoverage;fusion?:string;semantic?:{status?:string;reason?:string|null}}[]; lexical?:EventLexicalCoverage; fusion?:string; candidate_verification_limited?:boolean; local_event_semantic?: boolean; memory_search?: string; chunk_selection?: string; semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string; semantic_coverage?: string; lexical_matching?: string; lexical_match?: string};
+  coverage?: {attachments?:AttachmentCoverage;event_search?: string; cloud_fallback?: boolean; scopes?: {scope:string;state:string;query_encoding?:string;verification_limited?:boolean;attachments?:AttachmentCoverage;lexical?:EventLexicalCoverage;fusion?:string;semantic?:{status?:string;reason?:string|null}}[]; lexical?:EventLexicalCoverage; fusion?:string; candidate_verification_limited?:boolean; local_event_semantic?: boolean; memory_search?: string; chunk_selection?: string; semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string; semantic_coverage?: string; lexical_matching?: string; lexical_match?: string};
   results: SearchRow[];
   truncated?: boolean;
 }

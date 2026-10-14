@@ -45,6 +45,7 @@ fn body_only_keyword_reaches_normal_search_shared_search_fetch_and_sources() {
         .unwrap();
         assert_eq!(page["results"][0]["ref"], reference(&e), "{page}");
         assert_eq!(page["results"][0]["kind"], "attachment");
+        assert_eq!(page["results"][0].get("role"), Some(&Value::Null));
         assert_eq!(
             page["results"][0]["text_range"]["projection"],
             "attachment.utf8/1"

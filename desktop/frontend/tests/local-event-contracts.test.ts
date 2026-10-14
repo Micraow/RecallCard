@@ -1,11 +1,38 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {validLocalEventSettings,recallCoverageNotes,type LocalEventSetup} from '../src/service/setup.ts';
-const settings:LocalEventSetup={endpoint:'http://127.0.0.1:46123/v1/embeddings',model:'synthetic',revision:'fake-v1',tokenizer:'test-only',dimensions:2,query_instruction:'',document_instruction:'',events_approved:false,query_approved:false,chunk_bytes:1024,disk_cap_mib:256};
+import {validLocalEventSettings,normalizeLocalEventSettings,validCloudSemanticSettings,recallCoverageNotes,type LocalEventSetup} from '../src/service/setup.ts';
+const settings:LocalEventSetup={endpoint:'http://127.0.0.1:46123/v1/embeddings',model:'synthetic',revision:'fake-v1',tokenizer:'test-only',dimensions:2,query_instruction:'',document_instruction:'',events_approved:false,attachments_approved:false,query_approved:false,chunk_bytes:1024,disk_cap_mib:256};
 test('普通对话本机索引需独立明确范围和版本，拒绝云、凭据地址与越界预算',()=>{
  assert.equal(validLocalEventSettings(settings),false);
  const approved={...settings,events_approved:true};assert.equal(validLocalEventSettings(approved),true);
  for(const change of [{endpoint:'https://example.invalid/v1/embeddings'},{endpoint:'http://localhost:1234/v1/embeddings'},{endpoint:'http://key@127.0.0.1:1234/v1/embeddings'},{tokenizer:''},{revision:''},{chunk_bytes:255},{disk_cap_mib:513}])assert.equal(validLocalEventSettings({...approved,...change}),false);
+});
+test('附件授权默认关闭，与普通对话和新问题独立且不扩展云批准',()=>{
+ assert.equal(settings.attachments_approved,false);
+ for(const field of ['events_approved','attachments_approved','query_approved'] as const) {
+  const approved={...settings,[field]:true};
+  assert.equal(validLocalEventSettings(approved),true);
+  assert.equal(Object.values({events:approved.events_approved,attachments:approved.attachments_approved,query:approved.query_approved}).filter(Boolean).length,1);
+ }
+ const attachmentsOnly={...settings,attachments_approved:true};
+ for(const change of [{endpoint:'https://example.invalid/v1/embeddings'},{endpoint:'http://localhost:1234/v1/embeddings'},{endpoint:'http://127.0.0.1:0/v1/embeddings'},{endpoint:'http://127.0.0.1:65536/v1/embeddings'},{endpoint:'http://127.0.0.1:1234/v1/embeddings?scope=all'},{dimensions:0},{dimensions:8193},{dimensions:1.5},{tokenizer:''},{revision:''},{chunk_bytes:255},{disk_cap_mib:513}])assert.equal(validLocalEventSettings({...attachmentsOnly,...change}),false);
+ assert.equal(validLocalEventSettings({...attachmentsOnly,endpoint:'http://[::1]:46123/v1/embeddings'}),true);
+ const cloud={endpoint:'https://example.invalid/v1/embeddings',model:'synthetic',revision:'fake-v1',dimensions:2,query_instruction:'',document_instruction:'',query_approved:false,memory_approved:false,max_calls_per_month:5,max_bytes_per_month:1024,attachments_approved:true};
+ assert.equal(validCloudSemanticSettings(cloud),false);
+});
+test('旧状态不继承附件授权，显式false和显式true保持独立',()=>{
+ const {attachments_approved:_,...legacy}=settings;
+ for(const events_approved of [false,true])for(const query_approved of [false,true]) {
+  const old={...legacy,events_approved,query_approved};
+  const normalized=normalizeLocalEventSettings(old);
+  assert.equal(normalized.attachments_approved,false);
+  assert.equal(normalized.events_approved,events_approved);
+  assert.equal(normalized.query_approved,query_approved);
+  assert.equal(Object.hasOwn(old,'attachments_approved'),false);
+  assert.equal(normalizeLocalEventSettings({...old,attachments_approved:false}).attachments_approved,false);
+  assert.equal(normalizeLocalEventSettings({...old,attachments_approved:true}).attachments_approved,true);
+ }
+ assert.equal(normalizeLocalEventSettings({...settings,attachments_approved:'true' as unknown as boolean}).attachments_approved,false);
 });
 test('本机Event覆盖不再误报只有Memory语义，也不把片段候选当完整答案',()=>{
  const notes=recallCoverageNotes({results:[],truncated:true,coverage:{local_event_semantic:true,semantic_query_encoding:'local',chunk_selection:'per_event_best_chunk'}}).join('\n');
@@ -72,4 +99,68 @@ test('附件不完整覆盖区分扫描上限和不可读原件，不承诺换�
   const notes=recallCoverageNotes({results:[],truncated:true,coverage:{...extra,attachments:{status:'partial',limited:true,skipped:2,semantic:false}}}).join('\n');
   for(const text of ['UTF-8','PDF','OCR','换关键词不会解除','原件缺失','未命中不能当作附件内容不存在'])assert.ok(notes.includes(text),text+': '+notes);
  }
+});
+
+
+test('附件语义覆盖只根据实际成功标记声明，空命中不冒充没有运行',()=>{
+ const notes=recallCoverageNotes({results:[],coverage:{local_event_semantic:true,attachments:{semantic:true}}}).join('\n');
+ for(const text of ['至少一个独立批准范围','附件正文已参与本机语义检索','安全 UTF-8','不含 PDF 提取或 OCR','独立来源，不当作上传者原话','父事件须在当前范围可见、未撤回且未被修订替换'])assert.ok(notes.includes(text),text);
+ assert.doesNotMatch(notes,/未使用附件语义向量|不含附件语义向量|附件正文仅在本机按词法/);
+ for(const semantic of [false,undefined]) {
+  const lexical=recallCoverageNotes({results:[{ref:'attachment:synthetic',kind:'attachment',text:'合成附件'}],coverage:{local_event_semantic:true,attachments:{semantic}}}).join('\n');
+  assert.match(lexical,/本次附件正文仅在本机按词法/);
+  assert.match(lexical,/未使用附件语义向量/);
+  assert.doesNotMatch(lexical,/附件正文已参与本机语义检索/);
+ }
+});
+test('附件语义成功不掩盖词法扫描上限与跳过原件，也不宣称全部范围覆盖',()=>{
+ const notes=recallCoverageNotes({results:[],coverage:{local_event_semantic:true,attachments:{semantic:true,status:'partial',limited:true,skipped:2}}}).join('\n');
+ for(const text of ['至少一个独立批准范围','换关键词不会解除','原件缺失','未命中不能当作附件内容不存在'])assert.ok(notes.includes(text),text);
+ assert.doesNotMatch(notes,/全部附件.*已.*检索|未使用附件语义向量/);
+});
+
+
+test('附件-only成功不冒称普通对话已批准，旧普通对话成功文案保留',()=>{
+ const notes=recallCoverageNotes({results:[],coverage:{local_event_semantic:true,attachments:{semantic:true},lexical:{status:'available'}}}).join('\n');
+ assert.match(notes,/本次独立批准的资料已参与本机语义检索/);
+ assert.match(notes,/每项资料展示一处来源已核验/);
+ assert.match(notes,/已批准资料的词法索引已独立/);
+ assert.doesNotMatch(notes,/普通对话已直接参与|普通对话词法索引已独立|每条原话展示/);
+ const old=recallCoverageNotes({results:[],coverage:{local_event_semantic:true,lexical:{status:'available'}}}).join('\n');
+ assert.match(old,/普通对话已直接参与本机语义检索/);
+ assert.match(old,/普通对话词法索引已独立寻找完整编号和汉字词组候选，并结合语义排序/);
+});
+
+
+test('scope附件索引覆盖不能被顶部完整词法扫描覆盖掩盖',()=>{
+ for(const attachment of [{status:'partial'},{status:'ready',limited:true},{status:'ready',skipped:1}]) {
+  const notes=recallCoverageNotes({results:[],coverage:{local_event_semantic:true,attachments:{status:'ready',semantic:true,limited:false,skipped:0},scopes:[{scope:'project:approved',state:'ready',attachments:{...attachment,semantic:true,mode:'bounded_local_semantic_index',projection:'attachment.safe_utf8/v1',files_examined:2,documents:1,bytes_examined:64}}]}}).join('\n');
+  assert.match(notes,/附件语义索引来源覆盖不完整/);
+  assert.match(notes,/至少一个独立批准范围/);
+  assert.match(notes,/不能据此推断其他范围已获批准或全部覆盖/);
+  if('limited' in attachment)assert.match(notes,/换关键词不会解除这项来源检查上限/);
+  if('skipped' in attachment)assert.match(notes,/未进入语义索引/);
+ }
+});
+test('仅scope的部分附件覆盖也显示，编码降级不冒称附件语义成功',()=>{
+ for(const extra of [{},{cloud_fallback:false},{local_event_semantic:true},{fusion:'lexical_only'}]) {
+  const notes=recallCoverageNotes({results:[],truncated:true,coverage:{...extra,scopes:[{scope:'project:approved',state:'degraded',attachments:{status:'partial',semantic:false,limited:true,skipped:1}}]}}).join('\n');
+  for(const text of ['附件语义索引来源覆盖不完整','来源检查达到文件数量或总字节上限','未进入语义索引','未使用附件语义向量'])assert.ok(notes.includes(text),text);
+  assert.doesNotMatch(notes,/附件正文已参与本机语义检索/);
+ }
+});
+test('未批准范围的来源计数不被当作批准、语义成功或已检查覆盖',()=>{
+ for(const status of ['not_approved','not_requested']) {
+  const notes=recallCoverageNotes({results:[],coverage:{local_event_semantic:true,attachments:{status:'ready',semantic:false},scopes:[{scope:'project:unapproved',state:'ready',attachments:{status,semantic:false,files_examined:100,documents:50,skipped:7,limited:true}}]}}).join('\n');
+  assert.doesNotMatch(notes,/附件正文已参与|附件语义索引来源覆盖不完整|附件扫描达到|来源检查达到|未进入语义索引/);
+ }
+ const countsOnly=recallCoverageNotes({results:[],coverage:{local_event_semantic:true,scopes:[{scope:'project:approved',state:'ready',attachments:{status:'ready',semantic:false,files_examined:100,documents:50}}]}}).join('\n');
+ assert.doesNotMatch(countsOnly,/附件正文已参与本机语义检索/);
+});
+test('scope明确成功可以报告附件通道，混合未批准范围不扩大覆盖声明',()=>{
+ const notes=recallCoverageNotes({results:[],coverage:{local_event_semantic:true,scopes:[{scope:'project:approved',state:'ready',attachments:{status:'partial',semantic:true,skipped:1}},{scope:'project:unapproved',state:'ready',attachments:{status:'not_approved',semantic:false,documents:0}}]}}).join('\n');
+ assert.match(notes,/至少一个独立批准范围的附件正文已参与本机语义检索/);
+ assert.match(notes,/本次独立批准的资料已参与本机语义检索/);
+ assert.match(notes,/附件语义索引来源覆盖不完整/);
+ assert.doesNotMatch(notes,/普通对话已直接参与|全部范围.*已覆盖/);
 });

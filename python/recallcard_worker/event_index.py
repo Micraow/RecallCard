@@ -42,6 +42,8 @@ MAX_SQLITE_VALUE = 64 * 1024
 DEFAULT_DISK_CAP = 256 * 1024 * 1024
 APPLICATION_ID = 0x52434549  # RCEI：只允许管理专用派生数据库
 SIDECARS = ("-journal", "-wal", "-shm")
+EVENT_ROLES = ("user", "assistant", "system", "tool", "unknown")
+ATTACHMENT_ROLE = "attachment"  # 仅SQLite内部哨兵；协议中的附件role始终为null。
 
 
 class EventIndexError(Exception):
@@ -62,6 +64,19 @@ def digest(data):
 
 def valid_hash(value):
     return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def source_kind(ref, role, *, stored=False):
+    """保留旧Event fixture引用；附件严格匹配Rust的evt_编号与原件摘要。"""
+    if (isinstance(ref, str) and ref.startswith("event:") and len(ref) > 6
+            and not any(c.isspace() or ord(c) < 32 or c in "/\\" for c in ref)
+            and ".." not in ref and role in EVENT_ROLES):
+        return "event"
+    if (isinstance(ref, str) and len(ref) == 144 and ref.startswith("attachment:evt_")
+            and valid_hash(ref[15:79]) and ref[79] == "/" and valid_hash(ref[80:])
+            and (role == ATTACHMENT_ROLE if stored else role is None)):
+        return "attachment"
+    return None
 
 
 def text(value, limit, *, empty=False):
@@ -153,14 +168,17 @@ class EventIndex:
     def __init__(self, config, *, encoder=None, config_path=None):
         require(_supported_python(), "python_version_unsupported")
         shape(config, {"schema", "database", "scope", "space", "events_approved", "query_approved"},
-              {"disk_cap_bytes", "backend"})
+              {"disk_cap_bytes", "backend", "attachments_approved"})
         require(config["schema"] == CONFIG_SCHEMA, "invalid_config")
-        require(type(config["events_approved"]) is bool and type(config["query_approved"]) is bool, "invalid_config")
+        require(type(config["events_approved"]) is bool and type(config["query_approved"]) is bool
+                and type(config.get("attachments_approved", False)) is bool, "invalid_config")
         require(config.get("backend", "python") == "python", "unsupported_backend")
         self.config_path = Path(config_path) if config_path is not None else None
         self.config_identity = canonical(config)
         self._current_config()
         self.events_approved = config["events_approved"]
+        # 不给原配置补默认字段；固定配置身份仍绑定调用者实际保存的原始JSON。
+        self.attachments_approved = config.get("attachments_approved", False)
         self.query_approved = config["query_approved"]
         try:
             self.scope = scopes([config["scope"]])[0]
@@ -309,7 +327,8 @@ class EventIndex:
         db.execute("DELETE FROM metadata WHERE key LIKE 'pending:%' AND key NOT IN (?,?)", tuple(f"pending:{g}" for g in keep))
 
     def begin(self, request):
-        require(self.events_approved, "events_not_approved")
+        self._current_config()
+        require(self.events_approved or self.attachments_approved, "events_not_approved")
         epoch = request["source_epoch"]
         require(valid_hash(epoch), "invalid_source_epoch")
         lex_version = request.get("lexical_version")
@@ -338,17 +357,18 @@ class EventIndex:
     def _source(self, value, count):
         shape(value, {"ref", "content_hash", "scope", "role", "session_ref", "occurred_at", "text_bytes"})
         ref = text(value["ref"], 512)
-        require(ref.startswith("event:") and not any(c.isspace() or ord(c) < 32 or c in "/\\" for c in ref)
-                and ".." not in ref, "invalid_source")
+        kind = source_kind(ref, value["role"])
+        require(kind is not None, "invalid_source")
         require(valid_hash(value["content_hash"]) and value["scope"] == self.scope, "scope_or_source_mismatch")
-        require(value["role"] in ("user", "assistant", "system", "tool", "unknown"), "invalid_source")
         if value["session_ref"] is not None:
             text(value["session_ref"], 512)
         if value["occurred_at"] is not None:
             text(value["occurred_at"], 64)
         integer(value["text_bytes"], 1, 2**53-1)
         integer(count, 1, MAX_CHUNKS)
-        return tuple(value[k] for k in ("ref", "content_hash", "scope", "role", "session_ref", "occurred_at", "text_bytes")) + (count,)
+        role = ATTACHMENT_ROLE if kind == "attachment" else value["role"]
+        return (ref, value["content_hash"], value["scope"], role, value["session_ref"],
+                value["occurred_at"], value["text_bytes"], count)
 
     def _prepared(self, value, *, query=False):
         text(value, 4096 if query else MAX_CHUNK_BYTES)
@@ -361,11 +381,19 @@ class EventIndex:
         if self.config_path is not None:
             require(canonical(read_config(self.config_path)) == self.config_identity, "configuration_changed")
 
-    def _encode(self, kind, texts):
+    def _require_source_approval(self, kind):
+        require(kind in ("event", "attachment"), "invalid_source")
+        require(self.attachments_approved if kind == "attachment" else self.events_approved,
+                "attachments_not_approved" if kind == "attachment" else "events_not_approved")
+
+    def _encode(self, kind, texts, *, source_kind="event"):
         # 排队/正文验证之后、任何新的本机 POST 之前再检查固定启动配置。
         self._current_config()
-        require(self.query_approved if kind == "query" else self.events_approved,
-                "query_not_approved" if kind == "query" else "events_not_approved")
+        require(kind in ("query", "corpus"), "invalid_request")
+        if kind == "query":
+            require(self.query_approved, "query_not_approved")
+        else:
+            self._require_source_approval(source_kind)
         if self.encoder is not None:
             output = self.encoder(kind, texts)
         elif kind == "query":
@@ -378,12 +406,14 @@ class EventIndex:
         return [vector_blob(v, self.dimensions) for v in output]
 
     def upsert(self, request):
-        require(self.events_approved, "events_not_approved")
+        self._current_config()
         build_id = request["build_id"]
         require(valid_hash(build_id), "invalid_generation")
         batch_id = text(request["batch_id"], 128)
         count = request["source_chunk_count"]
         source = self._source(request["source"], count)
+        kind = source_kind(source[0], source[3], stored=True)
+        self._require_source_approval(kind)
         chunks = request["chunks"]
         require(isinstance(chunks, list) and 1 <= len(chunks) <= MAX_BATCH, "batch_limit")
         require(len(chunks) * self.dimensions <= 8192, "batch_limit")
@@ -446,8 +476,11 @@ class EventIndex:
             decode_blob(blob, self.dimensions)
         missing = [h for h in prepared if h not in cached]
         # 唯一可能接触提供器的步骤在数据库事务外；只允许固定本机端点。
-        encoded = self._encode("corpus", [prepared[h] for h in missing]) if missing else []
+        encoded = self._encode("corpus", [prepared[h] for h in missing], source_kind=kind) if missing else []
         cached.update(zip(missing, encoded))
+        # 向量复用也不绕过来源授权；本机编码等待期间配置撤销不得落库。
+        self._current_config()
+        self._require_source_approval(kind)
         with self.connection(write=True) as db:
             gen = db.execute("SELECT state,receipt,source_count,chunk_count FROM generations WHERE id=?", (build_id,)).fetchone()
             require(gen is not None and gen[0] == "building" and lexical.version(db, build_id) == lex_version, "generation_changed")
@@ -495,7 +528,8 @@ class EventIndex:
         return result
 
     def finish(self, request):
-        require(self.events_approved, "events_not_approved")
+        self._current_config()
+        require(self.events_approved or self.attachments_approved, "events_not_approved")
         for name in ("build_id", "source_epoch", "receipt"):
             require(valid_hash(request[name]), "invalid_generation")
         integer(request["source_count"], 0, MAX_SOURCES)
@@ -513,7 +547,7 @@ class EventIndex:
             db.execute("UPDATE generations SET state='complete' WHERE id=?", (request["build_id"],))
             db.execute("INSERT INTO metadata VALUES ('published',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (request["build_id"],))
             self._gc(db, (request["build_id"], request["build_id"]))
-            self._verified_published(db, request["build_id"])
+            self._verified_published(db, request["build_id"], require_source_approval=True)
             result = {**self._stats(db, request["build_id"]), "generation": request["build_id"]}
         return result
 
@@ -544,7 +578,7 @@ class EventIndex:
         # 权限、损坏和其他数据库错误不能按此路径忽略。
         return values, mode
 
-    def _verified_published(self, db, generation):
+    def _verified_published(self, db, generation, *, require_source_approval=False):
         """只在同一读事务中使用；派生计数、关系和字段均不能代替实际行。"""
         require(valid_hash(generation), "corrupt_snapshot")
         row = db.execute("SELECT source_epoch,source_count,chunk_count,state,receipt FROM generations WHERE id=?", (generation,)).fetchone()
@@ -561,9 +595,16 @@ class EventIndex:
         # SQL只返回常量；在读取TEXT/BLOB到Python之前检查类型和字节界限。
         invalid_source = db.execute("""SELECT 1 FROM sources s WHERE generation=? AND (
             typeof(ref) != 'text' OR length(CAST(ref AS BLOB)) NOT BETWEEN 7 AND 512
-            OR substr(ref,1,6) != 'event:' OR instr(ref,char(0)) != 0
+            OR instr(ref,char(0)) != 0 OR typeof(role) != 'text'
+            OR NOT (
+                (substr(ref,1,6) = 'event:' AND role IN ('user','assistant','system','tool','unknown'))
+                OR (substr(ref,1,15) = 'attachment:evt_' AND role = 'attachment'
+                    AND length(ref) = 144 AND substr(ref,80,1) = '/'
+                    AND substr(ref,16,64) NOT GLOB '*[^0-9a-f]*'
+                    AND substr(ref,81,64) NOT GLOB '*[^0-9a-f]*')
+            )
             OR typeof(content_hash) != 'text' OR length(content_hash) != 64 OR content_hash GLOB '*[^0-9a-f]*'
-            OR typeof(scope) != 'text' OR scope != ? OR role NOT IN ('user','assistant','system','tool','unknown')
+            OR typeof(scope) != 'text' OR scope != ?
             OR (session_ref IS NOT NULL AND (typeof(session_ref) != 'text' OR length(CAST(session_ref AS BLOB)) NOT BETWEEN 1 AND 512 OR instr(session_ref,char(0)) != 0))
             OR (occurred_at IS NOT NULL AND (typeof(occurred_at) != 'text' OR length(CAST(occurred_at AS BLOB)) NOT BETWEEN 1 AND 64 OR instr(occurred_at,char(0)) != 0))
             OR typeof(text_bytes) != 'integer' OR text_bytes NOT BETWEEN 1 AND 9007199254740991
@@ -591,7 +632,13 @@ class EventIndex:
         source_hash = hashlib.sha256()
         source_hash.update(b"[")
         first = True
-        for ref, in db.execute("SELECT ref FROM sources WHERE generation=? ORDER BY ref", (generation,)):
+        # 只增量读取已通过SQL大小检查的身份字段，不读取原文或物化整个来源表。
+        for ref, role in db.execute("SELECT ref,role FROM sources WHERE generation=? ORDER BY ref", (generation,)):
+            kind = source_kind(ref, role, stored=True)
+            require(kind is not None, "corrupt_snapshot")
+            # 旧Event只查询授权合同保持不变；附件撤销后不得返回旧候选。
+            if require_source_approval or kind == "attachment":
+                self._require_source_approval(kind)
             if not first:
                 source_hash.update(b",")
             source_hash.update(canonical(ref))
@@ -713,7 +760,7 @@ class EventIndex:
                 semantic_evidence = {"start_byte": sem[4], "end_byte": sem[5], "text_sha256": sem[6], "score": sem[0]} if sem else None
                 lexical_evidence = dict(zip(("start_byte", "end_byte", "text_sha256"), lex[3])) if lex else None
                 candidate = {"ref": r[1], "content_hash": r[3], "start_byte": r[4], "end_byte": r[5], "text_sha256": r[6], "score": r[0],
-                             "role": r[7], "session_ref": r[8], "occurred_at": r[9],
+                             "role": None if r[7] == ATTACHMENT_ROLE else r[7], "session_ref": r[8], "occurred_at": r[9],
                              "retrieval": {"semantic_rank": semantic_rank, "lexical_rank": lexical_rank,
                                  "lexical_matched_terms": lex[2] if lex else 0, "lexical_query_terms": len(query_terms),
                                  "fused_rank": fused_rank, "fusion_score": fused[ref],

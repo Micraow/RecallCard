@@ -50,6 +50,7 @@ fn setup(endpoint: String) -> Setup {
         query_instruction: String::new(),
         document_instruction: String::new(),
         events_approved: true,
+        attachments_approved: false,
         query_approved: true,
         chunk_bytes: 256,
         disk_cap_mib: 16,
@@ -570,4 +571,314 @@ fn stopped_encoder_keeps_verified_lexical_source_and_current_authorization() {
     LocalEvents::disable(&vault, "personal").unwrap();
     assert!(index.search("E_PIPE_710", 10).is_err());
     assert!(transport::invoke(&context, "recall_fetch", json!({"id":id})).is_err());
+}
+
+fn semantic_attachment(
+    vault: &Vault,
+    scope: &str,
+    message: &str,
+    body: &str,
+    parent: &str,
+) -> recallcard::Event {
+    let digest = recallcard::hash(body.as_bytes());
+    std::fs::write(vault.root().join("objects").join(&digest), body).unwrap();
+    vault.capture(serde_json::from_value(json!({"scope":scope,"role":"user","origin":"user_input","content":parent,
+        "source":{"platform":"synthetic","conversation_id":"attachment-semantic-contract","message_id":message},
+        "metadata":{"source_assets":{"files":[{"name":"synthetic.txt","payload_status":"retained","detected_media_type":"application/octet-stream","declared_media_type":"text/plain","object_sha256":digest,"byte_count":body.len()}]}}})).unwrap()).unwrap()
+}
+fn attachment_ref(event: &recallcard::Event) -> String {
+    format!(
+        "attachment:{}/{}",
+        event.id,
+        event.data.metadata["source_assets"]["files"][0]["object_sha256"]
+            .as_str()
+            .unwrap()
+    )
+}
+fn semantic_python() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../python")
+        .canonicalize()
+        .unwrap()
+}
+#[test]
+fn independent_attachment_consent_enables_zero_overlap_candidates_with_exact_fetch() {
+    use recallcard::{context::Context, policy::Access, transport};
+    let (_server, endpoint) = server();
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let body = "synthetic-alpha 附件原件\r\n中文🙂";
+    let source = semantic_attachment(&vault, "personal", "one", body, "上传说明保持原样");
+    let hidden = semantic_attachment(
+        &vault,
+        "project:hidden",
+        "hidden",
+        "synthetic-alpha 私域合成负例",
+        "其他范围",
+    );
+    let mut settings = setup(endpoint);
+    // 负对照：同一个固定向量服务、同一问题，仅普通 Event 批准不能编码附件。
+    let legacy = LocalEvents::configure(
+        &vault,
+        "personal",
+        settings.clone(),
+        "python3".into(),
+        semantic_python(),
+    )
+    .unwrap();
+    refresh(&legacy);
+    let without = legacy.search("test-query-a", 10).unwrap();
+    assert!(without["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["kind"] == "event"));
+    settings.attachments_approved = true;
+    let index = LocalEvents::configure(
+        &vault,
+        "personal",
+        settings,
+        "python3".into(),
+        semantic_python(),
+    )
+    .unwrap();
+    refresh(&index);
+    assert!(!body.contains("test-query-a"));
+    let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+    let found =
+        transport::invoke(&context, "recall_search", json!({"query":"test-query-a"})).unwrap();
+    let row = &found["results"][0];
+    assert_eq!(row["ref"], attachment_ref(&source), "{found}");
+    assert_eq!(row["kind"], "attachment");
+    assert_eq!(row.get("role"), Some(&serde_json::Value::Null));
+    assert_eq!(row["evidence"], "Attachment/Content");
+    assert_eq!(
+        row["evidence_refs"],
+        json!([format!("event:{}", source.id)])
+    );
+    assert_eq!(row["text_range"]["projection"], "attachment.utf8/1");
+    assert_eq!(found["coverage"]["attachments"]["semantic"], true);
+    assert!(!found.to_string().contains(&attachment_ref(&hidden)));
+    let fetched = transport::invoke(&context, "recall_fetch", json!({"id":row["id"]})).unwrap();
+    assert_eq!(fetched["results"][0]["text"], body);
+    assert_eq!(fetched["results"][0]["snapshot"], row["snapshot"]);
+    assert_eq!(
+        vault.event(&source.id).unwrap().data.text(),
+        "上传说明保持原样"
+    );
+    let other = Context::new(&vault, Access::new(vec!["project:hidden".into()]).unwrap());
+    assert!(transport::invoke(&other, "recall_fetch", json!({"id":row["id"]})).is_err());
+    // 词法和语义都命中同一附件时，共同入口只返回一次独立来源。
+    let duplicate = transport::invoke(
+        &context,
+        "recall_search",
+        json!({"query":"synthetic-alpha"}),
+    )
+    .unwrap();
+    assert_eq!(
+        duplicate["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["ref"] == attachment_ref(&source))
+            .count(),
+        1
+    );
+    assert!(duplicate["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["ref"] == attachment_ref(&source))
+        .unwrap()["role"]
+        .is_null());
+    assert!(serde_json::to_vec(&found).unwrap().len() <= 8192);
+}
+#[test]
+fn attachment_only_bodyless_parent_and_withdrawn_approval_remain_separate() {
+    use recallcard::{context::Context, policy::Access, transport};
+    let (_server, endpoint) = server();
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let source = semantic_attachment(
+        &vault,
+        "personal",
+        "bodyless",
+        "synthetic-alpha 合成原件",
+        "",
+    );
+    let ordinary = event(&vault, "personal", "synthetic-alpha 普通消息", "user_input");
+    let mut settings = setup(endpoint);
+    settings.events_approved = false;
+    settings.attachments_approved = true;
+    let index = LocalEvents::configure(
+        &vault,
+        "personal",
+        settings.clone(),
+        "python3".into(),
+        semantic_python(),
+    )
+    .unwrap();
+    refresh(&index);
+    let rows = index.search("test-query-a", 10).unwrap();
+    assert_eq!(rows["results"].as_array().unwrap().len(), 1);
+    assert_eq!(rows["results"][0]["ref"], attachment_ref(&source));
+    assert!(!rows.to_string().contains(&ordinary));
+    assert_eq!(
+        index.search("test-query-a", 10).unwrap()["coverage"]["semantic_query_encoding"],
+        "cache"
+    );
+    let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+    let result =
+        transport::invoke(&context, "recall_search", json!({"query":"test-query-a"})).unwrap();
+    let id = result["results"][0]["id"].clone();
+    settings.events_approved = true;
+    settings.attachments_approved = false;
+    let replacement = LocalEvents::configure(
+        &vault,
+        "personal",
+        settings,
+        "python3".into(),
+        semantic_python(),
+    )
+    .unwrap();
+    assert!(index.search("test-query-a", 10).is_err());
+    assert!(transport::invoke(&context, "recall_fetch", json!({"id":id})).is_err());
+    refresh(&replacement);
+    let result = replacement.search("test-query-a", 10).unwrap();
+    assert_eq!(result["results"].as_array().unwrap().len(), 1);
+    assert_eq!(result["results"][0]["ref"], ordinary);
+}
+#[test]
+fn changed_attachment_object_invalidates_old_semantic_binding_and_refresh_keeps_events() {
+    use recallcard::{context::Context, policy::Access, transport};
+    for missing in [false, true] {
+        let (_server, endpoint) = server();
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::init(&dir.path().join("vault")).unwrap();
+        let body = "synthetic-alpha 合成附件";
+        let source = semantic_attachment(&vault, "personal", "change", body, "");
+        let ordinary = event(&vault, "personal", "synthetic-beta 普通消息", "user_input");
+        let mut settings = setup(endpoint);
+        settings.attachments_approved = true;
+        let index = LocalEvents::configure(
+            &vault,
+            "personal",
+            settings,
+            "python3".into(),
+            semantic_python(),
+        )
+        .unwrap();
+        refresh(&index);
+        let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+        let found =
+            transport::invoke(&context, "recall_search", json!({"query":"test-query-a"})).unwrap();
+        let id = found["results"][0]["id"].clone();
+        let path = vault
+            .root()
+            .join("objects")
+            .join(recallcard::hash(body.as_bytes()));
+        if missing {
+            std::fs::remove_file(path).unwrap();
+        } else {
+            std::fs::write(path, vec![b'x'; body.len()]).unwrap();
+        }
+        assert!(index.search("test-query-a", 10).is_err());
+        assert!(transport::invoke(&context, "recall_fetch", json!({"id":id})).is_err());
+        refresh(&index);
+        let page = index.search("test-query-a", 10).unwrap();
+        assert_eq!(page["results"].as_array().unwrap().len(), 1);
+        assert_eq!(page["results"][0]["ref"], ordinary);
+        assert_eq!(page["coverage"]["attachments"]["status"], "partial");
+        assert!(vault.event(&source.id).unwrap().data.text().is_empty());
+    }
+}
+#[test]
+fn semantic_attachment_revision_and_suppression_revoke_old_fetches() {
+    use recallcard::{context::Context, policy::Access, transport};
+    for revised in [false, true] {
+        let (_server, endpoint) = server();
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::init(&dir.path().join("vault")).unwrap();
+        let source =
+            semantic_attachment(&vault, "personal", "revoke", "synthetic-alpha 合成附件", "");
+        let mut settings = setup(endpoint);
+        settings.attachments_approved = true;
+        let index = LocalEvents::configure(
+            &vault,
+            "personal",
+            settings,
+            "python3".into(),
+            semantic_python(),
+        )
+        .unwrap();
+        refresh(&index);
+        let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+        let found =
+            transport::invoke(&context, "recall_search", json!({"query":"test-query-a"})).unwrap();
+        let id = found["results"][0]["id"].clone();
+        if revised {
+            let mut next = source.data.clone();
+            next.content = "附件已移除".into();
+            next.metadata = json!({});
+            next.revision_of = Some(source.id.clone());
+            vault.capture(next).unwrap();
+        } else {
+            vault.suppress(&source.id, "合成撤销".into()).unwrap();
+        }
+        assert!(transport::invoke(&context, "recall_fetch", json!({"id":id})).is_err());
+        refresh(&index);
+        assert!(index.search("test-query-a", 10).unwrap()["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["ref"] != attachment_ref(&source)));
+    }
+}
+#[test]
+fn old_event_configuration_without_attachment_field_stays_query_only_compatible() {
+    use serde_json::Value;
+    let (_server, endpoint) = server();
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let expected = event(&vault, "personal", "synthetic-alpha 普通消息", "user_input");
+    let index = LocalEvents::configure(
+        &vault,
+        "personal",
+        setup(endpoint),
+        "python3".into(),
+        semantic_python(),
+    )
+    .unwrap();
+    refresh(&index);
+    let current = vault
+        .state_dir()
+        .unwrap()
+        .join("local-event-semantic")
+        .join(recallcard::hash(b"personal"))
+        .join("current.json");
+    let mut host: Value = serde_json::from_slice(&std::fs::read(&current).unwrap()).unwrap();
+    host["settings"]
+        .as_object_mut()
+        .unwrap()
+        .remove("attachments_approved");
+    host["settings"]["events_approved"] = json!(false);
+    let path = PathBuf::from(host["worker_config"].as_str().unwrap());
+    let mut worker: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    worker
+        .as_object_mut()
+        .unwrap()
+        .remove("attachments_approved");
+    worker["events_approved"] = json!(false);
+    std::fs::write(&current, serde_json::to_vec(&host).unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&worker).unwrap()).unwrap();
+    let legacy = LocalEvents::open(&vault, "personal").unwrap().unwrap();
+    assert_eq!(
+        legacy.status().unwrap()["settings"]["attachments_approved"],
+        false
+    );
+    assert!(legacy.refresh_step().is_err());
+    assert_eq!(
+        legacy.search("test-query-a", 10).unwrap()["results"][0]["ref"],
+        expected
+    );
 }

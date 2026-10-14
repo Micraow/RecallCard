@@ -107,6 +107,31 @@ class EventLexicalTests(unittest.TestCase):
         with patch.object(self.worker, "_encode", side_effect=AssertionError("must use cache")):
             self.assertEqual(self.ok("query", query="ZXQ-714")["coverage"]["query_encoding"], "cache")
 
+    def test_approved_attachment_has_independent_lexical_and_semantic_evidence(self):
+        self.worker = EventIndex({**self.config, "events_approved": False,
+                                  "attachments_approved": True}, encoder=self.encoder)
+        body = "synthetic attachment ZXQ-714"
+        build = self.begin()
+        ref = "attachment:evt_" + "a" * 64 + "/" + digest(body.encode())
+        source = {**self.source("unused", body), "ref": ref, "role": None}
+        result = self.ok("upsert", build_id=build["build_id"], batch_id="attachment",
+                         source=source, source_chunk_count=1, chunks=self.chunks(body))
+        self.finish(result)
+        page = self.ok("query", query="ZXQ-714")
+        row = page["results"][0]
+        self.assertEqual(row["ref"], ref)
+        self.assertIsNone(row["role"])
+        self.assertEqual(row["retrieval"]["semantic_rank"], 1)
+        self.assertEqual(row["retrieval"]["lexical_rank"], 1)
+        with patch.object(self.worker, "_encode", side_effect=EmbeddingError("local_provider_unavailable", "synthetic")):
+            lexical_page = self.ok("query", query="ZXQ-714 new")
+        self.assertEqual(lexical_page["coverage"]["fusion"], "lexical_only")
+        self.assertIsNone(lexical_page["results"][0]["role"])
+        self.worker.attachments_approved = False
+        before = len(self.encoder.calls)
+        self.error("attachments_not_approved", "query", query="ZXQ-714")
+        self.assertEqual(len(self.encoder.calls), before)
+
     def test_encoding_integrity_and_authorization_errors_never_become_lexical_success(self):
         self.finish(self.put(self.begin(), "target", "ZXQ-714"))
         for code in ("redirect_blocked", "response_limit", "local_budget_exhausted", "query_not_approved", "invalid_response", "invalid_vector"):

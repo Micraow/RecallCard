@@ -211,6 +211,10 @@ fn item(entry: &Match<'_>, query: &str, limit: usize, mode: &str) -> Result<Valu
     if !doc.navigation.is_empty() {
         value["navigation_entry_count"] = json!(doc.navigation.len());
     }
+    if doc.kind == "attachment" {
+        // 附件是独立内容来源；统一输出 null，不继承上传者角色。
+        value["role"] = Value::Null;
+    }
     value["score"] = json!(entry.score);
     if let Some(reference) = &entry.score_source_ref {
         value["score_source_ref"] = json!(reference);

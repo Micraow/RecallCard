@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 mod adjacency;
-mod attachments;
+pub(crate) mod attachments;
 mod candidate_review;
 mod confirmation;
 mod navigation;

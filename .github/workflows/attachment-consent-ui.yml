@@ -1,0 +1,42 @@
+name: 附件独立批准界面合同
+on:
+  workflow_dispatch:
+  push:
+    branches: ["recovery/native-20261011"]
+    paths:
+      - 'desktop/frontend/src/components/LocalEventSetup.tsx'
+      - 'desktop/frontend/src/service/setup.ts'
+      - 'desktop/frontend/src/service/types.ts'
+      - 'desktop/frontend/tests/local-event-*'
+      - 'desktop/package*.json'
+      - '.github/workflows/attachment-consent-ui.yml'
+permissions:
+  contents: read
+jobs:
+  consent:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck && npm run test:contracts
+      - name: 安装官方 Chromium 与系统依赖
+        timeout-minutes: 5
+        run: npx playwright install --with-deps chromium
+      - name: 真实组件的合成批准交互
+        run: npm run test:frontend -- local-event-setup.spec.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: attachment-consent-synthetic-${{ github.sha }}
+          path: desktop/test-results/
+          retention-days: 7
+          if-no-files-found: ignore

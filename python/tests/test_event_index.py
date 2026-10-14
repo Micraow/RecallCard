@@ -73,6 +73,13 @@ class EventIndexTests(unittest.TestCase):
         return {"ref": f"event:synthetic-{i}", "content_hash": digest(raw), "scope": "synthetic",
                 "role": "user", "session_ref": "synthetic-session:one", "occurred_at": "2026-01-01T00:00:00Z",
                 "text_bytes": len(raw), **changes}
+    def attachment_source(self, content="synthetic attachment", **changes):
+        return self.source(content=content,
+            ref="attachment:evt_" + "a" * 64 + "/" + digest(content.encode()),
+            role=None, **changes)
+    def put_attachment(self, build, content="synthetic attachment", worker=None, batch="attachment"):
+        return self.ok("upsert", worker=worker, build_id=build["build_id"], batch_id=batch,
+                       source=self.attachment_source(content), source_chunk_count=1, chunks=[self.chunk(content)])
     def chunk(self, content="synthetic text", ordinal=0, start=0):
         return {"ordinal": ordinal, "start_byte": start, "end_byte": start+len(content.encode()),
                 "text_sha256": digest(content.encode()), "text": content}
@@ -100,6 +107,208 @@ class EventIndexTests(unittest.TestCase):
         path.write_bytes(canonical(self.config))
         self.ok("query", worker=worker, query="new approved synthetic question")
         self.assertEqual(len(self.encoder.calls), before + 1)
+
+    def test_attachment_approval_defaults_false_without_mutating_config(self):
+        raw = canonical(self.config)
+        path = self.root / "legacy-config.json"
+        path.write_bytes(raw); path.chmod(0o600)
+        worker = EventIndex(self.config, encoder=self.encoder, config_path=path)
+        self.assertFalse(worker.attachments_approved)
+        self.assertEqual(worker.config_identity, raw)
+        self.assertEqual(canonical(self.config), raw)
+        self.assertNotIn("attachments_approved", self.config)
+        self.ok("status", worker=worker)
+        build = self.begin(worker=worker)
+        # 即使正文向量已由Event生成，也不能借复用绕过附件批准。
+        self.put(build, content="synthetic attachment", worker=worker)
+        before = len(self.encoder.calls)
+        for approved in (None, False):
+            config = self.config if approved is None else {**self.config, "attachments_approved": approved}
+            current = EventIndex(config, encoder=self.encoder)
+            self.error("attachments_not_approved", "upsert", worker=current,
+                       build_id=build["build_id"], batch_id="attachment-denied",
+                       source=self.attachment_source(), source_chunk_count=1,
+                       chunks=[self.chunk("synthetic attachment")])
+        self.assertEqual(len(self.encoder.calls), before)
+
+    def test_attachment_config_requires_a_real_boolean(self):
+        for value in (None, 0, 1, "true", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(EventIndexError, "invalid_config"):
+                EventIndex({**self.config, "attachments_approved": value}, encoder=self.encoder)
+        self.assertEqual(self.encoder.calls, [])
+
+    def test_attachments_only_build_and_query_use_null_protocol_role(self):
+        config = {**self.config, "events_approved": False, "attachments_approved": True}
+        worker = EventIndex(config, encoder=self.encoder)
+        build = self.begin(worker=worker)
+        self.error("events_not_approved", "upsert", worker=worker, build_id=build["build_id"],
+                   batch_id="event-denied", source=self.source(), source_chunk_count=1, chunks=[self.chunk()])
+        published = self.finish(self.put_attachment(build, worker=worker), worker=worker)
+        result = self.ok("query", worker=worker, query="synthetic question",
+                         expected_generation=published["generation"])
+        row = result["results"][0]
+        self.assertEqual(row["ref"], self.attachment_source()["ref"])
+        self.assertIsNone(row["role"])
+        self.assertEqual(row["session_ref"], self.attachment_source()["session_ref"])
+        self.assertEqual(row["occurred_at"], self.attachment_source()["occurred_at"])
+        self.assertEqual(result["source_set_hash"], digest(canonical([row["ref"]])))
+        self.assertEqual([kind for kind, _ in self.encoder.calls], ["corpus", "query"])
+        with sqlite3.connect(self.config["database"]) as db:
+            self.assertEqual(db.execute("SELECT role FROM sources").fetchall(), [("attachment",)])
+        self.assertNotIn(b"synthetic attachment", Path(self.config["database"]).read_bytes())
+
+    def test_mixed_approved_sources_keep_legacy_event_metadata(self):
+        worker = EventIndex({**self.config, "attachments_approved": True}, encoder=self.encoder)
+        build = self.begin(worker=worker)
+        self.ok("upsert", worker=worker, build_id=build["build_id"], batch_id="legacy-event",
+                source=self.source(ref="event:a", role="assistant"), source_chunk_count=1, chunks=[self.chunk()])
+        self.finish(self.put_attachment(build, worker=worker), worker=worker)
+        rows = {row["ref"]: row for row in self.ok("query", worker=worker, query="synthetic question")["results"]}
+        self.assertEqual(rows["event:a"]["role"], "assistant")
+        self.assertIsNone(rows[self.attachment_source()["ref"]]["role"])
+
+    def test_attachment_and_query_encoding_approvals_are_separate(self):
+        worker = EventIndex({**self.config, "events_approved": False, "attachments_approved": True,
+                             "query_approved": False}, encoder=self.encoder)
+        self.finish(self.put_attachment(self.begin(worker=worker), worker=worker), worker=worker)
+        self.error("query_not_approved", "query", worker=worker, query="synthetic question")
+        with self.assertRaisesRegex(EventIndexError, "events_not_approved"):
+            worker._encode("corpus", ["synthetic event"])
+        worker.attachments_approved = False
+        with self.assertRaisesRegex(EventIndexError, "attachments_not_approved"):
+            worker._encode("corpus", ["synthetic attachment"], source_kind="attachment")
+        self.assertEqual(len(self.encoder.calls), 1)
+
+    def test_attachment_config_revocation_is_rechecked_before_document_encoding(self):
+        config = {**self.config, "attachments_approved": True}
+        path = self.root / "attachment-config.json"
+        path.write_bytes(canonical(config)); path.chmod(0o600)
+        worker = EventIndex(config, encoder=self.encoder, config_path=path)
+        build = self.begin(worker=worker)
+        prepare = worker._prepared
+        def revoke_after_prepare(value, **kwargs):
+            prepared = prepare(value, **kwargs)
+            path.write_bytes(canonical({**config, "attachments_approved": False}))
+            return prepared
+        with patch.object(worker, "_prepared", side_effect=revoke_after_prepare):
+            self.error("configuration_changed", "upsert", worker=worker,
+                       build_id=build["build_id"], batch_id="revoked",
+                       source=self.attachment_source(), source_chunk_count=1,
+                       chunks=[self.chunk("synthetic attachment")])
+        with self.assertRaisesRegex(EventIndexError, "configuration_changed"):
+            worker._encode("corpus", ["synthetic attachment"], source_kind="attachment")
+        self.assertEqual(self.encoder.calls, [])
+        with sqlite3.connect(self.config["database"]) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM sources").fetchone()[0], 0)
+
+    def test_attachment_revocation_blocks_cached_vectors_and_post_encode_writes(self):
+        config = {**self.config, "attachments_approved": True}
+        path = self.root / "attachment-cache-config.json"
+        path.write_bytes(canonical(config)); path.chmod(0o600)
+        worker = EventIndex(config, encoder=self.encoder, config_path=path)
+        build = self.begin(worker=worker)
+        self.put(build, content="synthetic attachment", worker=worker)
+        prepare = worker._prepared
+        def revoke_after_prepare(value, **kwargs):
+            prepared = prepare(value, **kwargs)
+            path.write_bytes(canonical({**config, "attachments_approved": False}))
+            return prepared
+        with patch.object(worker, "_prepared", side_effect=revoke_after_prepare):
+            self.error("configuration_changed", "upsert", worker=worker,
+                       build_id=build["build_id"], batch_id="cached-revoked",
+                       source=self.attachment_source(), source_chunk_count=1,
+                       chunks=[self.chunk("synthetic attachment")])
+        self.assertEqual(len(self.encoder.calls), 1)
+        path.write_bytes(canonical(config))
+        def revoke_after_encode(kind, texts):
+            result = self.encoder(kind, texts)
+            path.write_bytes(canonical({**config, "attachments_approved": False}))
+            return result
+        worker.encoder = revoke_after_encode
+        self.error("configuration_changed", "upsert", worker=worker,
+                   build_id=build["build_id"], batch_id="encoded-revoked",
+                   source=self.attachment_source("different synthetic attachment"), source_chunk_count=1,
+                   chunks=[self.chunk("different synthetic attachment")])
+        with sqlite3.connect(self.config["database"]) as db:
+            self.assertEqual(db.execute("SELECT role FROM sources").fetchall(), [("user",)])
+
+    def test_finish_requires_matching_approval_for_every_source(self):
+        previous = self.published()
+        worker = EventIndex({**self.config, "attachments_approved": True}, encoder=self.encoder)
+        build = self.begin("mixed-new", worker=worker)
+        self.put(build, worker=worker)
+        mixed = self.put_attachment(build, worker=worker)
+        args = {key: mixed[key] for key in ("build_id", "source_epoch", "source_count", "chunk_count", "receipt")}
+        for changes, error in (({"attachments_approved": False}, "attachments_not_approved"),
+                               ({"events_approved": False, "attachments_approved": True}, "events_not_approved")):
+            with self.subTest(changes=changes):
+                restricted = EventIndex({**self.config, **changes}, encoder=self.encoder)
+                self.error(error, "finish", worker=restricted, **args)
+                self.assertEqual(self.ok("status", worker=worker)["published_generation"], previous["generation"])
+                with sqlite3.connect(self.config["database"]) as db:
+                    self.assertEqual(db.execute("SELECT state FROM generations WHERE id=?", (build["build_id"],)).fetchone()[0], "building")
+        self.finish(mixed, worker=worker)
+
+    def test_revoked_attachments_block_published_candidates_before_query_encoding(self):
+        worker = EventIndex({**self.config, "attachments_approved": True}, encoder=self.encoder)
+        self.finish(self.put_attachment(self.begin(worker=worker), worker=worker), worker=worker)
+        self.ok("query", worker=worker, query="cached synthetic question")
+        before = len(self.encoder.calls)
+        for config in (self.config, {**self.config, "attachments_approved": False}):
+            revoked = EventIndex(config, encoder=self.encoder)
+            for query in ("cached synthetic question", "new synthetic question"):
+                self.error("attachments_not_approved", "query", worker=revoked, query=query)
+        self.assertEqual(len(self.encoder.calls), before)
+
+    def test_attachment_ref_and_role_must_match_exactly_before_encoding(self):
+        worker = EventIndex({**self.config, "attachments_approved": True}, encoder=self.encoder)
+        build = self.begin(worker=worker)
+        source = self.attachment_source()
+        ref = source["ref"]
+        invalid = [(ref, role) for role in ("user", "assistant", "system", "tool", "unknown", "attachment", "", False)]
+        invalid += [(candidate, None) for candidate in (
+            ref.replace("evt_", "mem_"), ref.replace("a" * 64, "a" * 32, 1),
+            ref.replace("a" * 64, "A" * 64, 1), ref[:-1], ref + "0", ref + "/extra",
+            ref[:80] + "G" + ref[81:], ref.replace("/", "\\"), ref.replace("/", "//"),
+            "attachment:" + "a" * 64, "event:a", "memory:a")]
+        invalid += [("event:a", "attachment"), ("event:a", None), ("event:", "user"),
+                    ("event:a/b", "user"), ("event:../a", "user"), ("event:a\u2003b", "user")]
+        for candidate, role in invalid:
+            with self.subTest(ref=candidate, role=role):
+                self.error("invalid_source", "upsert", worker=worker, build_id=build["build_id"],
+                           batch_id="invalid", source={**source, "ref": candidate, "role": role},
+                           source_chunk_count=1, chunks=[self.chunk("synthetic attachment")])
+        self.error("invalid_request", "upsert", worker=worker, build_id=build["build_id"],
+                   batch_id="nul-ref", source={**source, "ref": ref + "\x00"},
+                   source_chunk_count=1, chunks=[self.chunk("synthetic attachment")])
+        self.assertEqual(self.encoder.calls, [])
+
+    def test_published_attachment_ref_and_role_tampering_fails_before_encoding(self):
+        worker = EventIndex({**self.config, "attachments_approved": True}, encoder=self.encoder)
+        self.finish(self.put_attachment(self.begin(worker=worker), worker=worker), worker=worker)
+        path = Path(self.config["database"])
+        pristine = path.read_bytes()
+        ref = self.attachment_source()["ref"]
+        changes = [(ref, "user"), (ref, "unknown"), ("event:a", "attachment"),
+                   (ref.replace("a" * 64, "A" * 64, 1), "attachment"),
+                   (ref.replace("a" * 64, "a" * 32, 1), "attachment"),
+                   (ref[:-1], "attachment"), (ref + "/extra", "attachment"),
+                   (ref[:80] + "G" + ref[81:], "attachment"),
+                   ("event:a/b", "user"), ("event:a\u2003b", "user"),
+                   ("event:../a", "user"), ("event:a\\b", "user")]
+        try:
+            for candidate, role in changes:
+                with self.subTest(ref=candidate, role=role):
+                    path.write_bytes(pristine)
+                    with sqlite3.connect(path) as db:
+                        # 同时改关联键，避免仅靠孤儿chunk检测掩盖来源格式缺陷。
+                        db.execute("UPDATE sources SET ref=?,role=?", (candidate, role))
+                        db.execute("UPDATE chunks SET source_ref=?", (candidate,))
+                    before = len(self.encoder.calls)
+                    self.error("corrupt_snapshot", "query", worker=worker, query="synthetic question")
+                    self.assertEqual(len(self.encoder.calls), before)
+        finally:
+            path.write_bytes(pristine)
 
     def test_build_query_has_no_text_or_vector_and_preserves_metadata(self):
         finish = self.published()
@@ -198,6 +407,8 @@ class EventIndexTests(unittest.TestCase):
 
     def test_requests_cannot_override_path_space_scope_or_approval(self):
         for op, extra in (("status", {"database": "/tmp/other"}), ("begin", {"source_epoch": digest(b"a"), "events_approved": True}),
+                          ("begin", {"source_epoch": digest(b"a"), "attachments_approved": True}),
+                          ("query", {"query": "q", "attachments_approved": True}),
                           ("query", {"query": "q", "endpoint": "https://outside.invalid/v1/embeddings"}), ("query", {"query": "q", "scope": "foreign"})):
             self.error("invalid_request", op, **extra)
         self.assertEqual(self.encoder.calls, [])

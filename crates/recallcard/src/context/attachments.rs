@@ -2,12 +2,12 @@
 use super::*;
 use std::io::Read;
 
-const FILE_BYTES: usize = 1024 * 1024;
-const TOTAL_BYTES: usize = 16 * FILE_BYTES;
-const FILES: usize = 256;
-pub(super) const PROJECTION: &str = "attachment.utf8/1";
+pub(crate) const FILE_BYTES: usize = 1024 * 1024;
+pub(crate) const TOTAL_BYTES: usize = 16 * FILE_BYTES;
+pub(crate) const FILES: usize = 256;
+pub(crate) const PROJECTION: &str = "attachment.utf8/1";
 
-pub(super) fn parse(reference: &str) -> Result<(&str, &str)> {
+pub(crate) fn parse(reference: &str) -> Result<(&str, &str)> {
     let (event, object) = reference
         .strip_prefix("attachment:")
         .and_then(|r| r.split_once('/'))
@@ -18,12 +18,12 @@ pub(super) fn parse(reference: &str) -> Result<(&str, &str)> {
     }
     Ok((event, object))
 }
-fn digest_valid(s: &str) -> bool {
+pub(crate) fn digest_valid(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn supported(file: &Value) -> bool {
+pub(crate) fn supported(file: &Value) -> bool {
     // 声明只选解码器；完整字节仍须验证。已识别的 PDF、图片和压缩包不能冒充文本。
     let media = file["declared_media_type"]
         .as_str()
@@ -44,7 +44,7 @@ fn supported(file: &Value) -> bool {
             )
         })
 }
-fn body(vault: &Vault, file: &Value) -> Result<String> {
+pub(crate) fn body(vault: &Vault, file: &Value) -> Result<String> {
     if !supported(file) {
         return Err("附件类型尚不支持安全文本读取".into());
     }
@@ -85,14 +85,14 @@ fn body(vault: &Vault, file: &Value) -> Result<String> {
     }
     Ok(text)
 }
-fn files(event: &Event) -> impl Iterator<Item = &Value> {
+pub(crate) fn files(event: &Event) -> impl Iterator<Item = &Value> {
     event.data.metadata["source_assets"]["files"]
         .as_array()
         .into_iter()
         .flatten()
 }
 // 与分页、复制共用同一验证器；调用者必须先核验当前父事件的授权。
-fn verified_body(vault: &Vault, event: &Event, object: &str) -> Result<(Value, String)> {
+pub(crate) fn verified_body(vault: &Vault, event: &Event, object: &str) -> Result<(Value, String)> {
     // 多个附件声明可能共用同一原件；与搜索一样跳过不支持或损坏的声明。
     // 不能让无效的第一条声明遮蔽后面的有效关联，也不能无限重复读取同一对象。
     let mut examined_bytes = 0usize;
@@ -123,6 +123,11 @@ fn verified_body(vault: &Vault, event: &Event, object: &str) -> Result<(Value, S
         .map(|(file, text)| (file.clone(), text))
         .ok_or_else(|| "附件关联或原件无法核验".into())
 }
+pub(crate) fn snapshot(event: &Event, object: &str) -> Result<String> {
+    Ok(hash(
+        &serde_json::to_vec(&json!([PROJECTION, event, object])).map_err(|_| "附件快照无效")?,
+    ))
+}
 fn projection(parent: &Document, event: &Event, file: &Value, text: String) -> Document {
     let mut doc = parent.clone();
     doc.reference = format!(
@@ -131,6 +136,8 @@ fn projection(parent: &Document, event: &Event, file: &Value, text: String) -> D
         file["object_sha256"].as_str().unwrap_or("")
     );
     doc.kind = "attachment".into();
+    // 父事件的说话人授权附件来源，不代表附件内容由该角色逐字说出。
+    doc.role = None;
     doc.text = text;
     doc.evidence = "Attachment/Content".into();
     doc.evidence_refs = vec![parent.reference.clone()];
@@ -243,9 +250,7 @@ impl Context<'_> {
             .ok_or("附件来源不可访问、已修订或已抑制")?;
         let event = self.vault.event(id)?;
         let (file, text) = verified_body(self.vault, &event, object)?;
-        let snapshot = hash(
-            &serde_json::to_vec(&json!([PROJECTION, event, object])).map_err(|_| "附件快照无效")?,
-        );
+        let snapshot = snapshot(&event, object)?;
         if sources {
             if args.cursor.is_some() || args.offset_bytes.is_some() {
                 return Err("附件 sources 返回父事件引用，不支持正文偏移".into());

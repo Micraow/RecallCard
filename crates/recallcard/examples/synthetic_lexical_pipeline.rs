@@ -93,6 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             query_instruction: "synthetic-query".into(),
             document_instruction: "synthetic-corpus".into(),
             events_approved: true,
+            attachments_approved: false,
             query_approved: true,
             chunk_bytes: args[5].parse()?,
             disk_cap_mib: 32,

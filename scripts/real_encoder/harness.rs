@@ -54,7 +54,7 @@ fn run(config: Value) -> Result<Value, String> {
             revision:config["space_revision"].as_str().ok_or("revision_invalid")?.into(),
             tokenizer:config["tokenizer_identity"].as_str().ok_or("tokenizer_invalid")?.into(),
             dimensions:512, query_instruction:config["query_instruction"].as_str().ok_or("prefix_invalid")?.into(),
-            document_instruction:String::new(), events_approved:true, query_approved:true,
+            document_instruction:String::new(), events_approved:true, attachments_approved:false, query_approved:true,
             chunk_bytes:1024, disk_cap_mib:16,
         }, config["python"].as_str().ok_or("python_invalid")?.into(),
         config["python_path"].as_str().ok_or("python_path_invalid")?.into())?;
