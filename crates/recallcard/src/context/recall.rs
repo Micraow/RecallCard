@@ -119,7 +119,7 @@ fn merge_candidates(groups: &[Vec<Value>]) -> Vec<Value> {
                         row["ref"].clone().to_string(),
                         row["snapshot"].clone().to_string(),
                     );
-                    if rows.len() < LIMIT && seen.insert(key) {
+                    if seen.insert(key) {
                         let mut row = row.clone();
                         row["final_rank"] = json!(rows.len() + 1);
                         rows.push(row);
@@ -128,7 +128,108 @@ fn merge_candidates(groups: &[Vec<Value>]) -> Vec<Value> {
             }
         }
     }
+    while rows.len() > LIMIT {
+        rows.remove(budget_drop_index(&rows));
+    }
+    for (index, row) in rows.iter_mut().enumerate() {
+        row["final_rank"] = json!(index + 1);
+    }
     rows
+}
+// At the lowest remaining protected-anchor tier, discard a repeated source kind
+// before its only representative. This is a bounded presentation policy, not a
+// relevance judgment; it cannot introduce a source or cross an access scope.
+fn budget_drop_index(rows: &[Value]) -> usize {
+    let last = rows.len() - 1;
+    let protected = rows[last]["retrieval_support"]["protected"] == true;
+    let tier: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| (row["retrieval_support"]["protected"] == true) == protected)
+        .collect();
+    tier.iter()
+        .rev()
+        .find(|(_, row)| {
+            tier.iter()
+                .filter(|(_, other)| other["kind"] == row["kind"])
+                .count()
+                > 1
+        })
+        .map_or(last, |(index, _)| *index)
+}
+fn fit_search_budget(result: &mut Value) -> Result<()> {
+    let bytes = |value: &Value| {
+        serde_json::to_vec(value)
+            .map(|bytes| bytes.len())
+            .map_err(|_| "检索结果无法序列化".to_owned())
+    };
+    if bytes(result)? <= BUDGET {
+        return Ok(());
+    }
+    result["truncated"] = json!(true);
+    result["coverage"]["budget_limited"] = json!(true);
+    result["status"] = json!("partial");
+    // Full identity, fetch locator, text/range/hash, role, parent evidence and
+    // channel scores remain unchanged. Omit the optional session label and
+    // diagnostics already represented in nested retrieval metadata.
+    for row in result["results"].as_array_mut().unwrap() {
+        if let Some(object) = row.as_object_mut() {
+            object.remove("session_ref");
+            // Legacy semantic-only rows have no nested retrieval metadata.
+            // Never erase their sole rank or the original indexed chunk.
+            if object.get("semantic_rank").is_some()
+                && object.get("semantic_rank")
+                    == object.get("retrieval").and_then(|r| r.get("semantic_rank"))
+            {
+                object.remove("semantic_rank");
+            }
+        }
+        if let Some(support) = row["retrieval_support"].as_object_mut() {
+            support.remove("case_policy");
+        }
+    }
+    result["coverage"]["presentation"] = json!("compact_index_metadata_full_source_via_fetch");
+    if !result["coverage"]["budget_omitted_by_kind"].is_object() {
+        result["coverage"]["budget_omitted_by_kind"] = json!({});
+    }
+    while bytes(result)? > BUDGET {
+        if result["results"].as_array().unwrap().is_empty() {
+            return Err("检索元数据超过固定预算".into());
+        }
+        // A row that cannot fit even alone must not evict smaller rows first.
+        // Keep its omission explicit; no source text or binding is shortened.
+        let mut impossible = None;
+        for (index, row) in result["results"].as_array().unwrap().iter().enumerate() {
+            let mut alone = result.clone();
+            alone["results"] = json!([row]);
+            alone["match_count"] = json!(1);
+            if bytes(&alone)? > BUDGET {
+                impossible = Some(index);
+                break;
+            }
+        }
+        let rows = result["results"].as_array_mut().unwrap();
+        let removed = rows.remove(impossible.unwrap_or_else(|| budget_drop_index(rows)));
+        let kind = removed["kind"].as_str().unwrap_or("unknown");
+        let omitted = result["coverage"]["budget_omitted_by_kind"][kind]
+            .as_u64()
+            .unwrap_or(0);
+        result["coverage"]["budget_omitted_by_kind"][kind] = json!(omitted + 1);
+        let count = result["results"].as_array().unwrap().len();
+        result["match_count"] = json!(count);
+        if count == 0 {
+            result["status"] = json!("budget_exhausted");
+        }
+        for (index, row) in result["results"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            row["final_rank"] = json!(index + 1);
+        }
+    }
+    Ok(())
 }
 impl Context<'_> {
     pub fn recall_search(&self, args: RecallSearchArgs) -> Result<Value> {
@@ -314,9 +415,23 @@ impl Context<'_> {
             groups.push(rows);
         }
         attachment_status["semantic"] = json!(attachment_semantic_available);
-        let candidate_count = groups
+        let all_candidates = groups
             .iter()
             .flatten()
+            .map(|r| {
+                (
+                    (
+                        r["scope"].to_string(),
+                        r["ref"].to_string(),
+                        r["snapshot"].to_string(),
+                    ),
+                    r["kind"].as_str().unwrap_or("unknown").to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let rows = merge_candidates(&groups);
+        let selected = rows
+            .iter()
             .map(|r| {
                 (
                     r["scope"].to_string(),
@@ -324,11 +439,16 @@ impl Context<'_> {
                     r["snapshot"].to_string(),
                 )
             })
-            .collect::<BTreeSet<_>>()
-            .len();
-        let rows = merge_candidates(&groups);
-        partial |= rows.len() < candidate_count;
-        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"attachments":attachment_status,"budget_limited":budget_limited,"local_event_semantic":semantic_available,"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"protected_excerpt_tiers_then_stable_round_robin_not_cross_model_score","note":"候选不是答案；未配置或未覆盖不表示没有历史。精确锚点只在有界候选预览中核对，语义相近也可能完全无关；尚无经过校准的相关性或可回答性判定。旧search仍可显式进行关键词检索。"}});
+            .collect::<BTreeSet<_>>();
+        let mut omitted = std::collections::BTreeMap::<String, usize>::new();
+        for (key, kind) in &all_candidates {
+            if !selected.contains(key) {
+                *omitted.entry(kind.clone()).or_default() += 1;
+            }
+        }
+        partial |= rows.len() < all_candidates.len();
+        budget_limited |= !omitted.is_empty();
+        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"attachments":attachment_status,"budget_limited":budget_limited,"budget_omitted_by_kind":omitted,"local_event_semantic":semantic_available,"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"protected_excerpt_tiers_then_stable_round_robin_not_cross_model_score","candidate_budget_policy":"compact_metadata_then_keep_source_kind_within_protected_tier/v1","note":"候选不是答案；未配置或未覆盖不表示没有历史。精确锚点只在有界候选预览中核对，语义相近也可能完全无关；尚无经过校准的相关性或可回答性判定。旧search仍可显式进行关键词检索。"}});
         if result["results"].as_array().unwrap().is_empty() && partial {
             result["status"] = json!(if budget_limited {
                 "budget_exhausted"
@@ -336,22 +456,7 @@ impl Context<'_> {
                 "unavailable"
             });
         }
-        while serde_json::to_vec(&result)
-            .map_err(|_| "检索结果无法序列化")?
-            .len()
-            > BUDGET
-        {
-            result["truncated"] = json!(true);
-            result["coverage"]["budget_limited"] = json!(true);
-            result["status"] = json!("partial");
-            if result["results"].as_array_mut().unwrap().pop().is_none() {
-                return Err("检索元数据超过固定预算".into());
-            }
-            result["match_count"] = json!(result["results"].as_array().unwrap().len());
-            if result["match_count"] == 0 {
-                result["status"] = json!("budget_exhausted");
-            }
-        }
+        fit_search_budget(&mut result)?;
         Ok(result)
     }
     pub fn recall_fetch(&self, args: RecallFetchArgs) -> Result<Value> {
@@ -456,5 +561,120 @@ mod ranking_tests {
         assert!(rows
             .iter()
             .all(|r| r["retrieval_support"]["protected"] == true));
+    }
+    fn full_row(kind: &str, number: usize, text_bytes: usize) -> Value {
+        let reference = format!("{kind}:synthetic-{number}");
+        let text = "x".repeat(text_bytes);
+        json!({"ref":reference,"kind":kind,"scope":"personal","snapshot":"a".repeat(64),
+            "id":format!("rcs1|personal|{reference}|{}|{}|{}|{}|0", "a".repeat(64), "b".repeat(64), "c".repeat(64), "d".repeat(64)),
+            "text":text,"text_hash":hash(text.as_bytes()),"text_range":{"start_byte":0,"end_byte":text_bytes,"total_bytes":text_bytes,"projection":if kind=="attachment"{"attachment.utf8/1"}else{"event.text"}},
+            "text_truncated":false,"role":if kind=="attachment"{Value::Null}else{json!("user")},
+            "evidence":if kind=="attachment"{"Attachment/Content"}else{"User/UserInput"},"evidence_refs":["event:parent"],
+            "score":0.5,"score_kind":"cosine","semantic_rank":number+1,
+            "content_hash":"e".repeat(64),"matched_chunk":{"start_byte":0,"end_byte":text_bytes,"text_hash":"f".repeat(64)},
+            "session_ref":"s".repeat(128),"retrieval":{"semantic_rank":number+1,"lexical_rank":null,"semantic_evidence":{"score":0.5}},
+            "retrieval_support":{"protected":false,"kind":"semantic_candidate","case_policy":"protected_case_sensitive_ascii_support_case_insensitive"}})
+    }
+    fn budget_page(rows: Vec<Value>) -> Value {
+        json!({"results":rows,"match_count":rows.len(),"status":"ok","truncated":false,
+            "coverage":{"budget_limited":false,"note":"synthetic coverage ".repeat(70)}})
+    }
+    #[test]
+    fn compact_diagnostics_before_discarding_otherwise_fitting_sources() {
+        let original = vec![
+            full_row("attachment", 0, 1050),
+            full_row("event", 1, 1050),
+            full_row("event", 2, 1050),
+        ];
+        let mut page = budget_page(original.clone());
+        // Negative control: the previous tail-pop loop loses a source here.
+        assert!(serde_json::to_vec(&page).unwrap().len() > BUDGET);
+        fit_search_budget(&mut page).unwrap();
+        assert!(serde_json::to_vec(&page).unwrap().len() <= BUDGET);
+        assert_eq!(page["results"].as_array().unwrap().len(), 3);
+        assert_eq!(page["coverage"]["budget_omitted_by_kind"], json!({}));
+        for (before, after) in original.iter().zip(page["results"].as_array().unwrap()) {
+            for key in [
+                "id",
+                "ref",
+                "snapshot",
+                "text",
+                "text_hash",
+                "text_range",
+                "role",
+                "evidence_refs",
+                "content_hash",
+                "matched_chunk",
+                "retrieval",
+            ] {
+                assert_eq!(before[key], after[key], "{key}");
+            }
+        }
+    }
+    #[test]
+    fn byte_budget_keeps_only_event_before_removing_repeated_attachments() {
+        let mut page = budget_page(vec![
+            full_row("attachment", 0, 3100),
+            full_row("attachment", 1, 3100),
+            full_row("event", 2, 200),
+        ]);
+        fit_search_budget(&mut page).unwrap();
+        let rows = page["results"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["kind"], "attachment");
+        assert_eq!(rows[1]["kind"], "event");
+        assert_eq!(page["coverage"]["budget_omitted_by_kind"]["attachment"], 1);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= BUDGET);
+        assert_eq!(rows[1]["final_rank"], 2);
+    }
+    #[test]
+    fn source_kind_reservation_never_promotes_unprotected_over_protected() {
+        let mut rows = vec![
+            full_row("attachment", 0, 1),
+            full_row("attachment", 1, 1),
+            full_row("event", 2, 1),
+        ];
+        rows[0]["retrieval_support"]["protected"] = json!(true);
+        rows[1]["retrieval_support"]["protected"] = json!(true);
+        assert_eq!(budget_drop_index(&rows), 2);
+    }
+    #[test]
+    fn result_limit_retains_source_kind_and_deduplicates_lexical_lane() {
+        let mut mixed: Vec<_> = (0..10).map(|n| full_row("attachment", n, 1)).collect();
+        mixed.push(full_row("event", 10, 1));
+        let rows = merge_candidates(&[mixed.clone(), vec![mixed[0].clone()]]);
+        assert_eq!(rows.len(), LIMIT);
+        assert_eq!(rows.iter().filter(|row| row["kind"] == "event").count(), 1);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["ref"] == mixed[0]["ref"])
+                .count(),
+            1
+        );
+        assert_eq!(rows[9]["final_rank"], 10);
+    }
+    #[test]
+    fn oversized_first_source_does_not_evict_smaller_other_kind() {
+        let mut page = budget_page(vec![
+            full_row("attachment", 0, 9000),
+            full_row("event", 1, 100),
+        ]);
+        fit_search_budget(&mut page).unwrap();
+        assert_eq!(page["results"].as_array().unwrap().len(), 1);
+        assert_eq!(page["results"][0]["kind"], "event");
+        assert_eq!(page["coverage"]["budget_omitted_by_kind"]["attachment"], 1);
+    }
+    #[test]
+    fn legacy_semantic_rank_survives_compaction_and_small_pages_are_unchanged() {
+        let mut source = full_row("event", 0, 100);
+        source["retrieval"] = Value::Null;
+        let mut small = budget_page(vec![source.clone()]);
+        let original = small.clone();
+        fit_search_budget(&mut small).unwrap();
+        assert_eq!(small, original);
+        let mut large = budget_page(vec![source, full_row("attachment", 1, 9000)]);
+        fit_search_budget(&mut large).unwrap();
+        assert_eq!(large["results"][0]["semantic_rank"], 1);
+        assert!(large["results"][0]["retrieval"].is_null());
     }
 }

@@ -208,7 +208,7 @@ export interface AttachmentCoverage {
   file_bytes_limit?:number; total_bytes_limit?:number; file_limit?:number;
 }
 export interface SearchPage {
-  coverage?: {attachments?:AttachmentCoverage;event_search?: string; cloud_fallback?: boolean; scopes?: {scope:string;state:string;query_encoding?:string;verification_limited?:boolean;attachments?:AttachmentCoverage;lexical?:EventLexicalCoverage;fusion?:string;semantic?:{status?:string;reason?:string|null}}[]; lexical?:EventLexicalCoverage; fusion?:string; candidate_verification_limited?:boolean; local_event_semantic?: boolean; memory_search?: string; chunk_selection?: string; semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string; semantic_coverage?: string; lexical_matching?: string; lexical_match?: string};
+  coverage?: {presentation?:string; budget_limited?:boolean; budget_omitted_by_kind?:{event?:number;attachment?:number;memory?:number}; candidate_budget_policy?:string; attachments?:AttachmentCoverage;event_search?: string; cloud_fallback?: boolean; scopes?: {scope:string;state:string;query_encoding?:string;verification_limited?:boolean;attachments?:AttachmentCoverage;lexical?:EventLexicalCoverage;fusion?:string;semantic?:{status?:string;reason?:string|null}}[]; lexical?:EventLexicalCoverage; fusion?:string; candidate_verification_limited?:boolean; local_event_semantic?: boolean; memory_search?: string; chunk_selection?: string; semantic_search?: string; semantic_error?: string; semantic_query_encoding?: string; semantic_coverage?: string; lexical_matching?: string; lexical_match?: string};
   results: SearchRow[];
   truncated?: boolean;
 }

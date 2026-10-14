@@ -736,7 +736,14 @@ class EventIndex:
             require(scanned == row[2], "corrupt_snapshot")
             semantic = sorted(heap, key=lambda r:r[:3], reverse=True)
             sem_by_ref = {r[1]: (rank, r) for rank, r in enumerate(semantic, 1)}
-            lex_by_ref = {r[0]: (rank, r) for rank, r in enumerate(lex_candidates, 1)}
+            # 词法同分共享competition名次（1,1,3）；ref只稳定候选窗口和
+            # 完全同分的顺序，不能凭来源类型或标识符获得额外RRF权重。
+            lex_by_ref = {}
+            lexical_rank, previous_matched = 0, None
+            for position, candidate in enumerate(lex_candidates, 1):
+                if candidate[2] != previous_matched:
+                    lexical_rank, previous_matched = position, candidate[2]
+                lex_by_ref[candidate[0]] = (lexical_rank, candidate)
             require(len(lexical_items) == len(lex_by_ref), "corrupt_lexical_index")
             union = set(sem_by_ref) | set(lex_by_ref)
             require(len(union) <= 2 * lexical.CHANNEL_LIMIT, "candidate_limit")

@@ -1,6 +1,7 @@
 """独立 Event 索引只用合成文字/数值；这些测试不证明模型语义质量。"""
 import io
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -23,6 +24,7 @@ from recallcard_worker.event_index import (
     canonical, digest, read_config, serve, vector_blob, decode_blob,
     main,
 )
+from recallcard_worker import event_lexical as lexical
 
 
 def settings(path):
@@ -90,6 +92,96 @@ class EventIndexTests(unittest.TestCase):
         return self.ok("finish", worker=worker, **{k: result[k] for k in ("build_id", "source_epoch", "source_count", "chunk_count", "receipt")})
     def published(self):
         return self.finish(self.put(self.begin()))
+    def publish_rank_fixture(self, entries, query="anchor", epoch="rank-fixture"):
+        """真实索引与协议，只有encoder返回确定数值；不连接模型服务。"""
+        self.encoder.vectors[query] = [1., 0., 0., 0.]
+        build = self.ok("begin", source_epoch=digest(epoch.encode()), lexical_version=lexical.VERSION)
+        for i, (ref, body, cosine) in enumerate(entries):
+            self.encoder.vectors[body] = [cosine, math.sqrt(1 - cosine**2), 0., 0.]
+            receipt = self.ok("upsert", build_id=build["build_id"], batch_id=f"rank-{i}",
+                              source=self.source(content=body, ref=ref,
+                                  role=None if ref.startswith("attachment:") else "user"),
+                              source_chunk_count=1,
+                              chunks=[{**self.chunk(body), "lexical_before": "", "lexical_after": ""}])
+        return self.finish(receipt)
+
+    def test_lexical_ties_preserve_semantic_order_across_kind_and_ref_permutations(self):
+        self.worker = EventIndex({**self.config, "attachments_approved": True}, encoder=self.encoder)
+        attachment = self.attachment_source()["ref"]
+        mappings = (
+            ("event:z", attachment),
+            (attachment, "event:z"),
+            ("event:z", "event:a"),
+            ("event:a", "event:z"),
+        )
+        for i, (high_ref, low_ref) in enumerate(mappings):
+            with self.subTest(high_ref=high_ref, low_ref=low_ref):
+                self.publish_rank_fixture([
+                    (high_ref, "anchor higher support", .9),
+                    (low_ref, "anchor lower support", .1),
+                ], epoch=f"permutation-{i}")
+                page = self.ok("query", query="anchor", limit=2)
+                rows = page["results"]
+                self.assertEqual([row["ref"] for row in rows], [high_ref, low_ref])
+                self.assertEqual([row["retrieval"]["lexical_rank"] for row in rows], [1, 1])
+                self.assertEqual([row["retrieval"]["semantic_rank"] for row in rows], [1, 2])
+                self.assertEqual([row["retrieval"]["lexical_matched_terms"] for row in rows], [1, 1])
+                self.assertEqual([row["retrieval"]["fused_rank"] for row in rows], [1, 2])
+                for rank, row, cosine in zip((1, 2), rows, (.9, .1)):
+                    self.assertAlmostEqual(row["score"], cosine, places=6)
+                    self.assertAlmostEqual(row["retrieval"]["fusion_score"],
+                                           1 / (60 + rank) + 1 / 61, delta=1e-12)
+                    self.assertEqual(row["retrieval"]["semantic_evidence"]["score"], row["score"])
+                self.assertEqual(page["coverage"]["fusion"], "rrf/2:k=60:lexical-competition")
+                self.assertEqual(page["coverage"]["lexical"]["rank_policy"], "competition_by_matched_terms")
+                self.assertEqual(page["coverage"]["lexical"]["candidate_order"], "matched_terms_desc_ref_asc_ordinal_asc")
+                self.assertEqual(page["coverage"]["semantic_candidates"], 2)
+                self.assertEqual(page["coverage"]["lexical_candidates"], 2)
+                self.assertEqual(page["coverage"]["union_candidates"], 2)
+                semantic = self.ok("query", query="anchor", limit=2, retrieval_mode="semantic_only")
+                self.assertEqual([row["ref"] for row in semantic["results"]], [high_ref, low_ref])
+                self.assertTrue(all(row["retrieval"]["lexical_rank"] is None for row in semantic["results"]))
+                self.assertEqual(semantic["coverage"]["fusion"], "semantic_only")
+
+    def test_lexical_competition_rank_skips_tied_positions(self):
+        self.publish_rank_fixture([
+            ("event:z", "anchor beacon first", .9),
+            ("event:a", "anchor beacon second", .7),
+            ("event:m", "anchor third", .1),
+        ], query="anchor beacon")
+        rows = self.ok("query", query="anchor beacon", limit=3)["results"]
+        self.assertEqual([row["ref"] for row in rows], ["event:z", "event:a", "event:m"])
+        self.assertEqual([row["retrieval"]["lexical_matched_terms"] for row in rows], [2, 2, 1])
+        self.assertEqual([row["retrieval"]["lexical_rank"] for row in rows], [1, 1, 3])
+        self.assertEqual([row["retrieval"]["semantic_rank"] for row in rows], [1, 2, 3])
+        for row, semantic_rank, lexical_rank in zip(rows, (1, 2, 3), (1, 1, 3)):
+            self.assertAlmostEqual(row["retrieval"]["fusion_score"],
+                                   1 / (60 + semantic_rank) + 1 / (60 + lexical_rank), delta=1e-12)
+
+    def test_distinct_lexical_signal_can_still_reorder_semantic_results(self):
+        self.worker = EventIndex({**self.config, "attachments_approved": True}, encoder=self.encoder)
+        high_ref, low_ref = "event:z", self.attachment_source()["ref"]
+        self.publish_rank_fixture([
+            (high_ref, "anchor higher support", .9),
+            (low_ref, "anchor beacon lower support", .1),
+        ], query="anchor beacon")
+        rows = self.ok("query", query="anchor beacon", limit=2)["results"]
+        self.assertEqual([row["ref"] for row in rows], [low_ref, high_ref])
+        self.assertEqual([row["retrieval"]["lexical_matched_terms"] for row in rows], [2, 1])
+        self.assertEqual([row["retrieval"]["lexical_rank"] for row in rows], [1, 2])
+        self.assertEqual([row["retrieval"]["semantic_rank"] for row in rows], [2, 1])
+        self.assertAlmostEqual(rows[0]["retrieval"]["fusion_score"],
+                               rows[1]["retrieval"]["fusion_score"], delta=1e-12)
+        # 负控仍使用原cosine路线；真实词法差异不进入semantic_only。
+        semantic = self.ok("query", query="anchor beacon", limit=2, retrieval_mode="semantic_only")
+        self.assertEqual([row["ref"] for row in semantic["results"]], [high_ref, low_ref])
+        self.assertEqual(semantic["coverage"]["lexical_candidates"], 0)
+        self.assertTrue(semantic["coverage"]["lexical"]["disabled"])
+        for rank, row in enumerate(semantic["results"], 1):
+            self.assertIsNone(row["retrieval"]["lexical_rank"])
+            self.assertEqual(row["retrieval"]["lexical_matched_terms"], 0)
+            self.assertEqual(row["retrieval"]["lexical_query_terms"], 0)
+            self.assertAlmostEqual(row["retrieval"]["fusion_score"], 1 / (60 + rank), delta=1e-12)
 
     def test_fixed_config_is_rechecked_before_queued_and_direct_encoding(self):
         path = self.root / "worker.json"

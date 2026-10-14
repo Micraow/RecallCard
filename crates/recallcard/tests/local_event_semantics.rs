@@ -200,7 +200,10 @@ fn shared_local_gateway_reaches_mcp_native_and_keeps_current_grants() {
         found["coverage"]["scopes"][0]["lexical"]["status"],
         "available"
     );
-    assert_eq!(found["coverage"]["scopes"][0]["fusion"], "rrf/1:k=60");
+    assert_eq!(
+        found["coverage"]["scopes"][0]["fusion"],
+        "rrf/2:k=60:lexical-competition"
+    );
     assert_eq!(found["results"][0]["retrieval"]["lexical_rank"], 1);
     assert!(!found.to_string().contains(&hidden));
     assert!(serde_json::to_vec(&found).unwrap().len() <= 8192);
@@ -881,4 +884,91 @@ fn old_event_configuration_without_attachment_field_stays_query_only_compatible(
         legacy.search("test-query-a", 10).unwrap()["results"][0]["ref"],
         expected
     );
+}
+
+#[test]
+fn compact_mixed_facade_preserves_utf8_fetch_and_rejects_withdrawal() {
+    use recallcard::{context::Context, policy::Access, transport};
+    use std::collections::BTreeMap;
+    let (_server, endpoint) = server();
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::init(&dir.path().join("vault")).unwrap();
+    let mut originals = BTreeMap::new();
+    for number in 0..8 {
+        let body = format!(
+            "{}synthetic-alpha 合成编号{number}，保留引号\"和换行\n终点。",
+            "前缀🙂 ".repeat(64)
+        );
+        let reference = if number % 2 == 0 {
+            event(&vault, "personal", &body, "user_input")
+        } else {
+            let object = recallcard::hash(body.as_bytes());
+            std::fs::write(vault.root().join("objects").join(&object), &body).unwrap();
+            let parent = vault.capture(serde_json::from_value(json!({
+                "scope":"personal","role":"user","origin":"user_input","content":"",
+                "source":{"platform":"synthetic","conversation_id":"compact-mixed","message_id":number.to_string()},
+                "metadata":{"source_assets":{"files":[{"name":format!("synthetic-{number}.txt"),"payload_status":"retained","declared_media_type":"text/plain","detected_media_type":"text/plain","object_sha256":object,"byte_count":body.len()}]}}
+            })).unwrap()).unwrap();
+            format!("attachment:{}/{}", parent.id, object)
+        };
+        originals.insert(reference, body);
+    }
+    let mut settings = setup(endpoint);
+    settings.attachments_approved = true;
+    let python_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../python")
+        .canonicalize()
+        .unwrap();
+    let index = LocalEvents::configure(&vault, "personal", settings, "python3".into(), python_path)
+        .unwrap();
+    refresh(&index);
+    let context = Context::new(&vault, Access::new(vec!["personal".into()]).unwrap());
+    let page = transport::invoke(
+        &context,
+        "recall_search",
+        json!({"query":"synthetic-alpha"}),
+    )
+    .unwrap();
+    assert!(serde_json::to_vec(&page).unwrap().len() <= 8192);
+    assert_eq!(
+        page["coverage"]["presentation"],
+        "compact_index_metadata_full_source_via_fetch"
+    );
+    let rows = page["results"].as_array().unwrap();
+    assert!(rows.iter().any(|row| row["kind"] == "event"));
+    assert!(rows.iter().any(|row| row["kind"] == "attachment"));
+    assert!(rows
+        .iter()
+        .any(|row| row["text_range"]["start_byte"].as_u64().unwrap() > 0));
+    for row in rows {
+        let original = &originals[row["ref"].as_str().unwrap()];
+        let start = row["text_range"]["start_byte"].as_u64().unwrap() as usize;
+        let end = row["text_range"]["end_byte"].as_u64().unwrap() as usize;
+        assert_eq!(row["text"], original[start..end]);
+        assert_eq!(
+            row["text_hash"],
+            recallcard::hash(&original.as_bytes()[start..end])
+        );
+        if row["retrieval"].is_object() {
+            assert_eq!(row["content_hash"], recallcard::hash(original.as_bytes()));
+            assert!(row["matched_chunk"].is_object());
+        }
+        let fetched = transport::invoke(&context, "recall_fetch", json!({"id":row["id"]})).unwrap();
+        let found = &fetched["results"][0];
+        let finish = found["text_range"]["end_byte"].as_u64().unwrap() as usize;
+        assert_eq!(found["text_range"]["start_byte"], start);
+        assert_eq!(found["text"], original[start..finish]);
+        assert_eq!(found["snapshot"], row["snapshot"]);
+    }
+    let selected = rows.iter().find(|row| row["kind"] == "event").unwrap();
+    vault
+        .suppress(
+            selected["ref"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("event:"),
+            "synthetic withdrawal after compact result".into(),
+        )
+        .unwrap();
+    assert!(transport::invoke(&context, "recall_fetch", json!({"id":selected["id"]})).is_err());
 }

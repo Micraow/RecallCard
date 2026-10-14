@@ -107,6 +107,19 @@ export function validCloudSemanticSettings(value:CloudEmbeddingSettings):boolean
 }
 
 export function recallCoverageNotes(page: SearchPage): string[] {
+  const compactMetadata=page.coverage?.presentation==='compact_index_metadata_full_source_via_fetch';
+  const omitted=page.coverage?.budget_omitted_by_kind;
+  const omittedKinds=([['event','普通对话'],['attachment','附件'],['memory','记忆']] as const).flatMap(([kind,label])=>{
+    const count=omitted?.[kind];
+    return typeof count==='number'&&Number.isSafeInteger(count)&&count>0?[`${label} ${count} 项`]:[];
+  });
+  const budgetNotes=[
+    ...(compactMetadata?['本次返回采用紧凑索引元数据，保留片段正文和来源定位信息；完整来源可按引用读取。']:[]),
+    ...(omittedKinds.length>0?[`本次返回预算省略了${omittedKinds.join('、')}候选；未展示的来源不代表不存在，也不保证每种来源类型均有保留。`]:[]),
+    ...(page.coverage?.budget_limited===true&&!compactMetadata&&omittedKinds.length===0?['本次返回受到预算限制，请按已知引用读取来源核对。']:[]),
+  ];
+  // 已有明确预算说明时，不把仅精简索引元数据误报为正文或来源被截断。
+  const genericTruncation=page.truncated&&budgetNotes.length===0;
   const attachments=page.coverage?.attachments;
   // 各范围是语义索引来源的覆盖依据；顶部的计数/上限仍属于另一条词法扫描路线。
   const scopedAttachments=page.coverage?.scopes?.flatMap(scope=>scope.attachments&&scope.attachments.status!=='not_approved'&&scope.attachments.status!=='not_requested'?[scope.attachments]:[])||[];
@@ -137,7 +150,7 @@ export function recallCoverageNotes(page: SearchPage): string[] {
   ]:[];
   const lexical=[...(!directFallback&&page.coverage?.lexical?[page.coverage.lexical]:[]),...readyScopes.flatMap(scope=>scope.lexical?[scope.lexical]:[])];
   if(page.coverage?.local_event_semantic) return [
-    ...attachmentNotes, ...fallbackNotes,
+    ...budgetNotes, ...attachmentNotes, ...fallbackNotes,
     (page.coverage.semantic_query_encoding==='cache'||readyScopes.length>0&&readyScopes.every(scope=>scope.query_encoding==='cache'))?'本次使用已缓存的本机问题向量。':'本次问题已发送到你批准的本机编码服务。',
     (attachmentSemantic?'本次独立批准的资料已参与本机语义检索':'普通对话已直接参与本机语义检索')+'，无需先整理成 Memory；记忆条目按词法补充，此入口没有云回退。',
     (attachmentSemantic?'每项资料':'每条原话')+'展示一处来源已核验的匹配片段，可能由词法或语义通道选中。角色、时间、否定与后续纠正仍需回到来源核对。',
@@ -148,18 +161,18 @@ export function recallCoverageNotes(page: SearchPage): string[] {
     ...(lexical.some(item=>item.candidates_truncated)?['词法候选达到本次扫描或数量预算，未展示的精确来源仍可能存在。']:[]),
     '相似候选可能完全无关；尚未校准相关性或可回答性，不能把返回结果当作已经记起事实。',
     ...(page.coverage.candidate_verification_limited||readyScopes.some(scope=>scope.verification_limited)?['来源核验受到时间或资源门槛限制，部分候选尚未核验；请缩小范围或稍后重试。']:[]),
-    ...(page.truncated?['候选、片段或核验达到本次预算，未展示的来源不代表不存在。']:[])];
-  if(fallbackNotes.length>0) return [...attachmentNotes,...fallbackNotes];
+    ...(genericTruncation?['候选、片段或核验达到本次预算，未展示的来源不代表不存在。']:[])];
+  if(fallbackNotes.length>0) return [...budgetNotes,...attachmentNotes,...fallbackNotes];
   if(page.coverage?.cloud_fallback===false) return [
-    ...attachmentNotes,
+    ...budgetNotes, ...attachmentNotes,
     page.coverage.event_search==='local_only'?'本机普通对话索引尚未可用或未覆盖全部范围；现有 Memory 仅按词法补充。':'尚未配置普通对话本机索引，本次只在本地按关键词寻找原话和记忆。',
     '此入口不会改用云编码；未命中或未覆盖不表示没有相关历史。',
     ...(page.coverage.lexical_match==='natural_question'?['按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。']:[]),
-    ...(page.truncated?['候选、覆盖或文字预算有限，请核对状态并回到来源。']:[])];
-  const notes = [...attachmentNotes, semanticSearchNote(page.coverage) || "本次未提供语义检索状态，不能据此确认语义覆盖。"];
+    ...(genericTruncation?['候选、覆盖或文字预算有限，请核对状态并回到来源。']:[])];
+  const notes = [...budgetNotes, ...attachmentNotes, semanticSearchNote(page.coverage) || "本次未提供语义检索状态，不能据此确认语义覆盖。"];
   if (page.coverage?.lexical_match === "natural_question") notes.push("按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。");
   notes.push("当前入口的语义候选只覆盖已建索引的记忆；原始聊天仍通过词法查找，尚不保证换个说法也能找到。");
-  if (page.truncated) notes.push(attachmentPartial ? "本次附件覆盖不完整，未展示的来源并不代表不存在；请先查看上方附件状态。" : "本次结果达到数量或文字预算上限，未展示的来源并不代表不存在；可换用更具体的关键词继续找。");
+  if (genericTruncation) notes.push(attachmentPartial ? "本次附件覆盖不完整，未展示的来源并不代表不存在；请先查看上方附件状态。" : "本次结果达到数量或文字预算上限，未展示的来源并不代表不存在；可换用更具体的关键词继续找。");
   return notes;
 }
 

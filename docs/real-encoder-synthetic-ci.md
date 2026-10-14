@@ -9,6 +9,10 @@
 - 不上传聊天、真实事件、Vault、索引、运行配置、凭据、日志或机器路径。产物白名单仅两个 JSON：合成指标 summary 与包名/版本/包摘要 dependency lock。
 - 只需 `contents: read`。不改变任何仓库/账户/安全配置，没有在线推理和自动云端回退。GitHub Actions 的实际计费未读取，不能声称运行免费。
 
+## 产品提供器与本次评估后端
+
+BGE 只是此 CI 的固定、可离线复现评估后端，不是 RecallCard 产品绑定。现有云设置接受可配置 HTTPS OpenAI-compatible embedding 地址、模型、维度与独立 query/Memory 批准及月预算，可用于符合该协议的 Qwen 等提供器；这不代表已真实调用或验收某个云模型。当前新 Event/附件索引仍采用独立本机端点与批准，不继承旧云 query/Memory 批准。
+
 ## 固定模型和可复现来源
 
 - FastEmbed 0.9.0，BAAI/bge-small-zh-v1.5，512 维，CLS pooling，L2 normalization。

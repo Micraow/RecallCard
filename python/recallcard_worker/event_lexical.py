@@ -20,7 +20,7 @@ MAX_TOTAL_TERMS = 2_000_000
 MAX_POSTINGS = 8192
 MAX_CANDIDATE_CHUNKS = 1024
 CHANNEL_LIMIT = 100
-FUSION = "rrf/1:k=60"
+FUSION = "rrf/2:k=60:lexical-competition"
 ASCII = re.compile(r"[A-Za-z0-9_./:+#-]+")
 
 
@@ -239,6 +239,8 @@ def candidates(db, generation, scope, query_terms):
         "query_terms_visited": len(visited), "posting_order": "round_robin_terms",
         "candidate_chunks": len(found), "candidates_limit": MAX_CANDIDATE_CHUNKS,
         "candidates_truncated": truncated, "channel_limit": CHANNEL_LIMIT,
+        "rank_policy": "competition_by_matched_terms",
+        "candidate_order": "matched_terms_desc_ref_asc_ordinal_asc",
         "case_policy": "ascii_case_sensitive", "match_policy": "whole_ascii_or_han_bigram",
         "term_max_bytes": MAX_TERM_BYTES, "query_term_limit": MAX_QUERY_TERMS,
     }

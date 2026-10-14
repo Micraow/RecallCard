@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {validLocalEventSettings,normalizeLocalEventSettings,validCloudSemanticSettings,recallCoverageNotes,type LocalEventSetup} from '../src/service/setup.ts';
+import type {SearchPage} from '../src/service/types.ts';
 const settings:LocalEventSetup={endpoint:'http://127.0.0.1:46123/v1/embeddings',model:'synthetic',revision:'fake-v1',tokenizer:'test-only',dimensions:2,query_instruction:'',document_instruction:'',events_approved:false,attachments_approved:false,query_approved:false,chunk_bytes:1024,disk_cap_mib:256};
 test('普通对话本机索引需独立明确范围和版本，拒绝云、凭据地址与越界预算',()=>{
  assert.equal(validLocalEventSettings(settings),false);
@@ -163,4 +164,32 @@ test('scope明确成功可以报告附件通道，混合未批准范围不扩大
  assert.match(notes,/本次独立批准的资料已参与本机语义检索/);
  assert.match(notes,/附件语义索引来源覆盖不完整/);
  assert.doesNotMatch(notes,/普通对话已直接参与|全部范围.*已覆盖/);
+});
+
+test('紧凑索引元数据在所有召回分支解释预算，不误报正文或来源截断',()=>{
+ for(const extra of [{},{semantic_search:'available'},{cloud_fallback:false},{local_event_semantic:true},{fusion:'lexical_only'},{local_event_semantic:true,scopes:[{scope:'personal',state:'degraded',fusion:'lexical_only'}]}]) {
+  const notes=recallCoverageNotes({results:[],truncated:true,coverage:{...extra,budget_limited:true,presentation:'compact_index_metadata_full_source_via_fetch',budget_omitted_by_kind:{event:0,attachment:0,memory:0}}}).join('\n');
+  assert.match(notes,/紧凑索引元数据，保留片段正文和来源定位信息/);
+  assert.match(notes,/完整来源可按引用读取/);
+  assert.doesNotMatch(notes,/预算省略|文字预算|片段或核验达到|正文.*截断|来源.*移除/);
+ }
+});
+test('按种类如实说明预算省略数量，不承诺每类候选必保留',()=>{
+ for(const extra of [{},{cloud_fallback:false},{local_event_semantic:true},{fusion:'lexical_only'}]) {
+  const notes=recallCoverageNotes({results:[],truncated:true,coverage:{...extra,budget_limited:true,presentation:'compact_index_metadata_full_source_via_fetch',budget_omitted_by_kind:{event:2,attachment:1,memory:3},candidate_budget_policy:'protected_anchor_tier_then_source_kind_diversity'}}).join('\n');
+  assert.match(notes,/预算省略了普通对话 2 项、附件 1 项、记忆 3 项候选/);
+  assert.match(notes,/不保证每种来源类型均有保留/);
+  assert.match(notes,/未展示的来源不代表不存在/);
+ }
+});
+test('预算省略计数忽略未知种类和非法数字，未知展示方式不冒充紧凑元数据',()=>{
+ for(const invalid of [undefined,null,-1,0,1.5,NaN,Infinity,Number.MAX_SAFE_INTEGER+1,'2']) {
+  const omitted={event:invalid,attachment:2,memory:invalid,unknown:9} as unknown as NonNullable<SearchPage['coverage']>['budget_omitted_by_kind'];
+  const notes=recallCoverageNotes({results:[],coverage:{budget_limited:true,presentation:'unknown',budget_omitted_by_kind:omitted}}).join('\n');
+  assert.match(notes,/预算省略了附件 2 项候选/);
+  assert.doesNotMatch(notes,/普通对话 .*项|记忆 .*项|NaN|Infinity|unknown|紧凑索引元数据/);
+ }
+ const notes=recallCoverageNotes({results:[],truncated:true,coverage:{budget_limited:true,budget_omitted_by_kind:{event:-1,attachment:NaN,memory:0}}}).join('\n');
+ assert.match(notes,/本次返回受到预算限制/);
+ assert.doesNotMatch(notes,/预算省略|NaN|文字预算/);
 });
