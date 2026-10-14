@@ -66,6 +66,7 @@ export function PortableContextDialog({ service, initialResults, initialGoal, cl
       {!search.loading && page && !fresh && <p role="status">问题已改变，下面仍是旧问题的结果。请重新查找，旧选择暂不能预览或复制。</p>}
       {search.error && <ErrorNotice error={search.error} retry={find} />}
       {fresh && page && <RecallCoverage page={page} />}
+      {fresh && page?.results.some(row => row.kind === "attachment") && <p>附件正文可通过只读检索入口继续读取；当前复制包暂不包含附件，请单独核对原件。</p>}
       {fresh && !choices.length && <p role="status">这次没有找到匹配来源，不代表从未聊过。试试人名、项目名或记得的几个关键词；不会沿用上次的资料。</p>}
       {!!choices.length && <fieldset disabled={busy || !fresh}><legend>相关来源 · 已选 {refs.length} / 8 条 · 共 {choices.length} 条候选</legend>
         {choices.map(choice => <label className="portable-choice" key={choice.ref}>

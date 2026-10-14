@@ -193,6 +193,9 @@ impl Context<'_> {
             );
         }
         let reference = &args.refs[0];
+        if reference.starts_with("attachment:") {
+            return self.attachment_page(&args, sources);
+        }
         let (kind, id, revision) = parse_ref(reference)?;
         if constrained && kind != "event" {
             return Err("event_filter、as_of 和 context_anchor_ref 只用于单个 Event 读取".into());
@@ -479,14 +482,19 @@ impl Context<'_> {
     }
 }
 
-fn page_binding(reference: &str, snapshot: &str, scopes: &[String], mode: &str) -> String {
+pub(super) fn page_binding(
+    reference: &str,
+    snapshot: &str,
+    scopes: &[String],
+    mode: &str,
+) -> String {
     hash(
         json!([reference, snapshot, scopes, mode])
             .to_string()
             .as_bytes(),
     )
 }
-fn page_position(args: &ReadPageArgs, binding: &str) -> Result<usize> {
+pub(super) fn page_position(args: &ReadPageArgs, binding: &str) -> Result<usize> {
     match &args.cursor {
         None => Ok(args.offset_bytes.unwrap_or(0)),
         Some(cursor) => {
@@ -501,7 +509,7 @@ fn page_position(args: &ReadPageArgs, binding: &str) -> Result<usize> {
         }
     }
 }
-fn budget_empty(reference: &str, budget: usize, minimum: usize) -> Result<Value> {
+pub(super) fn budget_empty(reference: &str, budget: usize, minimum: usize) -> Result<Value> {
     let response = json!({"results":[],"pending_refs":[reference],"truncated":true,"next_cursor":null,"status":"budget_exhausted","budget_exhausted":true,"budget_unit":"utf8_bytes","recommended_min_budget":minimum.max(512),"max_budget_bytes":32768,"hint":"资料存在；按 recommended_min_budget 重试相同 ref 和 cursor/offset，最大 32768"});
     if json_size(&response)? > budget {
         return Err("预算不足以输出读取状态".into());

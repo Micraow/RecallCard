@@ -130,8 +130,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pages.push(json!({"query":q["id"],"host":host,"shared":shared,"first_fetch":fetch}));
     }
     let attachment_ref = format!("event:{}", attachment.id);
-    let attachment_pipeline = context.recall_question("pipeline-attachment-note.txt", "events")?;
-    let attachment_not_in_pipeline = !attachment_pipeline["results"]
+    let attachment_pipeline = context.recall_question("ATTACHMENT_BODY_ONLY_834", "events")?;
+    let attachment_row = attachment_pipeline["results"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r["kind"] == "attachment"))
+        .ok_or("附件正文未进入共享词法候选")?;
+    let attachment_id = attachment_row["id"]
+        .as_str()
+        .ok_or("附件缺少读取定位符")?
+        .to_owned();
+    let attachment_fetch =
+        transport::invoke(&context, "recall_fetch", json!({"id":attachment_id}))?;
+    let attachment_not_in_embedding = !index.search("ATTACHMENT_BODY_ONLY_834", 20)?["results"]
         .as_array()
         .ok_or("缺少结果")?
         .iter()
@@ -149,7 +159,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let revoked_search = index.search("E_PIPE_71", 10).is_err();
     let revoked_fetch = saved
         .is_some_and(|id| transport::invoke(&context, "recall_fetch", json!({"id":id})).is_err());
+    vault.suppress(&attachment.id, "合成附件撤回".into())?;
+    let revoked_attachment_fetch =
+        transport::invoke(&context, "recall_fetch", json!({"id":attachment_id})).is_err();
+    let revoked_attachment_search = context
+        .recall_question("ATTACHMENT_BODY_ONLY_834", "events")?["results"]
+        .as_array()
+        .ok_or("附件撤回结果无效")?
+        .is_empty();
     let compiled_source_sha256 = json!({
+        "crates/recallcard/src/context/attachments.rs": recallcard::hash(include_bytes!("../src/context/attachments.rs")),
+        "crates/recallcard/src/context.rs": recallcard::hash(include_bytes!("../src/context.rs")),
+        "crates/recallcard/src/context/search.rs": recallcard::hash(include_bytes!("../src/context/search.rs")),
+        "crates/recallcard/src/context/paging.rs": recallcard::hash(include_bytes!("../src/context/paging.rs")),
         "crates/recallcard/src/local_events/snapshot.rs": recallcard::hash(include_bytes!("../src/local_events/snapshot.rs")),
         "crates/recallcard/src/local_events/ranking.rs": recallcard::hash(include_bytes!("../src/local_events/ranking.rs")),
         "crates/recallcard/src/local_events/lexical_context.rs": recallcard::hash(include_bytes!("../src/local_events/lexical_context.rs")),
@@ -158,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let report = json!({"schema":"recallcard.synthetic-pipeline-host/1","compiled_source_sha256":compiled_source_sha256,"references":references,"status":status,
         "pages":pages,"revoked_search_rejected":revoked_search,"revoked_fetch_rejected":revoked_fetch,
-        "attachment":{"reference":attachment_ref,"event_text":attachment.data.text(),"name_search":name_search,"body_search":body_search,"excluded_from_local_event_pipeline":attachment_not_in_pipeline}});
+        "attachment":{"reference":attachment_ref,"event_text":attachment.data.text(),"name_search":name_search,"body_search":body_search,"excluded_from_event_embeddings":attachment_not_in_embedding,"shared_body_search":attachment_pipeline,"body_fetch":attachment_fetch,"suppressed_fetch_rejected":revoked_attachment_fetch,"suppressed_search_empty":revoked_attachment_search}});
     fs::write(root.join("host.json"), serde_json::to_vec_pretty(&report)?)?;
     println!(
         "合成pipeline完成：{}个问题，{}字节分块",

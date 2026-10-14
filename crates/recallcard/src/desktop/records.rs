@@ -66,7 +66,29 @@ impl WorkspaceRecords {
         Ok(Self { documents, events })
     }
 
+    fn attachment_parent(&self, reference: &str) -> Option<&Event> {
+        let (id, object) = reference.strip_prefix("attachment:")?.split_once('/')?;
+        if object.len() != 64
+            || !object
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return None;
+        }
+        let event = self.events.get(&format!("event:{id}"))?;
+        event.data.metadata["source_assets"]["files"]
+            .as_array()?
+            .iter()
+            .any(|file| file["object_sha256"] == object && file["payload_status"] == "retained")
+            .then_some(event)
+    }
+
     fn fields(&self, reference: &str) -> Value {
+        if let Some(event) = self.attachment_parent(reference) {
+            let mut fields = event_fields(event);
+            fields["source_ref"] = json!(format!("event:{}", event.id));
+            return fields;
+        }
         if let Some(event) = self.events.get(reference) {
             return event_fields(event);
         }
@@ -96,9 +118,11 @@ impl WorkspaceRecords {
         if response["results"].as_array().is_none_or(|rows| {
             rows.iter().any(|r| {
                 r["ref"].as_str().is_none_or(|reference| {
-                    self.documents
-                        .get(reference)
-                        .is_none_or(|d| d.kind == "memory" && !d.current_memory_at(now))
+                    self.attachment_parent(reference).is_none()
+                        && self
+                            .documents
+                            .get(reference)
+                            .is_none_or(|d| d.kind == "memory" && !d.current_memory_at(now))
                 })
             })
         }) {

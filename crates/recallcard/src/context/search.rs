@@ -227,7 +227,7 @@ fn item(entry: &Match<'_>, query: &str, limit: usize, mode: &str) -> Result<Valu
     };
     value["text"] = json!(&doc.text[start..end]);
     value["text_truncated"] = json!(start != 0 || end != doc.text.len());
-    value["text_range"] = json!({"start_byte":start,"end_byte":end,"total_bytes":doc.text.len(),"projection":match doc.kind.as_str(){"event"=>"event.text","view"=>"view.navigation",_=>"memory.content"}});
+    value["text_range"] = json!({"start_byte":start,"end_byte":end,"total_bytes":doc.text.len(),"projection":match doc.kind.as_str(){"event"=>"event.text","attachment"=>attachments::PROJECTION,"view"=>"view.navigation",_=>"memory.content"}});
     if !entry.related_refs.is_empty() {
         value["related_refs"] = json!(&entry.related_refs[..entry.related_refs.len().min(4)]);
         value["related_ref_count"] = json!(entry.related_refs.len());
@@ -265,7 +265,7 @@ fn envelope(
     coverage: &Value,
 ) -> Value {
     let next = offset + results.len();
-    json!({"results":results,"coverage":coverage,"truncated":next<total,"next_cursor":if next<total&&next>offset{Some(format!("{binding}:{next}"))}else{None},"budget_exhausted":next==offset&&offset<total,"budget_unit":"utf8_bytes","match_count":total,"status":if total==0{"no_matches"}else if next==offset&&offset<total{"budget_exhausted"}else if next==offset{"end_of_results"}else{"results"}})
+    json!({"results":results,"coverage":coverage,"truncated":next<total || coverage["attachments"]["status"] == "partial","next_cursor":if next<total&&next>offset{Some(format!("{binding}:{next}"))}else{None},"budget_exhausted":next==offset&&offset<total,"budget_unit":"utf8_bytes","match_count":total,"status":if total==0{"no_matches"}else if next==offset&&offset<total{"budget_exhausted"}else if next==offset{"end_of_results"}else{"results"}})
 }
 fn compact_status(value: &mut Value) {
     let coverage = &value["coverage"];
@@ -281,6 +281,9 @@ fn compact_status(value: &mut Value) {
     }
     if coverage["lexical_match"] == "natural_question" {
         compact["lexical_match"] = coverage["lexical_match"].clone();
+    }
+    if let Some(attachments) = coverage.get("attachments") {
+        compact["attachments"] = json!({"status":attachments["status"],"limited":attachments["limited"],"skipped":attachments["skipped"]});
     }
     value["coverage"] = compact;
 }

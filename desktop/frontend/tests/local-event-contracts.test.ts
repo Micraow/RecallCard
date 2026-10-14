@@ -66,3 +66,10 @@ test('编码器离线词法降级不宣称语义成功或只因未配置',()=>{
  const mixed=recallCoverageNotes({results:[],coverage:{local_event_semantic:true,scopes:[scope,{scope:'project:ok',state:'ready',query_encoding:'cache',lexical:{status:'available'}}]}}).join('\n');
  assert.match(mixed,/本机编码服务不可用/);assert.match(mixed,/已缓存/);assert.match(mixed,/独立寻找完整编号/);
 });
+
+test('附件不完整覆盖区分扫描上限和不可读原件，不承诺换关键词解决',()=>{
+ for(const extra of [{},{cloud_fallback:false},{local_event_semantic:true},{fusion:'lexical_only'}]) {
+  const notes=recallCoverageNotes({results:[],truncated:true,coverage:{...extra,attachments:{status:'partial',limited:true,skipped:2,semantic:false}}}).join('\n');
+  for(const text of ['UTF-8','PDF','OCR','换关键词不会解除','原件缺失','未命中不能当作附件内容不存在'])assert.ok(notes.includes(text),text+': '+notes);
+ }
+});

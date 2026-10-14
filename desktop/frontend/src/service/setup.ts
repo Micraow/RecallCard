@@ -107,6 +107,12 @@ export function validCloudSemanticSettings(value:CloudEmbeddingSettings):boolean
 }
 
 export function recallCoverageNotes(page: SearchPage): string[] {
+  const attachments=page.coverage?.attachments;
+  const attachmentNotes=(page.results.some(row=>row.kind==='attachment')||attachments?.status==='partial')?[
+    '附件正文仅在本机按词法查找已保留且核验通过的 UTF-8 文本；不含附件语义向量、PDF 提取或 OCR。',
+    ...(attachments?.limited?['附件扫描达到文件数量或总字节上限，部分原件尚未检查；缩小读取范围，或按已知附件引用单独读取。换关键词不会解除这项扫描上限。']:[]),
+    ...((attachments?.skipped||0)>0?['部分附件因格式不支持、原件缺失、损坏或单文件超限未参与检索；请检查完整导出原件，未命中不能当作附件内容不存在。']:[]),
+  ]:[];
   const readyScopes=page.coverage?.scopes?.filter(scope=>scope.state==='ready')||[];
   const fallbackScopes=page.coverage?.scopes?.filter(scope=>scope.fusion==='lexical_only')||[];
   const directFallback=page.coverage?.fusion==='lexical_only';
@@ -120,7 +126,7 @@ export function recallCoverageNotes(page: SearchPage): string[] {
   ]:[];
   const lexical=[...(!directFallback&&page.coverage?.lexical?[page.coverage.lexical]:[]),...readyScopes.flatMap(scope=>scope.lexical?[scope.lexical]:[])];
   if(page.coverage?.local_event_semantic) return [
-    ...fallbackNotes,
+    ...attachmentNotes, ...fallbackNotes,
     (page.coverage.semantic_query_encoding==='cache'||readyScopes.length>0&&readyScopes.every(scope=>scope.query_encoding==='cache'))?'本次使用已缓存的本机问题向量。':'本次问题已发送到你批准的本机编码服务。',
     '普通对话已直接参与本机语义检索，无需先整理成 Memory；记忆条目按词法补充，此入口没有云回退。',
     '每条原话展示一处来源已核验的匹配片段，可能由词法或语义通道选中。角色、时间、否定与后续纠正仍需回到来源核对。',
@@ -132,16 +138,17 @@ export function recallCoverageNotes(page: SearchPage): string[] {
     '相似候选可能完全无关；尚未校准相关性或可回答性，不能把返回结果当作已经记起事实。',
     ...(page.coverage.candidate_verification_limited||readyScopes.some(scope=>scope.verification_limited)?['来源核验受到时间或资源门槛限制，部分候选尚未核验；请缩小范围或稍后重试。']:[]),
     ...(page.truncated?['候选、片段或核验达到本次预算，未展示的来源不代表不存在。']:[])];
-  if(fallbackNotes.length>0) return fallbackNotes;
+  if(fallbackNotes.length>0) return [...attachmentNotes,...fallbackNotes];
   if(page.coverage?.cloud_fallback===false) return [
+    ...attachmentNotes,
     page.coverage.event_search==='local_only'?'本机普通对话索引尚未可用或未覆盖全部范围；现有 Memory 仅按词法补充。':'尚未配置普通对话本机索引，本次只在本地按关键词寻找原话和记忆。',
     '此入口不会改用云编码；未命中或未覆盖不表示没有相关历史。',
     ...(page.coverage.lexical_match==='natural_question'?['按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。']:[]),
     ...(page.truncated?['候选、覆盖或文字预算有限，请核对状态并回到来源。']:[])];
-  const notes = [semanticSearchNote(page.coverage) || "本次未提供语义检索状态，不能据此确认语义覆盖。"];
+  const notes = [...attachmentNotes, semanticSearchNote(page.coverage) || "本次未提供语义检索状态，不能据此确认语义覆盖。"];
   if (page.coverage?.lexical_match === "natural_question") notes.push("按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。");
   notes.push("当前入口的语义候选只覆盖已建索引的记忆；原始聊天仍通过词法查找，尚不保证换个说法也能找到。");
-  if (page.truncated) notes.push("本次结果达到数量或文字预算上限，未展示的来源并不代表不存在；可换用更具体的关键词继续找。");
+  if (page.truncated) notes.push(attachments?.status==='partial' ? "本次附件覆盖不完整，未展示的来源并不代表不存在；请先查看上方附件状态。" : "本次结果达到数量或文字预算上限，未展示的来源并不代表不存在；可换用更具体的关键词继续找。");
   return notes;
 }
 

@@ -46,7 +46,8 @@ export async function revalidateAndCopy(
 export function recallChoices(page: SearchPage | null | undefined) {
   const seen = new Set<string>();
   return (page?.results || []).filter(row => {
-    if (seen.has(row.ref)) return false;
+    // 现有复制包仅支持 Event/Memory；附件不伪装成父消息或用户原话。
+    if (row.kind === "attachment" || seen.has(row.ref)) return false;
     seen.add(row.ref); return true;
   }).map(row => ({
     ref: row.ref,

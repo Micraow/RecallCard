@@ -48,7 +48,7 @@ export function SearchPage({
                 row.kind === "memory"
                   ? navigate("memories", row.ref.replace(/^memory:/, ""))
                   : row.conversation_ref
-                    ? navigate("sources", row.conversation_ref, "", row.ref)
+                    ? navigate("sources", row.conversation_ref, "", row.source_ref || row.ref)
                     : undefined
               }
               disabled={row.kind !== "memory" && !row.conversation_ref}
@@ -66,7 +66,7 @@ export function SearchPage({
                 </h2>
                 <p>{row.text || row.content || row.snippet}</p>
                 <div className="row-meta">
-                  <Badge>{row.kind === "memory" ? "记忆" : "原始消息"}</Badge>
+                  <Badge>{row.kind === "memory" ? "记忆" : row.kind === "attachment" ? "附件正文 · 点击查看所属消息" : "原始消息"}</Badge>
                   <span>
                     {row.platform
                       ? platformLabel(row.platform)

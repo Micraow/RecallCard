@@ -96,3 +96,11 @@ test('问题入口显式选择问题词法模式，普通关键词搜索不改�
   for(const call of calls){assert.equal(call.args.scope,'personal');assert.equal(call.args.sessionId,'synthetic_question');}
   assert.match(recallCoverageNotes({results:[],coverage:{lexical_match:'natural_question',semantic_search:'unavailable'}}).join('\n'),/候选不等于答案/);
 });
+
+test('附件正文不会被复制包冒充为所属用户原话', () => {
+  const choices = recallChoices({results:[
+    {ref:'attachment:evt_synthetic/'+'a'.repeat(64),kind:'attachment',text:'合成文件正文',role:'user'},
+    {ref:'event:evt_synthetic',kind:'event',text:'合成消息',role:'user'},
+  ]});
+  assert.deepEqual(choices.map(row=>row.ref),['event:evt_synthetic']);
+});

@@ -75,6 +75,11 @@ impl Locator {
             if p[5] == "-" {
                 return Err("事件定位符缺少索引绑定".into());
             }
+        } else if reference.starts_with("attachment:") {
+            attachments::parse(reference)?;
+            if p[5] != "-" {
+                return Err("附件定位符无效".into());
+            }
         } else if let Some(id) = reference.strip_prefix("memory:") {
             let (id, revision) = id.split_once('@').ok_or("记忆定位符缺少版本")?;
             validate_id(id, "mem_")?;
@@ -83,7 +88,7 @@ impl Locator {
                 return Err("记忆定位符无效".into());
             }
         } else {
-            return Err("只能读取已返回的 Event/Memory 定位符".into());
+            return Err("只能读取已返回的 Event/Memory/附件定位符".into());
         }
         let offset = p[7].parse::<usize>().map_err(|_| "资料字节起点无效")?;
         if offset > 4 * 1024 * 1024 {
@@ -148,6 +153,7 @@ impl Context<'_> {
         let mut semantic_available = false;
         let mut budget_limited = false;
         let mut memory_status = json!("not_requested");
+        let mut attachment_status = json!({"status":"not_requested"});
         let scopes_digest = scopes_hash(&self.access);
         if target != "memories" {
             for scope in &scopes {
@@ -223,11 +229,21 @@ impl Context<'_> {
         for (index, epoch, config) in &bindings {
             index.verify_binding(epoch, config)?;
         }
-        if target != "events" {
+        for lexical_target in ["memories", "attachments"] {
+            if (lexical_target == "memories" && target == "events")
+                || (lexical_target == "attachments" && target == "memories")
+            {
+                continue;
+            }
             let local = Context::new(self.vault, self.access.clone());
-            let args=serde_json::from_value(json!({"query":query,"target":"memories","lexical_match":"natural_question","limit":10,"budget_bytes":8192})).map_err(|_|"内部检索参数无效")?;
+            let args=serde_json::from_value(json!({"query":query,"target":lexical_target,"lexical_match":"natural_question","limit":10,"budget_bytes":8192})).map_err(|_|"内部检索参数无效")?;
             let page = local.search(args)?;
-            memory_status = page["status"].clone();
+            if lexical_target == "memories" {
+                memory_status = page["status"].clone();
+            } else {
+                attachment_status = page["coverage"]["attachments"].clone();
+                partial |= attachment_status["status"] == "partial";
+            }
             budget_limited |= page["status"] == "budget_exhausted";
             partial |= page["truncated"] == true;
             let epoch = crate::local_events::source_epoch(self.vault)?;
@@ -240,7 +256,9 @@ impl Context<'_> {
                     partial = true;
                     if resolved["status"] == "budget_exhausted" {
                         budget_limited = true;
-                        memory_status = json!("budget_exhausted");
+                        if lexical_target == "memories" {
+                            memory_status = json!("budget_exhausted");
+                        }
                     }
                     continue;
                 };
@@ -281,7 +299,7 @@ impl Context<'_> {
         let candidate_count: usize = groups.iter().map(Vec::len).sum();
         let rows = merge_candidates(&groups);
         partial |= rows.len() < candidate_count;
-        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"budget_limited":budget_limited,"local_event_semantic":semantic_available,"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"protected_excerpt_tiers_then_stable_round_robin_not_cross_model_score","note":"候选不是答案；未配置或未覆盖不表示没有历史。精确锚点只在有界候选预览中核对，语义相近也可能完全无关；尚无经过校准的相关性或可回答性判定。旧search仍可显式进行关键词检索。"}});
+        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"attachments":attachment_status,"budget_limited":budget_limited,"local_event_semantic":semantic_available,"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"protected_excerpt_tiers_then_stable_round_robin_not_cross_model_score","note":"候选不是答案；未配置或未覆盖不表示没有历史。精确锚点只在有界候选预览中核对，语义相近也可能完全无关；尚无经过校准的相关性或可回答性判定。旧search仍可显式进行关键词检索。"}});
         if result["results"].as_array().unwrap().is_empty() && partial {
             result["status"] = json!(if budget_limited {
                 "budget_exhausted"
@@ -332,7 +350,9 @@ impl Context<'_> {
             || row["metadata"]["scope"] != locator.scope
             || row["text_range"]["start_byte"] != locator.offset
             || row["text_range"]["projection"]
-                != if locator.config == "-" {
+                != if locator.reference.starts_with("attachment:") {
+                    attachments::PROJECTION
+                } else if locator.config == "-" {
                     "memory.content"
                 } else {
                     "event.text"

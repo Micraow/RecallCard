@@ -127,8 +127,19 @@ def analyze(data,host,worker_root,chunk_bytes):
             assert page['first_fetch']['results'][0]['snapshot']==page['shared']['results'][0]['snapshot']
         details.append(dict(query=q['id'],category=q['category'],stages=stages,shared_truncated=page['shared']['truncated']))
     assert host['revoked_search_rejected'] and host['revoked_fetch_rejected']
-    attachment=host['attachment']; assert attachment['event_text']=='' and attachment['excluded_from_local_event_pipeline']
-    assert len(attachment['name_search']['results'])==1 and attachment['body_search']['results']==[]
+    attachment=host['attachment']; assert attachment['event_text']=='' and attachment['excluded_from_event_embeddings']
+    assert len(attachment['name_search']['results'])==2
+    assert len(attachment['body_search']['results'])==1
+    body_row=attachment['body_search']['results'][0]
+    shared=attachment['shared_body_search']['results'][0]
+    fetched=attachment['body_fetch']['results'][0]
+    assert body_row['kind']==shared['kind']=='attachment'
+    assert body_row['ref']==shared['ref']==fetched['ref']
+    assert shared['snapshot']==fetched['snapshot']
+    assert fetched['text']=='ATTACHMENT_BODY_ONLY_834 synthetic opaque payload'
+    assert fetched['text_hash']==evaluate.digest(fetched['text'].encode())
+    assert fetched['text_range']['projection']=='attachment.utf8/1'
+    assert attachment['suppressed_fetch_rejected'] and attachment['suppressed_search_empty']
     boundary=next(r for r in details if r['query']=='boundary-exact')['stages']
     assert boundary['worker_rrf']['top5'][0]['label']=='boundary-exact'
     assert boundary['worker_rrf']['top5'][0]['semantic_rank'] is None
@@ -141,7 +152,7 @@ def analyze(data,host,worker_root,chunk_bytes):
     assert promotion['host_anchor']['top5'][0]['label']=='anchor-promotion'
     assert promotion['shared_budget']['top5'][0]['label']=='anchor-promotion'
     return dict(chunks=len(chunks),sources=len({ref for ref,ordinal in chunks}),max_chunks_per_event=max(Counter(ref for ref,ordinal in chunks).values()),
-        checks={'actual_rust_chunks_and_spans':True,'event_deduplication':True,'exact_anchor_tier':True,'exact_anchor_promoted_over_rrf_decoy':True,'rrf_formula':True,'source_hash_and_fetch':True,'roles_preserved_and_relevance_unassessed':True,'scope_suppression_revision_exclusion':True,'revoked_search_and_fetch':True,'attachment_name_only_not_payload':True,'shared_response_8192_bytes':True},
+        checks={'actual_rust_chunks_and_spans':True,'event_deduplication':True,'exact_anchor_tier':True,'exact_anchor_promoted_over_rrf_decoy':True,'rrf_formula':True,'source_hash_and_fetch':True,'roles_preserved_and_relevance_unassessed':True,'scope_suppression_revision_exclusion':True,'revoked_search_and_fetch':True,'attachment_lexical_body_and_bound_fetch':True,'attachment_suppression':True,'shared_response_8192_bytes':True},
         summary={name:evaluate.summarize(rows) for name,rows in quality.items()},details=details)
 
 def run(repo,binary,out,modes,sizes):
@@ -162,7 +173,7 @@ def run(repo,binary,out,modes,sizes):
                 results[label]=analyze(data,host,worker_root,size)
                 results[label]['compiled_source_sha256']=host['compiled_source_sha256']
                 print(label,json.dumps(results[label]['summary'],ensure_ascii=False),flush=True)
-    code_files=['crates/recallcard/examples/synthetic_lexical_pipeline.rs','crates/recallcard/src/local_events/snapshot.rs','crates/recallcard/src/local_events/ranking.rs','crates/recallcard/src/local_events/lexical_context.rs','crates/recallcard/src/local_events.rs','crates/recallcard/src/context/recall.rs','python/recallcard_worker/event_index.py','python/recallcard_worker/event_lexical.py','scripts/lexical_ablation/evaluate_pipeline.py','scripts/lexical_ablation/pipeline_worker.py']
+    code_files=['crates/recallcard/src/context/attachments.rs','crates/recallcard/src/context.rs','crates/recallcard/src/context/paging.rs','crates/recallcard/src/context/search.rs','crates/recallcard/examples/synthetic_lexical_pipeline.rs','crates/recallcard/src/local_events/snapshot.rs','crates/recallcard/src/local_events/ranking.rs','crates/recallcard/src/local_events/lexical_context.rs','crates/recallcard/src/local_events.rs','crates/recallcard/src/context/recall.rs','python/recallcard_worker/event_index.py','python/recallcard_worker/event_lexical.py','scripts/lexical_ablation/evaluate_pipeline.py','scripts/lexical_ablation/pipeline_worker.py']
     report=dict(schema='recallcard.synthetic-lexical-pipeline-report/1',fixture_sha256=evaluate.digest(fixture_path.read_bytes()),source_sha256={p:evaluate.digest((repo/p).read_bytes()) for p in code_files},
         models_downloaded=0,real_model_calls=0,encoder='fixed adversarial numeric vectors: 206 distractors outrank ordinary sources; not model quality',documents=len(data['documents']),queries=len(data['queries']),
         note='实际生产分块、Event聚合、RRF、锚点优先和共享预算；仅临时worker副本替换同分词BM25候选顺序。合成来源，未更改生产默认。',results=results)

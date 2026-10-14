@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 mod adjacency;
+mod attachments;
 mod candidate_review;
 mod confirmation;
 mod navigation;
@@ -76,7 +77,7 @@ impl EventFilter {
     }
     fn permits(&self, document: &Document) -> bool {
         !self.active()
-            || document.kind == "event"
+            || matches!(document.kind.as_str(), "event" | "attachment")
                 && self.permits_fields(
                     document.role.as_ref(),
                     document.occurred_at,
@@ -491,7 +492,7 @@ impl<'a> Context<'a> {
         if args.query.len() > 4096 || args.limit == 0 || args.limit > 50 {
             return Err("query/limit 超过上限（4096 字节/1–50条）".into());
         }
-        if !["all", "memories", "events", "views"].contains(&args.target.as_str())
+        if !["all", "memories", "events", "views", "attachments"].contains(&args.target.as_str())
             || ![
                 "brief",
                 "context",
@@ -581,6 +582,16 @@ impl<'a> Context<'a> {
         };
         let now = Utc::now();
         let mut searchable = current.clone();
+        let mut attachment_coverage = Value::Null;
+        if matches!(args.target.as_str(), "all" | "events" | "attachments")
+            && matches!(args.detail.as_str(), "brief" | "context")
+        {
+            let (attachments, coverage) = self.attachment_documents(&current)?;
+            searchable.extend(attachments);
+            if args.target == "attachments" || coverage["files_examined"] != 0 {
+                attachment_coverage = coverage;
+            }
+        }
         if args.include_navigation || args.target == "views" {
             navigation::append_documents(&mut searchable, &self.access.scopes(), now)?;
         }
@@ -877,6 +888,9 @@ impl<'a> Context<'a> {
             coverage["ranking"] = json!("rrf");
         } else if let Some(error) = semantic_error {
             coverage["semantic_error"] = json!(error);
+        }
+        if !attachment_coverage.is_null() {
+            coverage["attachments"] = attachment_coverage;
         }
         search::add_question_coverage(&mut coverage, &args);
         search::response(&ranked, &args, offset, &binding, coverage)
@@ -1286,7 +1300,9 @@ fn search_documents(
                 return false;
             }
             if (args.target == "memories" && document.kind != "memory")
-                || (args.target == "events" && document.kind != "event")
+                || (args.target == "events"
+                    && !matches!(document.kind.as_str(), "event" | "attachment"))
+                || (args.target == "attachments" && document.kind != "attachment")
                 || (args.target == "views" && document.kind != "view")
                 || args
                     .session_ref
@@ -1297,7 +1313,7 @@ fn search_documents(
             }
             if args.as_of.is_some() {
                 match document.kind.as_str() {
-                    "event" => document
+                    "event" | "attachment" => document
                         .occurred_at
                         .is_none_or(|time| time <= effective_time),
                     "memory" => document.valid_at(effective_time),
