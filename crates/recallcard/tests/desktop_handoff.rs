@@ -686,10 +686,15 @@ fn eight_attachment_handoff_is_utf8_bounded_read_only_and_accounts_for_every_ref
     let refs = originals.keys().cloned().collect::<Vec<_>>();
     let mut before = BTreeMap::new();
     snapshot(f.vault.root(), f.vault.root(), &mut before);
-    for budget in [8000, 16000, 32768] {
+    // 八个附件引用、完整出处和待带入清单本身也计入 JSON 预算；
+    // 低预算应明确拒绝，不能丢弃身份/出处来勉强加入正文。
+    let too_small = prepare(&f, &refs, "", 8000).unwrap_err();
+    assert!(too_small.contains("预算不足以带入任一选文及其完整出处"));
+    for budget in [16000, 32768] {
         let result = prepare(&f, &refs, "", budget).unwrap();
         assert!(serde_json::to_vec(&result).unwrap().len() <= budget);
         assert_eq!(result["partial"], true);
+        assert!(!result["records"].as_array().unwrap().is_empty());
         let mut accounted = Vec::new();
         for row in result["records"].as_array().unwrap() {
             let reference = row["ref"].as_str().unwrap();

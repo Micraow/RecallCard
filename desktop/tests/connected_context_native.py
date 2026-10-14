@@ -17,6 +17,10 @@ from first_use_native import FirstUseJourney, JourneyDriver, DIALOG, ORIGINAL, U
 from native_smoke import ROOT, ELEMENT, wait_for, run
 
 
+ATTACHMENT_QUERY = "COPY_BODY_NATIVE_823"
+ATTACHMENT_TEXT = ATTACHMENT_QUERY + "\n合成独立附件正文🙂。内容只在文件里，不是上传者原话。\n"
+
+
 class ConnectedJourney(FirstUseJourney):
     def check_opening_background(self):
         """首页真实可达，选择已有合成Memory；不使用模型整理或伪造invoke。"""
@@ -109,27 +113,80 @@ class ConnectedJourney(FirstUseJourney):
                    "mime_type": "application/pdf", "size": len(payload)}
         missing = {"id": "file_SYNTHETIC_MISSING", "name": "合成未附原件.pdf",
                    "mime_type": "application/pdf", "size": 99}
+        text_file = {"id": "file_SYNTHETIC_TEXT", "name": "合成文本附件.txt",
+                     "mime_type": "text/plain", "size": len(ATTACHMENT_TEXT.encode("utf-8"))}
+        assets = [present, missing, text_file]
         for node in record["mapping"].values():
             node.pop("children", None)  # 官方样本可以只有 parent。
         upload = record["mapping"]["u1"]["message"]
         upload["content"] = {"content_type": "text", "parts": [""]}
         upload["metadata"]["attachments"] = [present]
         record["mapping"]["u2"]["message"]["metadata"]["attachments"] = [missing]
+        record["mapping"]["a1"]["message"]["metadata"]["attachments"] = [text_file]
         library = [{"file_id": a["id"], "file_name": a["name"],
                     "mime_type": a["mime_type"], "file_size_bytes": a["size"], "state": "ready"}
-                   for a in [present, missing]]
+                   for a in assets]
         manifest = {"version": 1, "manifest_file": "export_manifest.json",
                     "export_files": [{"path": a["id"] + ".dat", "size_bytes": a["size"]}
-                                     for a in [present, missing]],
+                                     for a in assets],
                     "logical_files": {a["id"] + ".dat": {"files": [a["id"] + ".dat"], "sharded": False}
-                                      for a in [present, missing]}}
+                                      for a in assets}}
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
             for name, value in [("conversations.json", records), ("library_files.json", library),
                                 ("export_manifest.json", manifest),
                                 ("conversation_asset_file_names.json", {present["id"] + ".dat": "合成归档别名.pdf"})]:
                 archive.writestr(name, json.dumps(value, ensure_ascii=False))
             archive.writestr(present["id"] + ".dat", payload)
+            archive.writestr(text_file["id"] + ".dat", ATTACHMENT_TEXT.encode("utf-8"))
         return path
+
+    def check_attachment_copy(self):
+        """真实导入UTF-8原件→React/Tauri检索→手动复制；不请求外部模型或网站。"""
+        browser = self.driver
+        events = self.events()
+        parent = next(event for event in events if event["source"]["message_id"] == "a1")
+        asset = parent["metadata"]["source_assets"]["files"][0]
+        reference = "attachment:" + parent["id"] + "/" + asset["object_sha256"]
+        original = self.vault / "objects" / asset["object_sha256"]
+        assert original.read_bytes() == ATTACHMENT_TEXT.encode("utf-8")
+        assert ATTACHMENT_QUERY not in parent["content"] and ATTACHMENT_QUERY not in asset["name"]
+        browser.button("首页")
+        browser.type("#recall-question", ATTACHMENT_QUERY)
+        browser.button("准备这次对话")
+        wait_for(lambda: self.content("附件正文，非用户原话"), "附件正文独有关键词命中可选候选")
+        assert browser.observe("return document.querySelectorAll('dialog fieldset input:checked').length") == 1
+        assert self.content("不会附带原始文件")
+        browser.button("预览将复制的内容", "//dialog")
+        wait_for(lambda: bool(browser.observe("return document.querySelector('#portable-preview')?.value")), "附件复制前可审阅完整文字")
+        preview = browser.observe("return document.querySelector('#portable-preview').value")
+        assert ATTACHMENT_TEXT in preview and reference in preview
+        assert "event:" + parent["id"] in preview and asset["object_sha256"] in preview
+        assert "附件内容，非用户原话" in preview and "作者未核验" in preview
+        assert parent["content"] not in preview, "没有选择父消息，不得夹带其正文"
+        browser.button("核对并复制上下文", "//dialog")
+        wait_for(lambda: self.content("已复制。请到任意 AI 粘贴"), "附件实际写入系统剪贴板")
+        clipboard = lambda: subprocess.check_output(["xclip", "-selection", "clipboard", "-o"], timeout=5)
+        assert clipboard() == preview.encode("utf-8"), "剪贴板字节必须与完整预览一致"
+        self.checkpoint("附件独立证据进入复制包且系统剪贴板全文一致")
+        # 放入不同的用户剪贴板哨兵，防止“错误地重写旧预览后报错”也被判为通过。
+        sentinel = "合成剪贴板哨兵：拒绝后必须保持此内容🙂".encode("utf-8")
+        subprocess.run(["xclip", "-selection", "clipboard", "-i"], input=sentinel,
+                       check=True, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert clipboard() == sentinel
+        try:
+            original.write_bytes(b"x" * len(ATTACHMENT_TEXT.encode("utf-8")))
+            browser.button("核对并复制上下文", "//dialog")
+            wait_for(lambda: self.content("所选资料不可访问、已变化或已被遗忘"), "原件篡改使复制前复核拒绝")
+            assert not browser.observe("return Boolean(document.querySelector('#portable-preview'))")
+            assert clipboard() == sentinel, "拒绝后不得覆写系统剪贴板"
+        finally:
+            original.write_bytes(ATTACHMENT_TEXT.encode("utf-8"))
+        assert self.events() == events and not self.memories()
+        self.attachment_acceptance.update({"body_only_query_hit": True, "independent_evidence": True,
+                                          "clipboard_utf8_exact": True, "tampered_original_blocks_copy": True,
+                                          "model_invoked": False, "external_site_used": False})
+        self.checkpoint("复制前原件核验拒绝篡改且未写剪贴板或正本")
+        browser.button("关闭", "//dialog//div[contains(@class,'modal-footer')]")
 
     def check_local_event_index(self):
         """真实UI/回环传输合同；固定合成向量，不是实际模型语义质量。"""
@@ -357,11 +414,11 @@ class ConnectedJourney(FirstUseJourney):
         browser.button("查看记录")
         wait_for(lambda: self.content("导入记录"), "实际导入记录页")
         browser.button("处理明细")
-        wait_for(lambda: "2 条附件引用" in browser.text(".import-coverage"), "真实任务报告附件计数")
-        assert "1 条附件引用已保留原始字节" in browser.text(".import-coverage")
+        wait_for(lambda: "3 条附件引用" in browser.text(".import-coverage"), "真实任务报告附件计数")
+        assert "2 条附件引用已保留原始字节" in browser.text(".import-coverage")
         assert "1 条附件引用在所提供归档中未找到原件" in browser.text(".import-coverage")
         self.checkpoint("导入报告同时显示保留和缺失的附件引用数")
-        self.attachment_acceptance = {"message_references": 2, "retained": 1, "missing": 1,
+        self.attachment_acceptance = {"message_references": 3, "retained": 2, "missing": 1,
                                       "attachment_only": 1, "ui_report_verified": True,
                                       "original_message_association_verified": True}
         browser.button("连接")
@@ -438,7 +495,7 @@ class ConnectedJourney(FirstUseJourney):
         preview = browser.observe("return document.querySelector('#portable-preview').value")
         assert UPDATE in preview and "recallcard.context/1" in preview
         assert self.content("按问题寻找字面候选")
-        assert self.content("字节 UTF-8") and self.content("附件原件及附件正文")
+        assert self.content("字节 UTF-8") and self.content("未勾选的附件正文及附件原始文件")
         browser.button("核对并复制上下文", "//dialog")
         wait_for(lambda: self.content("已复制。请到任意 AI 粘贴"), "用户点击触发实际剪贴板写入")
         assert run("xclip", "-selection", "clipboard", "-o") == preview
@@ -446,6 +503,7 @@ class ConnectedJourney(FirstUseJourney):
         self.checkpoint("任意AI交接显示来源长度和排除范围且系统剪贴板全文一致")
         browser.button("关闭", "//dialog//div[contains(@class,'modal-footer')]")
         assert not browser.observe("return Boolean(document.querySelector('dialog[open]'))")
+        self.check_attachment_copy()
         browser.button("首页")
         browser.button("粘贴 AI 回答")
         browser.type("#pasted-ai-reply", "合成取消的回答，不得保存。")

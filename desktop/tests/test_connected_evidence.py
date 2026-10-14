@@ -5,11 +5,11 @@ import tempfile
 import unittest
 import zipfile
 from unittest.mock import Mock
-from connected_context_native import ConnectedJourney, ORIGINAL, UPDATE
+from connected_context_native import ConnectedJourney, ORIGINAL, UPDATE, ATTACHMENT_QUERY, ATTACHMENT_TEXT
 
 
 class CanonicalEvidenceTest(unittest.TestCase):
-    def test_native_attachment_fixture_has_one_opaque_payload_and_one_explicit_gap(self):
+    def test_native_attachment_fixture_has_opaque_text_payloads_and_one_explicit_gap(self):
         with tempfile.TemporaryDirectory() as directory:
             journey = object.__new__(ConnectedJourney)
             journey.temporary = Path(directory)
@@ -28,7 +28,14 @@ class CanonicalEvidenceTest(unittest.TestCase):
                 self.assertIn(b"SYNTHETIC", payload)
                 library = json.loads(archive.read("library_files.json"))
                 self.assertEqual(library[0]["file_size_bytes"], len(payload))
-                self.assertEqual(len(json.loads(archive.read("export_manifest.json"))["logical_files"]), 2)
+                self.assertEqual(len(json.loads(archive.read("export_manifest.json"))["logical_files"]), 3)
+                text_file = record["mapping"]["a1"]["message"]["metadata"]["attachments"][0]
+                self.assertEqual(text_file["id"], "file_SYNTHETIC_TEXT")
+                self.assertEqual(text_file["mime_type"], "text/plain")
+                self.assertEqual(archive.read(text_file["id"] + ".dat"), ATTACHMENT_TEXT.encode("utf-8"))
+                self.assertEqual(text_file["size"], len(ATTACHMENT_TEXT.encode("utf-8")))
+                self.assertNotIn(ATTACHMENT_QUERY, json.dumps(record, ensure_ascii=False))
+                self.assertNotIn(ATTACHMENT_QUERY, json.dumps(library, ensure_ascii=False))
 
     def test_portable_visible_text_requires_the_entire_text_and_no_clipping(self):
         journey = object.__new__(ConnectedJourney)
