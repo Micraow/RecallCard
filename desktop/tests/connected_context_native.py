@@ -22,6 +22,17 @@ ATTACHMENT_TEXT = ATTACHMENT_QUERY + "\n合成独立附件正文🙂。内容只
 
 
 class ConnectedJourney(FirstUseJourney):
+    def wait_for_message_text(self, selector, required, forbidden, description):
+        """同一精确消息的一次渲染快照；异步刷新不能拆散附件归属断言。"""
+        def observed():
+            text = self.driver.text(selector)
+            if not isinstance(text, str):
+                return None
+            assert not any(value in text for value in forbidden), "消息混入了其他附件或错误保留状态"
+            return text if all(value in text for value in required) else None
+        # 只读等待沿用明确时限；永久缺失/不完整仍失败，不重放点击或输入。
+        return wait_for(observed, description)
+
     def check_opening_background(self):
         """首页真实可达，选择已有合成Memory；不使用模型整理或伪造invoke。"""
         browser = self.driver
@@ -397,19 +408,17 @@ class ConnectedJourney(FirstUseJourney):
         assert latest["metadata"]["source_assets"]["files"][0]["payload_status"] == "missing"
         present_row = ".source-message[data-reference='event:" + upload["id"] + "']"
         missing_row = ".source-message[data-reference='event:" + latest["id"] + "']"
-        wait_for(lambda: "原件已保留" in browser.text(present_row), "附件-only 消息显示保留状态")
-        assert "合成图表.pdf" in browser.text(present_row)
-        assert "合成归档别名.pdf" in browser.text(present_row)
-        assert "application/pdf" in browser.text(present_row)
-        assert "合成未附原件.pdf" not in browser.text(present_row)
-        assert browser.observe("return document.querySelectorAll('.message-assets a,.message-assets button,.message-assets iframe,.message-assets object,.message-assets embed').length") == 0
+        self.wait_for_message_text(
+            present_row, ("原件已保留", "合成图表.pdf", "合成归档别名.pdf", "application/pdf"),
+            ("合成未附原件.pdf",), "附件-only 消息显示完整保留状态、名称、别名和类型")
+        wait_for(lambda: browser.observe("return Boolean(document.querySelector(" + json.dumps(present_row) + ")) && document.querySelectorAll('.message-assets a,.message-assets button,.message-assets iframe,.message-assets object,.message-assets embed').length === 0"),
+                 "目标原消息存在且附件没有可交互或嵌入内容")
         browser.click(present_row)
         self.checkpoint("附件only原消息显示真实保留状态与独立别名")
         browser.click(missing_row)
-        wait_for(lambda: "所提供归档中未找到原件" in browser.text(missing_row), "缺失附件仍绑定其原消息")
-        assert "合成未附原件.pdf" in browser.text(missing_row)
-        assert ORIGINAL in browser.text(missing_row)
-        assert "原件已保留" not in browser.text(missing_row)
+        self.wait_for_message_text(
+            missing_row, ("所提供归档中未找到原件", "合成未附原件.pdf", ORIGINAL),
+            ("原件已保留",), "缺失附件仍绑定其完整原消息")
         self.checkpoint("缺失原件明确显示且没有串联到其他消息")
         browser.button("查看记录")
         wait_for(lambda: self.content("导入记录"), "实际导入记录页")

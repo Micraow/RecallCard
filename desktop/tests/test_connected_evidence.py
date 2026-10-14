@@ -4,11 +4,56 @@ from pathlib import Path
 import tempfile
 import unittest
 import zipfile
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+import connected_context_native as journey_module
+from native_smoke import DriverError, wait_for
 from connected_context_native import ConnectedJourney, ORIGINAL, UPDATE, ATTACHMENT_QUERY, ATTACHMENT_TEXT
 
 
 class CanonicalEvidenceTest(unittest.TestCase):
+    def test_attachment_row_wait_uses_one_complete_exact_message_snapshot(self):
+        journey = object.__new__(ConnectedJourney)
+        journey.driver = Mock()
+        selector = ".source-message[data-reference='event:synthetic-present']"
+        required = ("原件已保留", "合成图表.pdf", "合成归档别名.pdf", "application/pdf")
+        complete = "\n".join(required)
+        journey.driver.text.side_effect = [DriverError('{"value":{"error":"no such element"}}'),
+                                           required[0], complete]
+        with patch("native_smoke.time.sleep"):
+            result = journey.wait_for_message_text(selector, required, ("合成未附原件.pdf",), "合成刷新恢复")
+        self.assertEqual(result, complete)
+        self.assertEqual([call.args for call in journey.driver.text.call_args_list], [(selector,)] * 3)
+        journey.driver.click.assert_not_called()
+        journey.driver.command.assert_not_called()
+
+    def test_attachment_row_wait_rejects_wrong_association_immediately(self):
+        journey = object.__new__(ConnectedJourney)
+        journey.driver = Mock()
+        journey.driver.text.return_value = "原件已保留 合成图表.pdf 合成未附原件.pdf"
+        with self.assertRaisesRegex(AssertionError, "混入"):
+            journey.wait_for_message_text(".exact-synthetic-message", ("原件已保留", "合成图表.pdf"),
+                                          ("合成未附原件.pdf",), "合成错误归属")
+        self.assertEqual(journey.driver.text.call_count, 1)
+
+    def test_attachment_row_wait_does_not_accept_persistent_missing_or_incomplete_data(self):
+        required = ("原件已保留", "合成图表.pdf", "合成归档别名.pdf", "application/pdf")
+        samples = [None, DriverError('{"value":{"error":"no such element"}}')]
+        samples.extend("\n".join(value for value in required if value != omitted) for omitted in required)
+        for sample in samples:
+            journey = object.__new__(ConnectedJourney)
+            journey.driver = Mock()
+            if isinstance(sample, DriverError):
+                journey.driver.text.side_effect = sample
+            else:
+                journey.driver.text.return_value = sample
+            def bounded(check, description):
+                return wait_for(check, description, timeout=0.001)
+            with self.subTest(sample=sample), patch.object(journey_module, "wait_for", side_effect=bounded), patch("native_smoke.time.sleep"):
+                with self.assertRaisesRegex(AssertionError, "等待超时"):
+                    journey.wait_for_message_text(".exact-synthetic-message", required,
+                                                  ("合成未附原件.pdf",), "合成持久缺失")
+            journey.driver.click.assert_not_called()
+
     def test_native_attachment_fixture_has_opaque_text_payloads_and_one_explicit_gap(self):
         with tempfile.TemporaryDirectory() as directory:
             journey = object.__new__(ConnectedJourney)
