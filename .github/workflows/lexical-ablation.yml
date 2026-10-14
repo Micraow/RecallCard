@@ -6,11 +6,21 @@ on:
     paths:
       - 'scripts/lexical_ablation/**'
       - 'python/recallcard_worker/event_lexical.py'
+      - 'python/recallcard_worker/event_index.py'
+      - 'crates/recallcard/src/local_events/**'
+      - 'crates/recallcard/src/local_events.rs'
+      - 'crates/recallcard/src/context/recall.rs'
+      - 'crates/recallcard/examples/synthetic_lexical_pipeline.rs'
       - '.github/workflows/lexical-ablation.yml'
   pull_request:
     paths:
       - 'scripts/lexical_ablation/**'
       - 'python/recallcard_worker/event_lexical.py'
+      - 'python/recallcard_worker/event_index.py'
+      - 'crates/recallcard/src/local_events/**'
+      - 'crates/recallcard/src/local_events.rs'
+      - 'crates/recallcard/src/context/recall.rs'
+      - 'crates/recallcard/examples/synthetic_lexical_pipeline.rs'
       - '.github/workflows/lexical-ablation.yml'
 permissions:
   contents: read
@@ -34,5 +44,37 @@ jobs:
         with:
           name: synthetic-lexical-ablation-${{ github.sha }}
           path: ${{ runner.temp }}/lexical-ablation-first/*.json
+          if-no-files-found: error
+          retention-days: 7
+
+  pipeline:
+    name: 真实生产链与固定合成数值通道
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+      - name: 编译生产Rust合成例程
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --example synthetic_lexical_pipeline -- -D warnings
+          cargo build --locked --example synthetic_lexical_pipeline
+      - name: 六组合成生产链与范围和证据核验
+        run: |
+          python3 scripts/lexical_ablation/evaluate_pipeline.py --repo "$PWD" --binary "$PWD/target/debug/examples/synthetic_lexical_pipeline" --out "$RUNNER_TEMP/lexical-pipeline"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-lexical-pipeline-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/lexical-pipeline/pipeline-results.json
+            ${{ runner.temp }}/lexical-pipeline/fixture.json
           if-no-files-found: error
           retention-days: 7
