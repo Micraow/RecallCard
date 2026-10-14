@@ -1,6 +1,6 @@
-"""独立本机 Event 索引；只接收可信宿主的有界 JSONL，不扫描 Vault。
+"""独立 Event 索引；只接收可信宿主的有界 JSONL，不扫描 Vault。
 
-原文只在小批本机编码期间存在。SQLite 保存来源身份、范围和可重建向量。
+原文只在小批编码期间存在。SQLite 保存来源身份、范围和可重建向量。
 候选不是权限证明；宿主必须在显示或发送前核验当前正本及整个来源快照。
 """
 from __future__ import annotations
@@ -22,6 +22,7 @@ import sys
 from .embedding import EmbeddingError, EmbeddingSpace, canonical, scopes
 from . import event_lexical as lexical
 from .local_query import LocalIndexClient, LocalQueryClient, local_endpoint
+from .host_encoding import CLOUD_PROVIDER, MAX_INPUTS, SCHEMA as HOST_SCHEMA, HostEncoder, HostEncodingError
 
 SCHEMA = "recallcard.local-event-index/1"
 CONFIG_SCHEMA = "recallcard.local-event-config/1"
@@ -164,11 +165,11 @@ def decode_blob(blob, dimensions):
 
 
 class EventIndex:
-    """config只来自可信启动文件；encoder注入仅用于测试，CLI没有此开关。"""
+    """config只来自可信启动文件；保留测试encoder注入，生产宿主通道仅由serve绑定。"""
     def __init__(self, config, *, encoder=None, config_path=None):
         require(_supported_python(), "python_version_unsupported")
         shape(config, {"schema", "database", "scope", "space", "events_approved", "query_approved"},
-              {"disk_cap_bytes", "backend", "attachments_approved"})
+              {"disk_cap_bytes", "backend", "attachments_approved", "host_approval_identity"})
         require(config["schema"] == CONFIG_SCHEMA, "invalid_config")
         require(type(config["events_approved"]) is bool and type(config["query_approved"]) is bool
                 and type(config.get("attachments_approved", False)) is bool, "invalid_config")
@@ -176,6 +177,8 @@ class EventIndex:
         self.config_path = Path(config_path) if config_path is not None else None
         self.config_identity = canonical(config)
         self._current_config()
+        if "host_approval_identity" in config:
+            require(valid_hash(config["host_approval_identity"]), "invalid_config")
         self.events_approved = config["events_approved"]
         # 不给原配置补默认字段；固定配置身份仍绑定调用者实际保存的原始JSON。
         self.attachments_approved = config.get("attachments_approved", False)
@@ -187,14 +190,22 @@ class EventIndex:
         self.space = json.loads(canonical(config["space"]))
         base_fields = {f.name for f in fields(EmbeddingSpace)}
         shape(self.space, base_fields | {"tokenizer", "chunking_version"})
-        require(self.space["provider"] == "local-openai-compatible" and self.space["normalization"] == "l2", "invalid_config")
+        self.host_managed = self.space["provider"] == CLOUD_PROVIDER
+        require(self.space["provider"] in ("local-openai-compatible", CLOUD_PROVIDER)
+                and self.space["normalization"] == "l2", "invalid_config")
+        require(not self.host_managed or valid_hash(config.get("host_approval_identity")), "invalid_config")
         text(self.space["tokenizer"], 256)
         text(self.space["chunking_version"], 256)
         try:
-            local_endpoint(self.space["endpoint"])
+            if not self.host_managed:
+                local_endpoint(self.space["endpoint"])
+            else:
+                # 云地址只作空间身份；本长期进程绝不调用云HTTP或读取凭据。
+                from .embedding import _endpoint
+                _endpoint(self.space["endpoint"])
             self.embedding_space = EmbeddingSpace.from_dict({k: self.space[k] for k in base_fields})
         except EmbeddingError:
-            raise EventIndexError("invalid_local_config") from None
+            raise EventIndexError("invalid_config" if self.host_managed else "invalid_local_config") from None
         self.dimensions = self.embedding_space.dimensions
         self.signature = digest(canonical(self.space))
         self.disk_cap = integer(config.get("disk_cap_bytes", DEFAULT_DISK_CAP), 1024 * 1024, 4 * 1024**3)
@@ -282,6 +293,8 @@ class EventIndex:
             require(self._disk_bytes() <= self.disk_cap, "disk_limit")
             _private_path(self.path)
             require((identity.st_dev, identity.st_ino) == (self.path.stat().st_dev, self.path.stat().st_ino), "unsafe_path")
+            if write:
+                self._current_config()
             db.commit()
         except Exception:
             if db.in_transaction:
@@ -387,15 +400,20 @@ class EventIndex:
                 "attachments_not_approved" if kind == "attachment" else "events_not_approved")
 
     def _encode(self, kind, texts, *, source_kind="event"):
-        # 排队/正文验证之后、任何新的本机 POST 之前再检查固定启动配置。
+        # 排队/正文验证之后、任何编码请求之前再检查固定启动配置。
         self._current_config()
         require(kind in ("query", "corpus"), "invalid_request")
         if kind == "query":
             require(self.query_approved, "query_not_approved")
         else:
             self._require_source_approval(source_kind)
-        if self.encoder is not None:
+        if isinstance(self.encoder, HostEncoder):
+            require(self.host_managed, "invalid_config")
+            output = self.encoder.encode("query" if kind == "query" else source_kind, texts)
+        elif self.encoder is not None:
             output = self.encoder(kind, texts)
+        elif self.host_managed:
+            raise EventIndexError("host_encoder_required")
         elif kind == "query":
             client = LocalQueryClient(self.space["endpoint"], [self.scope], max_calls=1, max_bytes=MAX_BATCH_BYTES, timeout=QUERY_TIMEOUT)
             output = client.embed(self.embedding_space, texts, [self.scope], "query")
@@ -415,7 +433,7 @@ class EventIndex:
         kind = source_kind(source[0], source[3], stored=True)
         self._require_source_approval(kind)
         chunks = request["chunks"]
-        require(isinstance(chunks, list) and 1 <= len(chunks) <= MAX_BATCH, "batch_limit")
+        require(isinstance(chunks, list) and 1 <= len(chunks) <= (MAX_INPUTS if self.host_managed else MAX_BATCH), "batch_limit")
         require(len(chunks) * self.dimensions <= 8192, "batch_limit")
         rows = []
         lexical_rows = {}
@@ -475,10 +493,10 @@ class EventIndex:
         for blob in cached.values():
             decode_blob(blob, self.dimensions)
         missing = [h for h in prepared if h not in cached]
-        # 唯一可能接触提供器的步骤在数据库事务外；只允许固定本机端点。
+        # 唯一编码步骤在数据库事务外；本机仅数字回环，云仅可信宿主回调。
         encoded = self._encode("corpus", [prepared[h] for h in missing], source_kind=kind) if missing else []
         cached.update(zip(missing, encoded))
-        # 向量复用也不绕过来源授权；本机编码等待期间配置撤销不得落库。
+        # 向量复用也不绕过来源授权；编码等待期间配置撤销不得落库。
         self._current_config()
         self._require_source_approval(kind)
         with self.connection(write=True) as db:
@@ -558,8 +576,10 @@ class EventIndex:
         with self.connection() as db:
             row = db.execute("SELECT vector FROM queries WHERE input_hash=?", (input_hash,)).fetchone()
         blob = row[0] if row else self._encode("query", [prepared])[0]
+        self._current_config()
         values = decode_blob(blob, self.dimensions)
-        mode = "cache" if row else "local"
+        encoded_mode = "cloud" if self.host_managed else "local"
+        mode = "cache" if row else encoded_mode
         try:
             with self.connection(write=True) as db:
                 used = int(db.execute("SELECT value FROM metadata WHERE key='query_clock'").fetchone()[0]) + 1
@@ -569,13 +589,14 @@ class EventIndex:
         except EventIndexError as error:
             if error.code != "disk_limit":
                 raise
-            mode = "cache" if row else "local_uncached"
+            mode = "cache" if row else encoded_mode + "_uncached"
         except sqlite3.Error as error:
             if getattr(error, "sqlite_errorcode", None) != sqlite3.SQLITE_FULL:
                 raise
-            mode = "cache" if row else "local_uncached"
-        # 缓存只是可选优化。磁盘满时事务已回滚，仍可使用此次已验证的本机向量；
+            mode = "cache" if row else encoded_mode + "_uncached"
+        # 缓存只是可选优化。磁盘满时事务已回滚，仍可使用此次已验证的向量；
         # 权限、损坏和其他数据库错误不能按此路径忽略。
+        self._current_config()
         return values, mode
 
     def _verified_published(self, db, generation, *, require_source_approval=False):
@@ -789,7 +810,10 @@ class EventIndex:
                 "fusion": "lexical_only" if vector is None else lexical.FUSION if lex_version and retrieval_mode == "hybrid" else "semantic_only",
                 "semantic": semantic_coverage, "partial": vector is None,
                 "semantic_candidates": len(semantic), "lexical_candidates": len(lex_candidates), "union_candidates": len(union),
-                "local_only": True, "external_calls": 0, "page_rows": QUERY_PAGE}}
+                **({"local_only": False, "host_managed": True,
+                    "external_calls": 0 if mode == "cache" else 1}
+                   if self.host_managed else {"local_only": True, "external_calls": 0}),
+                "page_rows": QUERY_PAGE}}
 
     def status(self, request):
         with self.connection() as db:
@@ -820,10 +844,12 @@ class EventIndex:
             require(isinstance(request, dict) and len(canonical(request)) <= MAX_LINE, "input_limit")
             ident = request.get("id")
             require(type(ident) is int and 0 <= ident <= 2**53-1 or isinstance(ident, str) and bool(text(ident, 128)), "invalid_request")
+            if isinstance(self.encoder, HostEncoder):
+                self.encoder.begin_job(ident)
             result = {"schema": SCHEMA, "id": ident, "ok": True, "result": self.dispatch(request)}
             require(len(canonical(result)) <= MAX_RESPONSE, "output_limit")
             return result
-        except (EventIndexError, lexical.LexicalError) as error:
+        except (EventIndexError, lexical.LexicalError, HostEncodingError) as error:
             code = error.code
         except EmbeddingError as error:
             code = error.code if error.code in {"local_provider_unavailable", "local_provider_error", "redirect_blocked", "response_limit", "local_budget_exhausted"} else "local_encoding_failed"
@@ -833,11 +859,17 @@ class EventIndex:
             code = "invalid_request_or_storage"
         except Exception:
             code = "worker_error"
+        finally:
+            if isinstance(self.encoder, HostEncoder):
+                self.encoder.end_job()
         return {"schema": SCHEMA, "id": ident if type(ident) is int or isinstance(ident, str) and len(ident) <= 128 else None,
                 "ok": False, "error": {"code": code}}
 
 
 def serve(worker, source, destination):
+    if isinstance(worker, EventIndex) and worker.host_managed and worker.encoder is None:
+        worker.encoder = HostEncoder(source, destination, dimensions=worker.dimensions,
+                                     space_signature=worker.signature)
     while True:
         line = source.readline(MAX_LINE + 1)
         if not line:
@@ -848,11 +880,18 @@ def serve(worker, source, destination):
             result = {"schema": SCHEMA, "id": None, "ok": False, "error": {"code": "input_limit"}}
         else:
             try:
-                result = worker.execute(strict_json(line))
+                request = strict_json(line)
+                if (isinstance(getattr(worker, "encoder", None), HostEncoder)
+                        and isinstance(request, dict) and request.get("schema") == HOST_SCHEMA):
+                    worker.encoder.failed = True
+                    raise EventIndexError("host_protocol_error")
+                result = worker.execute(request)
             except EventIndexError as error:
                 result = {"schema": SCHEMA, "id": None, "ok": False, "error": {"code": error.code}}
         destination.write(canonical(result) + b"\n")
         destination.flush()
+        if isinstance(getattr(worker, "encoder", None), HostEncoder) and worker.encoder.failed:
+            return
 
 
 def _supported_python():

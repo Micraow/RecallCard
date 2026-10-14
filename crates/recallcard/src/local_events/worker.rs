@@ -11,6 +11,7 @@ use tokio::{
 };
 struct Job {
     request: Value,
+    binding: Option<source_cloud::Binding>,
     deadline: Instant,
     reply: mpsc::SyncSender<Result<Value>>,
 }
@@ -30,7 +31,11 @@ pub(super) fn exchange_before(
     if Instant::now() >= deadline {
         return Err("local_event_worker_timeout".into());
     }
-    let key = hash(&serde_json::to_vec(config).map_err(|_| "local_event_config_invalid")?);
+    let binding = source_cloud::Binding::new(config, &operation)?;
+    if Instant::now() >= deadline {
+        return Err("local_event_worker_timeout".into());
+    }
+    let key = config.identity()?;
     let registry = WORKER.get_or_init(|| Mutex::new(None));
     let mut slot = registry
         .lock()
@@ -41,6 +46,7 @@ pub(super) fn exchange_before(
     let (reply, receiver) = mpsc::sync_channel(1);
     let mut pending = Job {
         request: operation,
+        binding,
         deadline,
         reply,
     };
@@ -92,16 +98,33 @@ fn supervise(config: Config, receiver: mpsc::Receiver<Job>) {
                 return Err("local_event_worker_timeout".into());
             }
             worker_configuration_current(&config)?;
+            if let Some(binding) = &job.binding {
+                source_cloud::checked_before(job.deadline, || {
+                    binding.verify(&config, &job.request)
+                })?;
+            }
             if process.is_none() {
                 process = Some(Process::start(&config)?);
             }
             let response = tokio::time::timeout(
-                remaining.min(Duration::from_secs(40)),
-                process.as_mut().unwrap().exchange(job.request),
+                job.deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_secs(40)),
+                process.as_mut().unwrap().exchange(&config, &job),
             )
             .await
             .map_err(|_| "local_event_worker_timeout".to_owned())?;
-            response
+            let value = response?;
+            worker_configuration_current(&config)?;
+            if let Some(binding) = &job.binding {
+                source_cloud::checked_before(job.deadline, || {
+                    binding.verify(&config, &job.request)
+                })?;
+            }
+            if Instant::now() >= job.deadline {
+                return Err("local_event_worker_timeout".into());
+            }
+            Ok(value)
         });
         if result.is_err() {
             process = None;
@@ -139,7 +162,8 @@ impl Process {
             stdout,
         })
     }
-    async fn exchange(&mut self, mut request: Value) -> Result<Value> {
+    async fn exchange(&mut self, config: &Config, job: &Job) -> Result<Value> {
+        let mut request = job.request.clone();
         request["schema"] = json!("recallcard.local-event-index/1");
         request["id"] = json!(1);
         let mut bytes = serde_json::to_vec(&request).map_err(|_| "local_event_request_invalid")?;
@@ -147,6 +171,9 @@ impl Process {
             return Err("local_event_request_limit".into());
         }
         bytes.push(b'\n');
+        if Instant::now() >= job.deadline {
+            return Err("local_event_worker_timeout".into());
+        }
         self.stdin
             .write_all(&bytes)
             .await
@@ -155,6 +182,56 @@ impl Process {
             .flush()
             .await
             .map_err(|_| "local_event_worker_io")?;
+        let mut called = false;
+        let envelope = loop {
+            let response = self.read_line().await?;
+            let envelope: Value =
+                serde_json::from_slice(&response).map_err(|_| "local_event_response_invalid")?;
+            if envelope["schema"] != "recallcard.host-encode/1" {
+                break envelope;
+            }
+            if called || response.len() > 65536 {
+                return Err("source_cloud_callback_limit".into());
+            }
+            called = true;
+            let envelope = source_cloud::parse_callback(&response)?;
+            let binding = job.binding.as_ref().ok_or("source_cloud_callback_denied")?;
+            let result =
+                source_cloud::encode(config, &job.request, binding, &envelope, job.deadline)
+                    .await?;
+            source_cloud::checked_before(job.deadline, || binding.verify(config, &job.request))?;
+            if Instant::now() >= job.deadline {
+                return Err("local_event_worker_timeout".into());
+            }
+            let mut bytes =
+                serde_json::to_vec(&result).map_err(|_| "source_cloud_response_invalid")?;
+            bytes.push(b'\n');
+            if bytes.len() > 256 * 1024 {
+                return Err("source_cloud_response_limit".into());
+            }
+            source_cloud::checked_before(job.deadline, || binding.verify(config, &job.request))?;
+            self.stdin
+                .write_all(&bytes)
+                .await
+                .map_err(|_| "local_event_worker_io")?;
+            self.stdin
+                .flush()
+                .await
+                .map_err(|_| "local_event_worker_io")?;
+        };
+        if envelope["schema"] != "recallcard.local-event-index/1" || envelope["id"] != 1 {
+            return Err("local_event_response_invalid".into());
+        }
+        if envelope["ok"] != true {
+            let code = envelope["error"]["code"].as_str().unwrap_or("worker_error");
+            if code.len() > 96 || !code.bytes().all(|c| c.is_ascii_lowercase() || c == b'_') {
+                return Err("local_event_worker_error".into());
+            }
+            return Err(format!("local_event_{code}"));
+        }
+        Ok(envelope["result"].clone())
+    }
+    async fn read_line(&mut self) -> Result<Vec<u8>> {
         let mut response = Vec::new();
         loop {
             let mut buf = [0; 4096];
@@ -177,19 +254,7 @@ impl Process {
         if response.last() != Some(&b'\n') || response[..response.len() - 1].contains(&b'\n') {
             return Err("local_event_response_invalid".into());
         }
-        let envelope: Value =
-            serde_json::from_slice(&response).map_err(|_| "local_event_response_invalid")?;
-        if envelope["schema"] != "recallcard.local-event-index/1" || envelope["id"] != 1 {
-            return Err("local_event_response_invalid".into());
-        }
-        if envelope["ok"] != true {
-            let code = envelope["error"]["code"].as_str().unwrap_or("worker_error");
-            if code.len() > 96 || !code.bytes().all(|c| c.is_ascii_lowercase() || c == b'_') {
-                return Err("local_event_worker_error".into());
-            }
-            return Err(format!("local_event_{code}"));
-        }
-        Ok(envelope["result"].clone())
+        Ok(response)
     }
 }
 impl Drop for Process {

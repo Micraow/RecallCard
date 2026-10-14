@@ -1326,4 +1326,5 @@ mod local_events;
 mod semantic_setup;
 pub use application_model::{ModelOperation, ModelSetupStatus};
 pub use cloud_semantic::{CloudSemanticSetup, CloudSemanticStatus};
+pub use local_events::CloudEventSetup;
 pub use semantic_setup::SemanticSetupStatus;

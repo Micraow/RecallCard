@@ -11,6 +11,38 @@ from connected_context_native import ConnectedJourney, ORIGINAL, UPDATE, ATTACHM
 
 
 class CanonicalEvidenceTest(unittest.TestCase):
+    def test_stale_source_selection_relocates_only_the_same_read_only_row(self):
+        journey = object.__new__(ConnectedJourney)
+        journey.driver = Mock()
+        selector = ".source-message[data-reference='event:synthetic-missing']"
+        journey.driver.click.side_effect = [DriverError('{"value":{"error":"stale element reference"}}'), None]
+        journey.select_source_message(selector)
+        self.assertEqual([call.args for call in journey.driver.click.call_args_list], [(selector,)] * 2)
+        journey.driver.command.assert_not_called()
+
+    def test_stale_source_selection_has_a_three_attempt_bound(self):
+        journey = object.__new__(ConnectedJourney)
+        journey.driver = Mock()
+        journey.driver.click.side_effect = DriverError('{"value":{"error":"stale element reference"}}')
+        with self.assertRaisesRegex(DriverError, "stale element reference"):
+            journey.select_source_message(".source-message[data-reference='event:synthetic']")
+        self.assertEqual(journey.driver.click.call_count, 3)
+
+    def test_source_selection_never_retries_other_errors_or_accepts_mutation_selectors(self):
+        for error in [DriverError('{"value":{"error":"no such element"}}'),
+                      DriverError('{"value":{"error":"invalid session id"}}'),
+                      DriverError('invalid response'), ConnectionResetError('uncertain dispatch')]:
+            journey = object.__new__(ConnectedJourney)
+            journey.driver = Mock()
+            journey.driver.click.side_effect = error
+            with self.subTest(error=error), self.assertRaises(type(error)):
+                journey.select_source_message(".source-message[data-reference='event:synthetic']")
+            self.assertEqual(journey.driver.click.call_count, 1)
+        journey.driver.reset_mock()
+        with self.assertRaises(AssertionError):
+            journey.select_source_message("#save-approval")
+        journey.driver.click.assert_not_called()
+
     def test_attachment_row_wait_uses_one_complete_exact_message_snapshot(self):
         journey = object.__new__(ConnectedJourney)
         journey.driver = Mock()

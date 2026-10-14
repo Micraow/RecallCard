@@ -237,6 +237,9 @@ export class ScopedService {
   cloudSemanticStatus() {return this.call<import("./setup").CloudSemanticStatus>("cloud_semantic_status");}
   configureCloudSemantic(request:import("./setup").CloudSemanticSetup,apiKey:string|null) {return this.call<import("./setup").CloudSemanticStatus>("cloud_semantic_apply",{request,apiKey});}
   disableCloudSemantic() {return this.call<import("./setup").CloudSemanticStatus>("cloud_semantic_disable");}
+  cloudEventStatus() {return this.call<import("./setup").CloudEventStatus>("cloud_event_status");}
+  configureCloudEvents(request:import("./setup").CloudEventSetup,apiKey:string|null) {return this.call<import("./setup").CloudEventStatus>("cloud_event_apply",{request,apiKey});}
+  disableCloudEvents() {return this.call<import("./setup").CloudEventStatus>("cloud_event_disable");}
   localEventStatus() {return this.call<import("./setup").LocalEventStatus>("local_event_status");}
   configureLocalEvents(request:import("./setup").LocalEventSetup) {return this.call<import("./setup").LocalEventStatus>("local_event_apply",{request});}
   refreshLocalEvents() {return this.call<import("./setup").LocalEventProgress>("local_event_refresh");}

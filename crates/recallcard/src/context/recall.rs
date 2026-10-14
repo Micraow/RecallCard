@@ -1,4 +1,4 @@
-//! 简洁的共同本机读取入口；不访问旧云配置，不隐式建索引。
+//! 简洁的共同来源读取入口；仅使用明确选择的提供器，不访问旧云配置或隐式建索引。
 use super::*;
 use crate::local_events::LocalEvents;
 use std::time::{Duration, Instant};
@@ -255,6 +255,9 @@ impl Context<'_> {
         let mut coverage = vec![];
         let mut partial = false;
         let mut semantic_available = false;
+        let mut cloud_semantic_available = false;
+        let mut local_provider_selected = false;
+        let mut cloud_provider_selected = false;
         let mut attachment_semantic_available = false;
         let mut budget_limited = false;
         let mut memory_status = json!("not_requested");
@@ -281,6 +284,13 @@ impl Context<'_> {
                         partial = true;
                         continue;
                     }
+                };
+                let provider = if index.is_cloud() {
+                    cloud_provider_selected = true;
+                    "cloud"
+                } else {
+                    local_provider_selected = true;
+                    "local"
                 };
                 match index.search_before(query, 20, deadline) {
                     Ok(page) => {
@@ -317,15 +327,17 @@ impl Context<'_> {
                         }
                         partial |= page["truncated"] == true || page["coverage"]["partial"] == true;
                         semantic_available |= page["coverage"]["local_event_semantic"] == true;
+                        cloud_semantic_available |=
+                            page["coverage"]["cloud_event_semantic"] == true;
                         attachment_semantic_available |=
                             page["coverage"]["attachments"]["semantic"] == true;
-                        coverage.push(json!({"scope":scope,"state":if page["coverage"]["fusion"]=="lexical_only"{"degraded"}else{"ready"},"semantic":page["coverage"]["semantic"],"candidates":rows.len(),"truncated":page["truncated"],"query_encoding":page["coverage"]["semantic_query_encoding"],"candidate_policy":page["coverage"]["candidate_policy"],"verified_candidates":page["coverage"]["verified_candidates"],"verification_limited":page["coverage"]["candidate_verification_limited"],"lexical":page["coverage"]["lexical"],"fusion":page["coverage"]["fusion"],"attachments":page["coverage"]["attachments"]}));
+                        coverage.push(json!({"scope":scope,"provider":page["coverage"]["provider"],"state":if page["coverage"]["fusion"]=="lexical_only"{"degraded"}else{"ready"},"semantic":page["coverage"]["semantic"],"candidates":rows.len(),"truncated":page["truncated"],"query_encoding":page["coverage"]["semantic_query_encoding"],"candidate_policy":page["coverage"]["candidate_policy"],"verified_candidates":page["coverage"]["verified_candidates"],"verification_limited":page["coverage"]["candidate_verification_limited"],"lexical":page["coverage"]["lexical"],"fusion":page["coverage"]["fusion"],"attachments":page["coverage"]["attachments"]}));
                         bindings.push((index, epoch, config));
                         groups.push(rows);
                     }
                     Err(error) => {
                         coverage
-                            .push(json!({"scope":scope,"state":"unavailable","code":code(&error)}));
+                            .push(json!({"scope":scope,"provider":provider,"state":"unavailable","code":code(&error)}));
                         partial = true;
                     }
                 }
@@ -448,7 +460,7 @@ impl Context<'_> {
         }
         partial |= rows.len() < all_candidates.len();
         budget_limited |= !omitted.is_empty();
-        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":"local_only","memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"attachments":attachment_status,"budget_limited":budget_limited,"budget_omitted_by_kind":omitted,"local_event_semantic":semantic_available,"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"protected_excerpt_tiers_then_stable_round_robin_not_cross_model_score","candidate_budget_policy":"compact_metadata_then_keep_source_kind_within_protected_tier/v1","note":"候选不是答案；未配置或未覆盖不表示没有历史。精确锚点只在有界候选预览中核对，语义相近也可能完全无关；尚无经过校准的相关性或可回答性判定。旧search仍可显式进行关键词检索。"}});
+        let mut result = json!({"results":rows,"match_count":rows.len(),"status":if partial {"partial"}else if rows.is_empty(){"no_verified_candidates"}else{"ok"},"truncated":partial,"budget_unit":"utf8_bytes","coverage":{"event_search":if cloud_provider_selected {if local_provider_selected {"explicit_local_and_cloud"}else{"explicit_cloud"}}else{"local_only"},"memory_search":"lexical_only_no_cloud_fallback","memory_status":memory_status,"attachments":attachment_status,"budget_limited":budget_limited,"budget_omitted_by_kind":omitted,"local_event_semantic":semantic_available,"cloud_event_semantic":cloud_semantic_available,"scopes":coverage,"cloud_fallback":false,"relevance":"unassessed","merge":"protected_excerpt_tiers_then_stable_round_robin_not_cross_model_score","candidate_budget_policy":"compact_metadata_then_keep_source_kind_within_protected_tier/v1","note":"候选不是答案；未配置或未覆盖不表示没有历史。精确锚点只在有界候选预览中核对，语义相近也可能完全无关；尚无经过校准的相关性或可回答性判定。旧search仍可显式进行关键词检索。"}});
         if result["results"].as_array().unwrap().is_empty() && partial {
             result["status"] = json!(if budget_limited {
                 "budget_exhausted"

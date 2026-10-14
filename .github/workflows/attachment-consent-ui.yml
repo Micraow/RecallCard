@@ -5,9 +5,12 @@ on:
     branches: ["recovery/native-20261011"]
     paths:
       - 'desktop/frontend/src/components/LocalEventSetup.tsx'
+      - 'desktop/frontend/src/components/CloudEventSetup.tsx'
+      - 'desktop/frontend/src/service/client.ts'
       - 'desktop/frontend/src/service/setup.ts'
       - 'desktop/frontend/src/service/types.ts'
       - 'desktop/frontend/tests/local-event-*'
+      - 'desktop/frontend/tests/cloud-event-*'
       - 'desktop/package*.json'
       - '.github/workflows/attachment-consent-ui.yml'
 permissions:
@@ -32,7 +35,7 @@ jobs:
         timeout-minutes: 5
         run: npx playwright install --with-deps chromium
       - name: 真实组件的合成批准交互
-        run: npm run test:frontend -- local-event-setup.spec.ts
+        run: npm run test:frontend -- local-event-setup.spec.ts cloud-event-setup.spec.ts
       - uses: actions/upload-artifact@v4
         if: always()
         with:

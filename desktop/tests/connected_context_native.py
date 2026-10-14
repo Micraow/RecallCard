@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import urlopen
 
 from first_use_native import FirstUseJourney, JourneyDriver, DIALOG, ORIGINAL, UPDATE
-from native_smoke import ROOT, ELEMENT, wait_for, run
+from native_smoke import ROOT, ELEMENT, DriverError, wait_for, run
 
 
 ATTACHMENT_QUERY = "COPY_BODY_NATIVE_823"
@@ -22,6 +22,23 @@ ATTACHMENT_TEXT = ATTACHMENT_QUERY + "\n合成独立附件正文🙂。内容只
 
 
 class ConnectedJourney(FirstUseJourney):
+    def select_source_message(self, selector):
+        """Retry only a stale read-only source-row selection, never a mutation."""
+        assert selector.startswith(".source-message[data-reference='event:") and selector.endswith("']")
+        for attempt in range(3):
+            try:
+                # click re-finds this exact row before each native WebDriver action.
+                return self.driver.click(selector)
+            except DriverError as error:
+                try:
+                    payload = json.loads(str(error))
+                    value = payload.get("value") if isinstance(payload, dict) else None
+                    code = value.get("error") if isinstance(value, dict) else None
+                except (ValueError, TypeError):
+                    code = None
+                if code != "stale element reference" or attempt == 2:
+                    raise
+
     def wait_for_message_text(self, selector, required, forbidden, description):
         """同一精确消息的一次渲染快照；异步刷新不能拆散附件归属断言。"""
         def observed():
@@ -413,9 +430,9 @@ class ConnectedJourney(FirstUseJourney):
             ("合成未附原件.pdf",), "附件-only 消息显示完整保留状态、名称、别名和类型")
         wait_for(lambda: browser.observe("return Boolean(document.querySelector(" + json.dumps(present_row) + ")) && document.querySelectorAll('.message-assets a,.message-assets button,.message-assets iframe,.message-assets object,.message-assets embed').length === 0"),
                  "目标原消息存在且附件没有可交互或嵌入内容")
-        browser.click(present_row)
+        self.select_source_message(present_row)
         self.checkpoint("附件only原消息显示真实保留状态与独立别名")
-        browser.click(missing_row)
+        self.select_source_message(missing_row)
         self.wait_for_message_text(
             missing_row, ("所提供归档中未找到原件", "合成未附原件.pdf", ORIGINAL),
             ("原件已保留",), "缺失附件仍绑定其完整原消息")

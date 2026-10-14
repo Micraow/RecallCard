@@ -2,7 +2,7 @@
 
 `recall_search({query})` 和 `recall_fetch({id})` 供 MCP、浏览器 Native Messaging 和桌面问题入口共用。旧 bootstrap/search/read/sources 保持兼容；新两工具不加载旧 Memory 云编码配置。Web text/2 的短 S/P 映射与轮票据属于后续接力层，本批未实现。
 
-- search 只读已建普通 Event 本机索引；query_approved 未批准、未配置、索引过期或服务失败均明确覆盖状态，不自动编码语料/重建，不改用云。Memory 仅按本地词法补充。
+- search 只读已建来源派生索引；query_approved 未批准、未配置、索引过期或服务失败均明确覆盖状态，不自动编码语料/重建。提供器可选择本机或[独立批准的云来源编码](source-cloud-embedding.md)，不会从本机失败自动改用云，也不加载旧 Memory 云批准。Memory 仅按本地词法补充。
 - 整包最多 8192 UTF-8 字节、10 个结果，每个范围先取最多 20 个候选。最多 4 个宿主明确批准的范围；超过时返回 scope_limit，要求宿主明确缩小本次范围，不静默任选。不同模型空间分数不混排，按每路原始排名轮询。
 - 本机 worker 的排队与请求共用 15 秒截止；过期队列项不编码，运行超时关闭 worker。文件清单/正本验证有现有数量和大小上限，截止是编码等待上限，不是硬实时文件系统截止。MCP/浏览器宿主还应限制整轮工具调用数；本批不声称无限多次请求也被一个会话预算覆盖。
 - 整包预算不足先省略可选 `session_ref`、恒定 `retrieval_support.case_policy`，以及已在 `retrieval.semantic_rank` 中相同保存的顶层排名；旧 `retrieval=null` 的唯一排名不省略。正文、UTF-8范围/hash、命中块/hash、snapshot、角色、附件父引用和id均不截短。`coverage.presentation` 标明紧凑展示；session_ref 不承诺由 compact fetch 恢复。
@@ -10,7 +10,7 @@
 - 每条返回完整 Event/Memory 的 snapshot、片段 UTF-8 范围和 hash；Event 还保留正文 hash 与原命中 chunk 范围/hash。snapshot 与 Context 分页读共用完整正本转 Value 后序列化的摘要，不拿纯正文 hash 冒充版本。
 - id 是可校验定位符，没有授权效力。fetch 在当前范围与接收方授权下重新验证配置、来源 epoch、当前可见 Event、完整 snapshot 和字节起点。正文不变但来源/角色/时间变更也失效；新增修订、删除、遗忘及配置变化须重新检索。来源 epoch 保守覆盖整个 Vault，其他来源修改也可能要求重查。
 - fetch 返回 next_id 时可继续本条原文；重复同 id 返回同一页，不暗中推进。定位符不包含文件路径，不能读取任意文件。它不是短会话票据；网页层后续仍须绑定消息完成状态、活动会话和 nonce。
-- Desktop 未配置本机 Event 索引时保留既有关键词体验，但使用独立无 semantic 的 Context，不落到旧云选择器。此旧词法路径仍有历史全量正本投影成本，不宣称具有新向量路径的有界大库性能。模型可从覆盖提示显式使用旧 search 关键词工具。
+- Desktop 未配置来源语义索引时保留既有关键词体验，但使用独立无 semantic 的 Context，不落到旧云选择器。此旧词法路径仍有历史全量正本投影成本，不宣称具有新向量路径的有界大库性能。模型可从覆盖提示显式使用旧 search 关键词工具。
 - 浏览器旧接力已接受新只读动作；准备/填框前仍完整复查来源和权限。只有 query_encoding 从新编码变成缓存这项运行诊断不参与新鲜度摘要，来源、版本、候选、范围与失败状态均继续核验。
 
 默认仍不启动外部模型、不自动发送网页消息。真实模型语义质量另用固定官方小模型和合成集验收；假编码器仅证明接口、来源与权限合同。新 MCP 工具可被宿主调用不代表宿主会自动调用或注入开局背景。

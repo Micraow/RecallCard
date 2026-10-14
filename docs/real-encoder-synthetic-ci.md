@@ -11,7 +11,7 @@
 
 ## 产品提供器与本次评估后端
 
-BGE 只是此 CI 的固定、可离线复现评估后端，不是 RecallCard 产品绑定。现有云设置接受可配置 HTTPS OpenAI-compatible embedding 地址、模型、维度与独立 query/Memory 批准及月预算，可用于符合该协议的 Qwen 等提供器；这不代表已真实调用或验收某个云模型。当前新 Event/附件索引仍采用独立本机端点与批准，不继承旧云 query/Memory 批准。
+BGE 只是此 CI 的固定、可离线复现评估后端，不是 RecallCard 产品绑定。现有云设置接受可配置 HTTPS OpenAI-compatible embedding 地址、模型、维度与独立 query/Memory 批准及月预算，可用于符合该协议的 Qwen 等提供器；这不代表已真实调用或验收某个云模型。Event/附件索引现在可单独选择本机端点或明确批准的云提供器；[云来源编码](source-cloud-embedding.md) 的普通对话、附件和新问题分别批准，默认关闭，不继承旧云 query/Memory 批准。配置兼容性与合成传输测试不能代替真实 Qwen 或其他服务的联通、质量和费用验收。
 
 ## 固定模型和可复现来源
 

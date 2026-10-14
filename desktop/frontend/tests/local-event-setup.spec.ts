@@ -36,7 +36,7 @@ test('附件默认关闭，独立两步批准后才可更新，保存不触发�
  await expect(page.getByRole('dialog')).toContainText(settings.endpoint);
  await expect(page.getByRole('dialog')).toContainText('附件内容是独立来源，不当作上传者原话');
  await expect(page.getByRole('button',{name:'确认保存资料配置',exact:true})).toBeDisabled();
- expect((await calls(page)).filter(c=>c.command!=='local_event_status')).toEqual([]);
+ expect((await calls(page)).filter(c=>!['local_event_status','cloud_event_status'].includes(c.command))).toEqual([]);
  await page.locator('#event-confirm').check();
  await page.getByRole('button',{name:'返回修改',exact:true}).click();
  await expect(page.locator('#event-attachments')).toBeChecked();
@@ -47,7 +47,7 @@ test('附件默认关闭，独立两步批准后才可更新，保存不触发�
  await page.locator('#event-confirm').check();
  await page.getByRole('button',{name:'确认保存资料配置',exact:true}).click();
  await expect(page.getByRole('dialog')).toHaveCount(0);
- const writes=(await calls(page)).filter(c=>c.command!=='local_event_status');
+ const writes=(await calls(page)).filter(c=>!['local_event_status','cloud_event_status'].includes(c.command));
  expect(writes).toHaveLength(1);
  expect(writes[0]).toEqual({command:'local_event_apply',args:{sessionId:'synthetic-session',scope:'project:synthetic',request:{...settings,attachments_approved:true}}});
  await expect(page.getByRole('button',{name:'更新普通对话索引',exact:true})).toHaveCount(0);
@@ -85,7 +85,7 @@ test('取消和保存失败不授予附件批准，再次保存必须重新确�
  await page.locator('#event-confirm').check();
  await page.keyboard.press('Escape');
  await expect(page.getByRole('dialog')).toHaveCount(0);
- expect((await calls(page)).filter(c=>c.command!=='local_event_status')).toEqual([]);
+ expect((await calls(page)).filter(c=>!['local_event_status','cloud_event_status'].includes(c.command))).toEqual([]);
  await edit(page);
  await expect(page.locator('#event-attachments')).not.toBeChecked();
  await page.locator('#event-attachments').check();
@@ -123,5 +123,5 @@ test('仅问题批准不能建资料索引，修改目标与范围后不得沿�
  await expect(page.locator('#event-attachments')).not.toBeChecked();
  await expect(page.locator('#event-corpus')).not.toBeChecked();
  await expect(page.locator('#event-query')).not.toBeChecked();
- expect((await calls(page)).filter(c=>c.command!=='local_event_status')).toEqual([]);
+ expect((await calls(page)).filter(c=>!['local_event_status','cloud_event_status'].includes(c.command))).toEqual([]);
 });

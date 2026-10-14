@@ -1,4 +1,4 @@
-//! 独立本机原始对话索引。正文只进入有界编码批次和最终命中原文；绝无云回退。
+//! 独立来源索引。默认仅本机；显式云批准由宿主逐次核验，绝无自动云回退。
 use crate::{
     filesystem::open_local_file,
     model::{hash, Event, Origin, Result, Role},
@@ -16,7 +16,11 @@ mod evidence;
 mod lexical_context;
 pub(crate) mod ranking;
 mod snapshot;
+mod source_cloud;
 mod worker;
+use crate::application::embedding_cloud::{
+    CloudEmbeddingRuntime, SourceCloudGrant, SourceCloudSettings,
+};
 use snapshot::Manifest;
 const MAX_JSON: u64 = 32 * 1024 * 1024;
 
@@ -56,6 +60,9 @@ impl Setup {
         target
             .validate()
             .map_err(|_| "local_event_settings_invalid")?;
+        self.validate_index()
+    }
+    fn validate_index(&self) -> Result<()> {
         if self.tokenizer.is_empty()
             || self.tokenizer.len() > 256
             || self.tokenizer.chars().any(char::is_control)
@@ -74,6 +81,47 @@ impl Setup {
             "chunking_version":format!("utf8-nonoverlap/1:{}",self.chunk_bytes)})
     }
 }
+/// 云来源的索引参数；与旧 Memory 云批准及 numeric-loopback 设置互不转换。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudSetup {
+    pub settings: SourceCloudSettings,
+    pub tokenizer: String,
+    pub chunk_bytes: usize,
+    pub disk_cap_mib: usize,
+}
+impl CloudSetup {
+    fn index_settings(&self) -> Setup {
+        Setup {
+            endpoint: self.settings.endpoint.clone(),
+            model: self.settings.model.clone(),
+            revision: self.settings.revision.clone(),
+            tokenizer: self.tokenizer.clone(),
+            dimensions: self.settings.dimensions,
+            query_instruction: self.settings.query_instruction.clone(),
+            document_instruction: self.settings.document_instruction.clone(),
+            events_approved: self.settings.events_approved,
+            attachments_approved: self.settings.attachments_approved,
+            query_approved: self.settings.query_approved,
+            chunk_bytes: self.chunk_bytes,
+            disk_cap_mib: self.disk_cap_mib,
+        }
+    }
+    pub fn validate(&self) -> Result<()> {
+        self.settings
+            .validate()
+            .map_err(|_| "source_cloud_settings_invalid")?;
+        self.index_settings().validate_index()?;
+        if self.chunk_bytes
+            + self.settings.document_instruction.len()
+            + usize::from(!self.settings.document_instruction.is_empty())
+            > 8192
+        {
+            return Err("source_cloud_prepared_input_limit".into());
+        }
+        Ok(())
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -84,6 +132,55 @@ struct Config {
     python: PathBuf,
     python_path: PathBuf,
     worker_config: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cloud: Option<SourceCloudGrant>,
+}
+impl Config {
+    fn space(&self) -> Value {
+        let mut value = self.settings.space();
+        if self.cloud.is_some() {
+            value["provider"] = json!("host-cloud-openai-compatible");
+        }
+        value
+    }
+    fn identity(&self) -> Result<String> {
+        Ok(hash(
+            &serde_json::to_vec(self).map_err(|_| "local_event_config_invalid")?,
+        ))
+    }
+    fn worker_settings(&self) -> Result<Value> {
+        let mut value = json!({"schema":"recallcard.local-event-config/1", "database":self.worker_config.parent().ok_or("local_event_config_invalid")?.join("index.sqlite"),"scope":self.scope,
+            "space":self.space(),"events_approved":self.settings.events_approved,"attachments_approved":self.settings.attachments_approved,"query_approved":self.settings.query_approved,
+            "disk_cap_bytes":self.settings.disk_cap_mib*1024*1024,"backend":"python"});
+        if self.cloud.is_some() {
+            value["host_approval_identity"] = json!(self.identity()?);
+        }
+        Ok(value)
+    }
+    fn validate(&self, vault: &Vault) -> Result<()> {
+        match &self.cloud {
+            None => self.settings.validate(),
+            Some(grant) => {
+                let setup = CloudSetup {
+                    settings: grant.settings.clone(),
+                    tokenizer: self.settings.tokenizer.clone(),
+                    chunk_bytes: self.settings.chunk_bytes,
+                    disk_cap_mib: self.settings.disk_cap_mib,
+                };
+                setup.validate()?;
+                if grant.scope != self.scope
+                    || serde_json::to_value(setup.index_settings()).ok()
+                        != serde_json::to_value(&self.settings).ok()
+                    || !CloudEmbeddingRuntime::new(vault)
+                        .source_configuration_current(grant, &self.identity()?)
+                        .map_err(|_| "source_cloud_approval_unavailable")?
+                {
+                    return Err("source_cloud_approval_changed".into());
+                }
+                Ok(())
+            }
+        }
+    }
 }
 pub struct LocalEvents<'a> {
     vault: &'a Vault,
@@ -126,6 +223,34 @@ impl<'a> LocalEvents<'a> {
         python_path: PathBuf,
     ) -> Result<Self> {
         settings.validate()?;
+        Self::configure_mode(vault, scope, settings, python, python_path, None)
+    }
+    pub fn configure_cloud(
+        vault: &'a Vault,
+        scope: &str,
+        request: CloudSetup,
+        python: PathBuf,
+        python_path: PathBuf,
+    ) -> Result<Self> {
+        request.validate()?;
+        let settings = request.index_settings();
+        Self::configure_mode(
+            vault,
+            scope,
+            settings,
+            python,
+            python_path,
+            Some(request.settings),
+        )
+    }
+    fn configure_mode(
+        vault: &'a Vault,
+        scope: &str,
+        settings: Setup,
+        python: PathBuf,
+        python_path: PathBuf,
+        cloud: Option<SourceCloudSettings>,
+    ) -> Result<Self> {
         if !python_path.is_absolute()
             || !python_path
                 .join("recallcard_worker/event_index.py")
@@ -138,16 +263,35 @@ impl<'a> LocalEvents<'a> {
         let parent = path.parent().ok_or("local_event_config_invalid")?;
         crate::vault::reject_symlink(parent)?;
         std::fs::create_dir_all(parent).map_err(|_| "local_event_config_unavailable")?;
-        let space = settings.space();
+        let mut space = settings.space();
+        if cloud.is_some() {
+            space["provider"] = json!("host-cloud-openai-compatible");
+        }
         let signature =
             hash(&serde_json::to_vec(&space).map_err(|_| "local_event_config_invalid")?);
         let dir = parent.join(signature);
         crate::vault::reject_symlink(&dir)?;
         std::fs::create_dir_all(&dir).map_err(|_| "local_event_config_unavailable")?;
         let worker_config = dir.join("worker.json");
-        let worker = json!({"schema":"recallcard.local-event-config/1","database":dir.join("index.sqlite"),"scope":scope,
-            "space":space,"events_approved":settings.events_approved,"attachments_approved":settings.attachments_approved,"query_approved":settings.query_approved,
-            "disk_cap_bytes":settings.disk_cap_mib*1024*1024,"backend":"python"});
+        let _guard = vault.lock()?;
+        if path.exists() {
+            let previous: Config = read_bounded(&path, 65536)?;
+            if previous.worker_config != worker_config {
+                Self::invalidate_worker(vault, &previous)?;
+            }
+            if previous.cloud.is_some() && cloud.is_none() {
+                CloudEmbeddingRuntime::new(vault)
+                    .revoke_sources(scope)
+                    .map_err(|_| "source_cloud_approval_unavailable")?;
+            }
+        }
+        let cloud = cloud
+            .map(|settings| {
+                CloudEmbeddingRuntime::new(vault)
+                    .configure_sources(scope, settings)
+                    .map_err(|_| "source_cloud_approval_unavailable".to_owned())
+            })
+            .transpose()?;
         let config = Config {
             schema: "recallcard.local-event-host/1".into(),
             scope: scope.into(),
@@ -156,10 +300,16 @@ impl<'a> LocalEvents<'a> {
             python,
             python_path,
             worker_config,
+            cloud,
         };
-        let _guard = vault.lock()?;
+        let worker = config.worker_settings()?;
         vault.write_replace(&config.worker_config, &worker)?;
         vault.write_replace(&path, &config)?;
+        if let Some(grant) = &config.cloud {
+            CloudEmbeddingRuntime::new(vault)
+                .bind_source_configuration(grant, &config.identity()?)
+                .map_err(|_| "source_cloud_approval_unavailable")?;
+        }
         drop(_guard);
         Self::open(vault, scope)?.ok_or_else(|| "local_event_config_unavailable".into())
     }
@@ -175,7 +325,7 @@ impl<'a> LocalEvents<'a> {
         {
             return Ok(None);
         }
-        config.settings.validate()?;
+        config.validate(vault)?;
         if config.schema != "recallcard.local-event-host/1"
             || config.scope != scope
             || config.root != vault.root()
@@ -186,8 +336,7 @@ impl<'a> LocalEvents<'a> {
         {
             return Err("local_event_config_invalid".into());
         }
-        let config_hash =
-            hash(&serde_json::to_vec(&config).map_err(|_| "local_event_config_invalid")?);
+        let config_hash = config.identity()?;
         Ok(Some(Self {
             vault,
             config,
@@ -196,22 +345,41 @@ impl<'a> LocalEvents<'a> {
         }))
     }
     pub fn disable(vault: &Vault, scope: &str) -> Result<()> {
+        Self::disable_mode(vault, scope, false)
+    }
+    fn invalidate_worker(vault: &Vault, config: &Config) -> Result<()> {
+        let mut worker: Value = read_bounded(&config.worker_config, 65536)?;
+        worker["events_approved"] = json!(false);
+        worker["attachments_approved"] = json!(false);
+        worker["query_approved"] = json!(false);
+        vault.write_replace(&config.worker_config, &worker)
+    }
+    fn disable_mode(vault: &Vault, scope: &str, cloud_only: bool) -> Result<()> {
         let path = config_path(vault, scope)?;
-        if path.exists() {
-            let _guard = vault.lock()?;
-            let mut cfg: Config = read_bounded(&path, 65536)?;
-            cfg.settings.events_approved = false;
-            cfg.settings.attachments_approved = false;
-            cfg.settings.query_approved = false;
-            // 保存明确停用态，不删除原话或派生索引；open 会明确拒绝无范围配置。
-            vault.write_replace(&path, &cfg)?;
-            let mut worker: Value = read_bounded(&cfg.worker_config, 65536)?;
-            worker["events_approved"] = json!(false);
-            worker["attachments_approved"] = json!(false);
-            worker["query_approved"] = json!(false);
-            vault.write_replace(&cfg.worker_config, &worker)?;
+        let _guard = vault.lock()?;
+        if cloud_only {
+            CloudEmbeddingRuntime::new(vault)
+                .revoke_sources(scope)
+                .map_err(|_| "source_cloud_approval_unavailable")?;
         }
-        Ok(())
+        if !path.exists() {
+            return Ok(());
+        }
+        let mut config: Config = read_bounded(&path, 65536)?;
+        if cloud_only && config.cloud.is_none() {
+            return Ok(());
+        }
+        if config.cloud.is_some() && !cloud_only {
+            CloudEmbeddingRuntime::new(vault)
+                .revoke_sources(scope)
+                .map_err(|_| "source_cloud_approval_unavailable")?;
+        }
+        // 判定、撤权及 worker 失效在同一 Vault 锁内；不会误停并发切换后的本机配置。
+        Self::invalidate_worker(vault, &config)?;
+        config.settings.events_approved = false;
+        config.settings.attachments_approved = false;
+        config.settings.query_approved = false;
+        vault.write_replace(&path, &config)
     }
     fn current(&self) -> Result<()> {
         let current: Config = read_bounded(&self.path, 65536)?;
@@ -220,9 +388,8 @@ impl<'a> LocalEvents<'a> {
         {
             return Err("local_event_configuration_changed".into());
         }
-        let expected = json!({"schema":"recallcard.local-event-config/1","database":self.dir()?.join("index.sqlite"),"scope":self.config.scope,
-            "space":self.config.settings.space(),"events_approved":self.config.settings.events_approved,"attachments_approved":self.config.settings.attachments_approved,"query_approved":self.config.settings.query_approved,
-            "disk_cap_bytes":self.config.settings.disk_cap_mib*1024*1024,"backend":"python"});
+        current.validate(self.vault)?;
+        let expected = self.config.worker_settings()?;
         let mut actual: Value = read_bounded(&self.config.worker_config, 65536)?;
         // 兼容旧 worker 配置，但缺失字段只等于 false。
         if actual.get("attachments_approved").is_none() {
@@ -232,6 +399,12 @@ impl<'a> LocalEvents<'a> {
             return Err("local_event_configuration_changed".into());
         }
         Ok(())
+    }
+    pub fn is_cloud(&self) -> bool {
+        self.config.cloud.is_some()
+    }
+    pub fn disable_cloud(vault: &Vault, scope: &str) -> Result<()> {
+        Self::disable_mode(vault, scope, true)
     }
     fn dir(&self) -> Result<&Path> {
         self.config
@@ -251,9 +424,14 @@ impl<'a> LocalEvents<'a> {
         {
             status["index_state"] = json!("stale");
         }
+        self.current()?;
         status["state"] = json!("configured");
-        status["message"] =
-            json!("仅本机明确批准的普通对话或附件索引；配置不代表索引已覆盖或模型质量已核验");
+        status["provider"] = json!(if self.is_cloud() { "cloud" } else { "local" });
+        status["message"] = json!(if self.is_cloud() {
+            "仅向明确批准的云接收者编码已选范围；配置不代表索引已覆盖或模型质量已核验"
+        } else {
+            "仅本机明确批准的普通对话或附件索引；配置不代表索引已覆盖或模型质量已核验"
+        });
         Ok(status)
     }
     pub fn refresh_step(&self) -> Result<Value> {
@@ -308,12 +486,16 @@ impl<'a> LocalEvents<'a> {
             }
             let end = progress
                 .chunk_pos
-                .checked_add(8.min(8192 / self.config.settings.dimensions).min(
-                    65536
-                        / (self.config.settings.chunk_bytes
-                            + self.config.settings.document_instruction.len()
-                            + 513),
-                ))
+                .checked_add(
+                    (if self.is_cloud() { 4usize } else { 8usize })
+                        .min(8192 / self.config.settings.dimensions)
+                        .min(
+                            65536
+                                / (self.config.settings.chunk_bytes
+                                    + self.config.settings.document_instruction.len()
+                                    + 513),
+                        ),
+                )
                 .ok_or("local_event_progress_invalid")?
                 .min(ranges.len());
             if end == progress.chunk_pos {
@@ -428,7 +610,7 @@ impl<'a> LocalEvents<'a> {
             || candidates["generation"] != generation
             || candidates["space_signature"]
                 != hash(
-                    &serde_json::to_vec(&self.config.settings.space())
+                    &serde_json::to_vec(&self.config.space())
                         .map_err(|_| "local_event_config_invalid")?,
                 )
         {
@@ -557,10 +739,10 @@ impl<'a> LocalEvents<'a> {
             json!(self.config.settings.attachments_approved && !lexical_only);
         Ok(
             json!({"query":query,"results":results,"match_count":results.len(),"status":if lexical_only{if results.is_empty(){"unavailable"}else{"partial"}}else if results.is_empty(){"no_verified_candidates"}else{"ok"},
-            "truncated":rows.len()>results.len()||rejected>0||verification_limited||candidates["coverage"]["candidates_truncated"]==true||candidates["coverage"]["lexical"]["candidates_truncated"]==true,"coverage":{"event_search":if lexical_only{"local_lexical_fallback"}else{"local_semantic"},"semantic_search":if lexical_only{"unavailable"}else{"local_event_index"},
-            "local_event_semantic":!lexical_only,"attachments":attachment_coverage,"semantic":candidates["coverage"]["semantic"],"semantic_query_encoding":candidates["coverage"]["query_encoding"],"event_index_generation":generation,
+            "truncated":rows.len()>results.len()||rejected>0||verification_limited||candidates["coverage"]["candidates_truncated"]==true||candidates["coverage"]["lexical"]["candidates_truncated"]==true,"coverage":{"event_search":if lexical_only{"local_lexical_fallback"}else if self.is_cloud(){"cloud_semantic"}else{"local_semantic"},"semantic_search":if lexical_only{"unavailable"}else if self.is_cloud(){"cloud_event_index"}else{"local_event_index"},
+            "provider":if self.is_cloud(){"cloud"}else{"local"},"cloud_fallback":false,"local_event_semantic":!lexical_only&&!self.is_cloud(),"cloud_event_semantic":!lexical_only&&self.is_cloud(),"attachments":attachment_coverage,"semantic":candidates["coverage"]["semantic"],"semantic_query_encoding":candidates["coverage"]["query_encoding"],"event_index_generation":generation,
             "event_index_snapshot":manifest.epoch,"local_config_identity":self.config_hash,"source_verification":"current_event_hash_and_utf8_range","rejected_candidates":rejected,
-            "partial":lexical_only||rejected>0||verification_limited||attachment_coverage["status"]=="partial","candidate_policy":"verified_excerpt_anchors_then_channel_order/v2","lexical":candidates["coverage"]["lexical"],"fusion":candidates["coverage"]["fusion"],"verified_candidates":scanned,"candidate_window_limit":100,"candidate_reordering_enabled":reorder,"candidate_verification_limited":verification_limited,"candidate_text_bytes":source_bytes,"chunk_selection":candidates["coverage"]["chunk_selection"],"note":if lexical_only{"本机编码服务不可用；仅返回有界词法候选，语义路线未执行。无命中不代表没有相关历史。"}else{"本机向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}}),
+            "partial":lexical_only||rejected>0||verification_limited||attachment_coverage["status"]=="partial","candidate_policy":"verified_excerpt_anchors_then_channel_order/v2","lexical":candidates["coverage"]["lexical"],"fusion":candidates["coverage"]["fusion"],"verified_candidates":scanned,"candidate_window_limit":100,"candidate_reordering_enabled":reorder,"candidate_verification_limited":verification_limited,"candidate_text_bytes":source_bytes,"chunk_selection":candidates["coverage"]["chunk_selection"],"note":if lexical_only{"本机编码服务不可用；仅返回有界词法候选，语义路线未执行。无命中不代表没有相关历史。"}else{"向量候选不是答案；角色、时间与后续纠正需回到原话核对。"}}}),
         )
     }
 }

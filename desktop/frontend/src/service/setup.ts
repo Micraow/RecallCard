@@ -94,16 +94,18 @@ export interface CloudSemanticStatus {
  cloud:{grant:{revision:string;scope:string;settings:CloudEmbeddingSettings;accepted_at:string}|null;usage:{month:string;reserved_calls:number;reserved_bytes:number;query_calls:number;memory_calls:number};budget_note:string};
  index_refresh:import('./runtime').IndexRefreshStatus|null;credential:CredentialStatus|null;service_error:AppError|null;
 }
-export function validCloudSemanticSettings(value:CloudEmbeddingSettings):boolean {
+function validCloudTargetAndBudget(value:Omit<CloudEmbeddingSettings,'query_approved'|'memory_approved'>):boolean {
  return validModelTarget(value.endpoint,value.model) && !new URL(value.endpoint).pathname.endsWith('/')
   && new URL(value.endpoint).hostname.split('.').every(label=>/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label)) && new URL(value.endpoint).port!=='0'
   && Number.isSafeInteger(value.dimensions)&&value.dimensions>=1&&value.dimensions<=8192
   && value.revision.trim().length>0&&new TextEncoder().encode(value.revision).length<=256&&!/[\x00-\x1f\x7f]/.test(value.revision)
   && new TextEncoder().encode(value.query_instruction).length<=2048&&new TextEncoder().encode(value.document_instruction).length<=2048
-  && (value.query_approved||value.memory_approved)
   && (!value.budget_mode||['limited','unlimited'].includes(value.budget_mode))
   && Number.isSafeInteger(value.max_calls_per_month)&&value.max_calls_per_month>=1&&value.max_calls_per_month<=1000000
   && Number.isSafeInteger(value.max_bytes_per_month)&&value.max_bytes_per_month>=1&&value.max_bytes_per_month<=4294967296;
+}
+export function validCloudSemanticSettings(value:CloudEmbeddingSettings):boolean {
+ return validCloudTargetAndBudget(value)&&(value.query_approved===true||value.memory_approved===true);
 }
 
 export function recallCoverageNotes(page: SearchPage): string[] {
@@ -124,12 +126,17 @@ export function recallCoverageNotes(page: SearchPage): string[] {
   // 各范围是语义索引来源的覆盖依据；顶部的计数/上限仍属于另一条词法扫描路线。
   const scopedAttachments=page.coverage?.scopes?.flatMap(scope=>scope.attachments&&scope.attachments.status!=='not_approved'&&scope.attachments.status!=='not_requested'?[scope.attachments]:[])||[];
   const attachmentSemantic=attachments?.semantic===true||scopedAttachments.some(item=>item.semantic===true);
+  const localSuccess=page.coverage?.local_event_semantic===true,cloudSuccess=page.coverage?.cloud_event_semantic===true;
+  const semanticProviders=(page.coverage?.scopes||[]).filter(scope=>scope.attachments?.semantic===true&&scope.attachments.status!=='not_approved'&&scope.attachments.status!=='not_requested').map(scope=>scope.provider);
+  const attachmentCloud=semanticProviders.includes('cloud'),attachmentLocal=semanticProviders.includes('local');
+  // 顶层只知道整个入口成功，不能把其他来源的 provider 冒充为附件 provider。
+  const attachmentProvider=attachmentCloud&&attachmentLocal?'本机及云':attachmentCloud?'云':attachmentLocal?'本机':cloudSuccess&&!localSuccess?'云':localSuccess&&!cloudSuccess?'本机':'已批准提供器的';
   const scopedAttachmentLimited=scopedAttachments.some(item=>item.limited===true);
   const scopedAttachmentSkipped=scopedAttachments.some(item=>(item.skipped||0)>0);
   const scopedAttachmentPartial=scopedAttachmentLimited||scopedAttachmentSkipped||scopedAttachments.some(item=>item.status==='partial');
   const attachmentPartial=attachments?.status==='partial'||attachments?.limited===true||(attachments?.skipped||0)>0||scopedAttachmentPartial;
   const attachmentNotes=(page.results.some(row=>row.kind==='attachment')||attachmentPartial||attachmentSemantic)?[
-    attachmentSemantic?'本次至少一个独立批准范围的附件正文已参与本机语义检索；仅包含已保留且核验通过的安全 UTF-8 文本，不含 PDF 提取或 OCR。':'本次附件正文仅在本机按词法查找已保留且核验通过的安全 UTF-8 文本，未使用附件语义向量；不含 PDF 提取或 OCR。',
+    attachmentSemantic?`本次至少一个独立批准范围的附件正文已参与${attachmentProvider}语义检索；仅包含已保留且核验通过的安全 UTF-8 文本，不含 PDF 提取或 OCR。`:'本次附件正文仅在本机按词法查找已保留且核验通过的安全 UTF-8 文本，未使用附件语义向量；不含 PDF 提取或 OCR。',
     '附件内容是独立来源，不当作上传者原话；父事件须在当前范围可见、未撤回且未被修订替换。',
     ...(attachments?.limited?['附件扫描达到文件数量或总字节上限，部分原件尚未检查；缩小读取范围，或按已知附件引用单独读取。换关键词不会解除这项扫描上限。']:[]),
     ...((attachments?.skipped||0)>0?['部分附件因格式不支持、原件缺失、损坏或单文件超限未参与检索；请检查完整导出原件，未命中不能当作附件内容不存在。']:[]),
@@ -138,21 +145,34 @@ export function recallCoverageNotes(page: SearchPage): string[] {
     ...(scopedAttachmentSkipped?['部分附件因格式不支持、原件缺失、损坏或单文件超限未进入语义索引；请检查完整导出原件，未命中不能当作附件内容不存在。']:[]),
   ]:[];
   const readyScopes=page.coverage?.scopes?.filter(scope=>scope.state==='ready')||[];
+  const cloudSelected=page.coverage?.provider==='cloud'||['explicit_cloud','explicit_local_and_cloud'].includes(page.coverage?.event_search||'')||page.coverage?.scopes?.some(scope=>scope.provider==='cloud')===true;
+  const cloudFailed=page.coverage?.scopes?.some(scope=>scope.provider==='cloud'&&(scope.state==='unavailable'||scope.state==='degraded'||scope.semantic?.status==='unavailable'))===true;
+  const cloudFailureNotes=cloudFailed?['所选云来源检索未完成，可能已经发送已批准请求并产生费用；本次没有这些云范围的语义结果。']:[];
   const fallbackScopes=page.coverage?.scopes?.filter(scope=>scope.fusion==='lexical_only')||[];
   const directFallback=page.coverage?.fusion==='lexical_only';
   const fallbackLexical=[...(directFallback&&page.coverage?.lexical?[page.coverage.lexical]:[]),...fallbackScopes.flatMap(scope=>scope.lexical?[scope.lexical]:[])];
+  const fallbackProviders=[...(directFallback?[page.coverage?.provider]:[]),...fallbackScopes.map(scope=>scope.provider)];
+  const fallbackCloud=fallbackProviders.includes('cloud');
+  const fallbackProvider=fallbackCloud?(fallbackProviders.every(provider=>provider==='cloud')?'云编码':'已选编码'):'本机编码';
   const fallbackNotes=directFallback||fallbackScopes.length>0?[
-    '部分资料范围的本机编码服务不可用，仅返回来源已核验的词法候选；这些范围没有语义分数，也不会改用云编码。',
+    `部分资料范围的${fallbackProvider}服务不可用，仅返回来源已核验的词法候选；这些降级范围没有语义分数，${fallbackCloud?'不会自动更换提供器或云接口':'也不会改用云编码'}。`,
     ...(fallbackLexical.some(item=>item.status==='limited_query')?['降级范围的问题超出词法预算，本次未能执行这两条候选路线；没有截短或改写问题。']:[]),
     ...(fallbackLexical.some(item=>item.status==='unsupported_query')?['降级范围的问题没有受支持的词法词项，本次没有可用的候选路线。']:[]),
     ...(fallbackLexical.some(item=>item.candidates_truncated)?['降级范围的词法候选达到扫描或数量预算，未展示的来源仍可能存在。']:[]),
     '字面命中仍需核对角色、时间、否定和后续纠正；未命中不表示没有相关历史。',
   ]:[];
   const lexical=[...(!directFallback&&page.coverage?.lexical?[page.coverage.lexical]:[]),...readyScopes.flatMap(scope=>scope.lexical?[scope.lexical]:[])];
-  if(page.coverage?.local_event_semantic) return [
-    ...budgetNotes, ...attachmentNotes, ...fallbackNotes,
-    (page.coverage.semantic_query_encoding==='cache'||readyScopes.length>0&&readyScopes.every(scope=>scope.query_encoding==='cache'))?'本次使用已缓存的本机问题向量。':'本次问题已发送到你批准的本机编码服务。',
-    (attachmentSemantic?'本次独立批准的资料已参与本机语义检索':'普通对话已直接参与本机语义检索')+'，无需先整理成 Memory；记忆条目按词法补充，此入口没有云回退。',
+  const queryEncodings=readyScopes.length>0?readyScopes.map(scope=>scope.query_encoding):[page.coverage?.semantic_query_encoding];
+  const queryNotes=[
+    ...(queryEncodings.includes('local')?[`${queryEncodings.some(kind=>kind&&kind!=='local')?'本次部分范围的':'本次'}问题已发送到你批准的本机编码服务。`]:[]),
+    ...(queryEncodings.includes('cloud')?[`${queryEncodings.some(kind=>kind&&kind!=='cloud')?'本次部分范围的':'本次'}问题已按当前范围的独立批准发送到云编码服务。`]:[]),
+    ...(queryEncodings.includes('cache')?[`${queryEncodings.some(kind=>kind&&kind!=='cache')?'本次部分范围':'本次'}使用已缓存的问题向量；缓存命中不代表本次新编码或外发。`]:[]),
+  ];
+  const providerLabel=localSuccess&&cloudSuccess?'本机与独立批准的云':cloudSuccess?'独立批准的云':'本机';
+  if(localSuccess||cloudSuccess) return [
+    ...budgetNotes, ...attachmentNotes, ...cloudFailureNotes, ...fallbackNotes,
+    ...(queryNotes.length>0?queryNotes:['本次问题向量的编码来源未明确报告，请核对各范围状态。']),
+    (attachmentSemantic?`本次独立批准的资料已参与${providerLabel}语义检索`:`普通对话已直接参与${providerLabel}语义检索`)+`，无需先整理成 Memory；记忆条目按词法补充，${cloudSuccess||cloudSelected?'各范围使用已明确批准的提供器，没有自动云回退':'此入口没有云回退'}。`,
     (attachmentSemantic?'每项资料':'每条原话')+'展示一处来源已核验的匹配片段，可能由词法或语义通道选中。角色、时间、否定与后续纠正仍需回到来源核对。',
     ...(lexical.some(item=>item.status==='available')?[(attachmentSemantic?'已批准资料的':'普通对话')+'词法索引已独立寻找完整编号和汉字词组候选，并结合语义排序；字面匹配不代表事实正确。']:[]),
     ...(lexical.some(item=>item.status==='legacy_unavailable')?['部分范围仍使用旧语义索引；显式刷新'+(attachmentSemantic?'已批准资料':'普通对话')+'索引后可补建词法通道并复用已有向量。']:[]),
@@ -160,16 +180,16 @@ export function recallCoverageNotes(page: SearchPage): string[] {
     ...(lexical.some(item=>item.status==='unsupported_query')?['本次问题没有受支持的词法词项，仍按完整问题进行语义检索。']:[]),
     ...(lexical.some(item=>item.candidates_truncated)?['词法候选达到本次扫描或数量预算，未展示的精确来源仍可能存在。']:[]),
     '相似候选可能完全无关；尚未校准相关性或可回答性，不能把返回结果当作已经记起事实。',
-    ...(page.coverage.candidate_verification_limited||readyScopes.some(scope=>scope.verification_limited)?['来源核验受到时间或资源门槛限制，部分候选尚未核验；请缩小范围或稍后重试。']:[]),
+    ...(page.coverage?.candidate_verification_limited||readyScopes.some(scope=>scope.verification_limited)?['来源核验受到时间或资源门槛限制，部分候选尚未核验；请缩小范围或稍后重试。']:[]),
     ...(genericTruncation?['候选、片段或核验达到本次预算，未展示的来源不代表不存在。']:[])];
-  if(fallbackNotes.length>0) return [...budgetNotes,...attachmentNotes,...fallbackNotes];
+  if(fallbackNotes.length>0) return [...budgetNotes,...attachmentNotes,...cloudFailureNotes,...fallbackNotes];
   if(page.coverage?.cloud_fallback===false) return [
-    ...budgetNotes, ...attachmentNotes,
-    page.coverage.event_search==='local_only'?'本机普通对话索引尚未可用或未覆盖全部范围；现有 Memory 仅按词法补充。':'尚未配置普通对话本机索引，本次只在本地按关键词寻找原话和记忆。',
-    '此入口不会改用云编码；未命中或未覆盖不表示没有相关历史。',
+    ...budgetNotes, ...attachmentNotes, ...cloudFailureNotes,
+    cloudSelected?'本次未取得所选来源索引的完整语义结果；已完成路线的候选仍需逐项核对来源。':page.coverage.event_search==='local_only'?'普通对话与附件来源索引尚未可用或未覆盖全部范围；现有 Memory 仅按词法补充。':'本次没有成功的来源语义检索，本次只在本地按关键词寻找原话和记忆。',
+    '此入口不会改用云编码作自动回退；这不表示未配置独立批准的云提供器。未命中或未覆盖不表示没有相关历史。',
     ...(page.coverage.lexical_match==='natural_question'?['按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。']:[]),
     ...(genericTruncation?['候选、覆盖或文字预算有限，请核对状态并回到来源。']:[])];
-  const notes = [...budgetNotes, ...attachmentNotes, semanticSearchNote(page.coverage) || "本次未提供语义检索状态，不能据此确认语义覆盖。"];
+  const notes = [...budgetNotes, ...attachmentNotes, ...cloudFailureNotes, semanticSearchNote(page.coverage) || "本次未提供语义检索状态，不能据此确认语义覆盖。"];
   if (page.coverage?.lexical_match === "natural_question") notes.push("按问题寻找字面候选；否定、相对时间和同义改写仍需核对原话，候选不等于答案。");
   notes.push("当前入口的语义候选只覆盖已建索引的记忆；原始聊天仍通过词法查找，尚不保证换个说法也能找到。");
   if (genericTruncation) notes.push(attachmentPartial ? "本次附件覆盖不完整，未展示的来源并不代表不存在；请先查看上方附件状态。" : "本次结果达到数量或文字预算上限，未展示的来源并不代表不存在；可换用更具体的关键词继续找。");
@@ -192,4 +212,54 @@ export function validLocalEventSettings(value:LocalEventSetup):boolean {
  return validLocalSemanticTarget(value) && !!value.tokenizer.trim() && value.tokenizer.length<=256 && !/[\x00-\x1f\x7f]/.test(value.tokenizer)
  && Number.isInteger(value.chunk_bytes) && value.chunk_bytes>=256 && value.chunk_bytes<=8192
  && Number.isInteger(value.disk_cap_mib) && value.disk_cap_mib>=16 && value.disk_cap_mib<=512 && (value.events_approved||value.attachments_approved===true||value.query_approved);
+}
+
+// 来源云批准独立于 Memory、本机来源和旧查询批准；这里只使用同范围的来源云 grant。
+export interface SourceCloudSettings {
+ endpoint:string; model:string; dimensions:number; revision:string;
+ query_instruction:string; document_instruction:string;
+ events_approved:boolean; attachments_approved:boolean; query_approved:boolean;
+ budget_mode?:'limited'|'unlimited'; max_calls_per_month:number; max_bytes_per_month:number;
+}
+export interface SourceCloudGrant {revision:string;scope:string;settings:SourceCloudSettings;accepted_at:string;}
+export interface SourceCloudUsage {
+ month:string;reserved_calls:number;reserved_bytes:number;query_calls:number;memory_calls:number;
+ source_query_calls:number;event_calls:number;attachment_calls:number;
+}
+export interface CloudEventSetup {
+ settings:SourceCloudSettings;tokenizer:string;chunk_bytes:number;disk_cap_mib:number;save_in_os:boolean;
+}
+export interface CloudEventStatus extends LocalEventStatus {
+ provider:'cloud'|'local'|'none';
+ cloud:{grant:SourceCloudGrant|null;usage:SourceCloudUsage;budget_note:string};
+ credential?:CredentialStatus|null;service_error?:AppError|null;
+}
+export function initialCloudEventSetup(initial:CloudEventStatus|null,scope:string):CloudEventSetup {
+ const grant=initial?.provider==='cloud'&&initial.cloud.grant?.scope===scope?initial.cloud.grant:null;
+ const current=grant?initial?.settings:null;
+ return {
+  settings:grant?{
+   endpoint:grant.settings.endpoint,model:grant.settings.model,dimensions:grant.settings.dimensions,revision:grant.settings.revision,
+   query_instruction:grant.settings.query_instruction,document_instruction:grant.settings.document_instruction,
+   events_approved:grant.settings.events_approved===true,attachments_approved:grant.settings.attachments_approved===true,query_approved:grant.settings.query_approved===true,
+   budget_mode:grant.settings.budget_mode||'limited',max_calls_per_month:grant.settings.max_calls_per_month,max_bytes_per_month:grant.settings.max_bytes_per_month,
+  }:{
+   endpoint:'',model:'',dimensions:1024,revision:'',query_instruction:'',document_instruction:'',
+   events_approved:false,attachments_approved:false,query_approved:false,budget_mode:'limited',max_calls_per_month:100,max_bytes_per_month:1048576,
+  },
+  tokenizer:current?.tokenizer||'',chunk_bytes:current?.chunk_bytes??1024,disk_cap_mib:current?.disk_cap_mib??256,save_in_os:false,
+ };
+}
+export function validSourceCloudSettings(value:SourceCloudSettings):boolean {
+ return validCloudTargetAndBudget(value)
+  && !value.endpoint.includes('@')
+  && new TextEncoder().encode(value.model).length<=256
+  && !/[\x00-\x09\x0b-\x1f\x7f]/.test(value.query_instruction+value.document_instruction)
+  && (value.events_approved===true||value.attachments_approved===true||value.query_approved===true);
+}
+export function validCloudEventSetup(value:CloudEventSetup):boolean {
+ return validSourceCloudSettings(value.settings)
+  && !!value.tokenizer.trim()&&new TextEncoder().encode(value.tokenizer).length<=256&&!/[\x00-\x1f\x7f]/.test(value.tokenizer)
+  && Number.isSafeInteger(value.chunk_bytes)&&value.chunk_bytes>=256&&value.chunk_bytes<=8192
+  && Number.isSafeInteger(value.disk_cap_mib)&&value.disk_cap_mib>=16&&value.disk_cap_mib<=512;
 }

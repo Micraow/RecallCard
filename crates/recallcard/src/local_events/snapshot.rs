@@ -497,6 +497,7 @@ mod tests {
     }
     fn index(vault: &Vault, events: bool, attachments: bool) -> LocalEvents<'_> {
         let config = Config {
+            cloud: None,
             schema: "recallcard.local-event-host/1".into(),
             scope: "personal".into(),
             root: vault.root().to_owned(),

@@ -268,6 +268,44 @@ async fn local_event_disable(
 }
 
 #[tauri::command]
+async fn cloud_event_status(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<Value> {
+    execute_model(state.service.clone(), session_id, scope, |operation| {
+        operation.cloud_event_status()
+    })
+    .await
+}
+#[tauri::command]
+async fn cloud_event_apply(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+    request: recallcard::desktop::CloudEventSetup,
+    api_key: Option<String>,
+) -> recallcard::application::AppResult<Value> {
+    let binary = trusted_packaged_cli(&app).ok();
+    execute_model(state.service.clone(), session_id, scope, move |operation| {
+        operation.configure_cloud_events(request, api_key, binary.as_deref())
+    })
+    .await
+}
+#[tauri::command]
+async fn cloud_event_disable(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: String,
+) -> recallcard::application::AppResult<Value> {
+    execute_model(state.service.clone(), session_id, scope, |operation| {
+        operation.disable_cloud_events()
+    })
+    .await
+}
+
+#[tauri::command]
 async fn semantic_setup_status(
     state: State<'_, AppState>,
     session_id: String,
@@ -1829,6 +1867,9 @@ fn main() {
             local_event_apply,
             local_event_refresh,
             local_event_disable,
+            cloud_event_status,
+            cloud_event_apply,
+            cloud_event_disable,
             semantic_setup_apply,
             semantic_setup_disable,
             cloud_semantic_status,

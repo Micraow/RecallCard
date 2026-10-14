@@ -5,32 +5,44 @@ import {appError,type AppError} from '../service/contracts';
 import {type LocalEventSetup,type LocalEventStatus,type LocalEventProgress,validLocalEventSettings,normalizeLocalEventSettings} from '../service/setup';
 import {scopeLabel} from '../service/types';
 import {Dialog,ErrorNotice,Loading} from './common';
+import {CloudEventDialog} from './CloudEventSetup';
 
 export function LocalEventSetupPanel({service}:{service:ScopedService}) {
- const state=useResource(()=>service.localEventStatus(),[service]);
- const [editing,setEditing]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState<AppError|null>(null),[progress,setProgress]=useState<LocalEventProgress|null>(null);
+ return <SourceIndexPanel key={`${service.workspace.session_id}:${service.scope}`} service={service}/>;
+}
+function SourceIndexPanel({service}:{service:ScopedService}) {
+ const state=useResource(()=>service.cloudEventStatus(),[service]);
+ const [editing,setEditing]=useState<'local'|'cloud'|null>(null),[stoppingCloud,setStoppingCloud]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState<AppError|null>(null),[progress,setProgress]=useState<LocalEventProgress|null>(null);
  const active=useRef(true),stop=useRef(false),lock=useRef(false);
- useEffect(()=>{active.current=true;stop.current=false;setEditing(false);setProgress(null);return()=>{active.current=false;stop.current=true;};},[service]);
+ useEffect(()=>{active.current=true;stop.current=false;setEditing(null);setStoppingCloud(false);setProgress(null);setError(null);return()=>{active.current=false;stop.current=true;};},[service]);
  const build=async()=>{if(lock.current)return;lock.current=true;stop.current=false;setBusy(true);setError(null);try{
    while(active.current&&!stop.current){const value=await service.refreshLocalEvents();if(!active.current)break;setProgress(value);if(value.complete)break;await new Promise(resolve=>setTimeout(resolve,20));}
    if(active.current)state.refresh();
   }catch(reason){if(active.current)setError(appError(reason));}finally{lock.current=false;if(active.current)setBusy(false);}};
- const disable=async()=>{if(lock.current)return;lock.current=true;setError(null);try{await service.disableLocalEvents();if(active.current){state.refresh();setProgress(null);}}catch(reason){if(active.current)setError(appError(reason));}finally{lock.current=false;}};
- if(state.loading)return <Loading label="正在读取本机资料索引状态"/>;
- const value=state.data;
- return <section className="model-setting-details" aria-label="普通对话与附件本机语义索引"><h2>普通对话与附件本机语义索引</h2>
- <p>让已导入的用户原话、助手回答和独立批准的安全 UTF-8 附件正文参与本机向量检索，无需先变成 Memory。默认关闭，需要 Python 3.11 或更新版本，以及已有的本机 embedding 服务。</p>
- <p className="field-hint">普通对话、附件和新问题分别批准，仅向你填写并核对的同一数字回环本机地址发送已批准的数据，此入口不向外部地址发送或使用云回退。服务本身是否完全离线仍需你核实；不读取推理草稿。</p>
- {state.error&&<ErrorNotice error={state.error} retry={state.refresh}/>} {error&&<ErrorNotice error={error}/>}
- {value?.settings&&<p>{value.settings.model} · {value.settings.dimensions}维 · {value.settings.revision} · {value.settings.events_approved?'普通对话编码已批准':'普通对话编码未启用'} · {value.settings.attachments_approved===true?'附件编码已独立批准':'附件编码未启用'} · {value.settings.query_approved?'问题按需本机编码':'问题编码未启用'}</p>}
- {value?.index_state&&<p role="status" data-testid="local-event-index-status">{value.index_state==='complete'?'当前快照已建索引':value.index_state==='stale'?'资料已变化，请更新索引':'索引尚未完成'} · {value.source_count??0}{value.settings?.attachments_approved?'项来源':'条原话'} / {value.chunk_count??0}个片段</p>}
- {progress&&<p role="status">{progress.complete?'本轮索引完成':busy?'正在分批处理':'已暂停，可继续'}：{progress.processed_sources}/{progress.total_sources}{value?.settings?.attachments_approved?'项来源':'条原话'}</p>}
- <p className="field-hint">新增、修改、遗忘或恢复资料后，请更新索引。旧快照不能当作完整覆盖；缓存可重建，原始资料保留。模型质量与大库首次建索引速度应另行实测。</p>
- <div className="connection-controls"><button className="button compact" disabled={busy} onClick={()=>setEditing(true)}>配置普通对话本机索引</button>
- {(value?.settings?.events_approved||value?.settings?.attachments_approved===true)&&<button className="button compact" disabled={busy} onClick={()=>void build()}>{value?.settings?.attachments_approved===true?'更新已批准资料索引':'更新普通对话索引'}</button>}
+ const disable=async(cloud:boolean)=>{if(lock.current)return;lock.current=true;setBusy(true);setError(null);try{if(cloud)await service.disableCloudEvents();else await service.disableLocalEvents();if(active.current){state.refresh();setProgress(null);setStoppingCloud(false);}}catch(reason){if(active.current)setError(appError(reason));}finally{lock.current=false;if(active.current)setBusy(false);}};
+ if(state.loading)return <Loading label="正在读取普通对话与附件索引状态"/>;
+ const value=state.data,cloud=value?.provider==='cloud',target=cloud?'云':'本机';
+ const selected=cloud?value?.cloud.grant?.settings:value?.settings;
+ return <section className="model-setting-details" aria-label="普通对话与附件语义索引"><h2>普通对话与附件语义索引</h2>
+ <p>让已导入的用户原话、助手回答和独立批准的安全 UTF-8 附件正文参与向量检索，无需先变成 Memory。默认关闭，可选择已有本机 embedding 服务，或自行配置 Qwen 等 OpenAI-compatible 云服务。</p>
+ <p className="field-hint">普通对话、附件和新问题分别批准。云与本机配置分别审阅，不继承 Memory 或其他范围的批准；不会自动选择提供器或云回退，不读取推理草稿。编码需要 Python 3.11 或更新版本。</p>
+ {state.error&&<ErrorNotice error={state.error} retry={state.refresh}/>} {value?.service_error&&<ErrorNotice error={value.service_error}/>} {error&&<ErrorNotice error={error}/>}
+ {selected&&<p>当前提供器：{target} · {selected.model} · {selected.dimensions}维 · {selected.revision} · {selected.events_approved?'普通对话编码已批准':'普通对话编码未启用'} · {selected.attachments_approved===true?'附件编码已独立批准':'附件编码未启用'} · {selected.query_approved?`问题按需${target}编码`:'问题编码未启用'}</p>}
+ {value?.index_state&&<p role="status" data-testid="local-event-index-status">{value.index_state==='complete'?'当前快照已建索引':value.index_state==='stale'?'资料已变化，请更新索引':'索引尚未完成'} · {value.source_count??0}{selected?.attachments_approved?'项来源':'条原话'} / {value.chunk_count??0}个片段</p>}
+ {progress&&<p role="status">{progress.complete?'本轮索引完成':busy?'正在分批处理':'已暂停，可继续'}：{progress.processed_sources}/{progress.total_sources}{selected?.attachments_approved?'项来源':'条原话'}</p>}
+ {value?.cloud&&<><p role="status">{value.cloud.usage.month} 全 Vault 云向量已预留 {value.cloud.usage.reserved_calls} 次 / {value.cloud.usage.reserved_bytes} 字节（Memory 查询 {value.cloud.usage.query_calls} 次，Memory 正文 {value.cloud.usage.memory_calls} 次，来源查询 {value.cloud.usage.source_query_calls} 次，普通对话 {value.cloud.usage.event_calls} 次，附件 {value.cloud.usage.attachment_calls} 次）</p><p className="field-hint">来源与 Memory 共享累计用量，限额不能相加。{value.cloud.budget_note}</p></>}
+ {cloud&&selected&&'max_calls_per_month' in selected&&<p>当前云来源月度预算：{selected.budget_mode==='unlimited'?'无限，持续计量':`${selected.max_calls_per_month} 次 / ${selected.max_bytes_per_month} 字节`}</p>}
+ {cloud&&value?.credential&&<p className="field-hint">{value.credential.message}</p>}
+ <p className="field-hint">保存配置不会开始编码。新增、修改、遗忘或恢复资料后，请明确更新索引。旧快照不能当作完整覆盖；缓存可重建，原始资料保留。模型质量与大库首次建索引速度应另行实测。</p>
+ <div className="connection-controls"><button className="button compact" disabled={busy||!!state.error} onClick={()=>setEditing('local')}>配置普通对话本机索引</button>
+ <button className="button compact" disabled={busy||!!state.error} onClick={()=>setEditing('cloud')}>配置普通对话与附件云索引</button>
+ {(selected?.events_approved||selected?.attachments_approved===true)&&<button className="button compact" disabled={busy||!!state.error||!!value?.service_error} onClick={()=>void build()}>{selected?.attachments_approved===true?'更新已批准资料索引':'更新普通对话索引'}</button>}
  {busy&&<button className="button compact" onClick={()=>{stop.current=true;}}>完成当前批后暂停</button>}
- {value?.settings&&<button className="text-button" disabled={busy} onClick={()=>void disable()}>{value?.settings?.attachments_approved===true?'停用已批准资料索引':'停用普通对话索引'}</button>}</div>
- {editing&&<LocalEventDialog key={`${service.workspace.session_id}:${service.scope}`} service={service} initial={value??null} close={()=>setEditing(false)} saved={()=>{state.refresh();}}/>}
+ {!cloud&&value?.settings&&<button className="text-button" disabled={busy} onClick={()=>void disable(false)}>{selected?.attachments_approved===true?'停用已批准资料索引':'停用普通对话索引'}</button>}
+ {value?.cloud.grant&&<button className="text-button" disabled={busy} onClick={()=>setStoppingCloud(true)}>停用云来源索引</button>}</div>
+ {editing==='local'&&<LocalEventDialog key={`${service.workspace.session_id}:${service.scope}:local`} service={service} initial={cloud?null:value??null} close={()=>setEditing(null)} saved={()=>{state.refresh();}}/>}
+ {editing==='cloud'&&<CloudEventDialog key={`${service.workspace.session_id}:${service.scope}:cloud`} service={service} initial={value??null} close={()=>setEditing(null)} saved={()=>{state.refresh();}}/>}
+ {stoppingCloud&&<Dialog title="停用云来源索引？" close={()=>setStoppingCloud(false)} busy={busy}><div className="modal-body"><p>撤回当前范围的普通对话、附件与来源问题云编码批准，后续请求不会继续发送。已发送请求不能撤回，可能已计费。</p><p>原始资料、已有缓存、累计用量和系统保护凭据保留。此操作只停用云来源配置，不停用本机提供器或撤回 Memory 批准。</p></div><div className="modal-footer"><button className="button" disabled={busy} onClick={()=>setStoppingCloud(false)}>取消</button><button className="button primary" disabled={busy} onClick={()=>void disable(true)}>确认停用云来源索引</button></div></Dialog>}
  </section>;
 }
 function LocalEventDialog({service,initial,close,saved}:{service:ScopedService;initial:LocalEventStatus|null;close:()=>void;saved:(v:LocalEventStatus)=>void}) {
