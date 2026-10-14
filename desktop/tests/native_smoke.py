@@ -183,9 +183,23 @@ class WebDriver:
         print("标识核验：" + json.dumps(record, ensure_ascii=False), flush=True)
 
     def click(self, selector, using="css selector"):
-        element = wait_for(lambda: self.find(selector, using), f"找到按钮 {selector}")
-        # 只把目标滚动到窗口中央；仍由真实 WebDriver 派发点击，不调用业务后端。
-        self.command("POST", "/execute/sync", {"script": "arguments[0].scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});", "args": [{ELEMENT: element}]})
+        for attempt in range(3):
+            element = wait_for(lambda: self.find(selector, using), f"找到按钮 {selector}")
+            try:
+                # 只把目标滚动到窗口中央；尚未派发任何点击或调用业务后端。
+                self.command("POST", "/execute/sync", {"script": "arguments[0].scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});", "args": [{ELEMENT: element}]})
+                break
+            except DriverError as error:
+                try:
+                    payload = json.loads(str(error))
+                    value = payload.get("value") if isinstance(payload, dict) else None
+                    code = value.get("error") if isinstance(value, dict) else None
+                except (ValueError, TypeError):
+                    code = None
+                if code != "stale element reference" or attempt == 2:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+        # 真正点击位于恢复循环之外。失效/不确定回执均不能重放有副作用动作。
         self.command("POST", f"/element/{element}/click", {})
 
     def button(self, label, container=""):

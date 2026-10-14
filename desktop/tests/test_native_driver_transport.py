@@ -55,6 +55,43 @@ class DriverTransportTest(unittest.TestCase):
             with self.subTest(body=body), patch.object(driver,"find",return_value="node"), patch.object(driver,"command",side_effect=error) as command, patch.object(module.time,"sleep"):
                 with self.assertRaises(module.DriverError):driver.text(".synthetic")
                 self.assertEqual(command.call_count,1)
+    def test_stale_scroll_preparation_relocates_before_one_click(self):
+        driver = self.driver()
+        stale = module.DriverError(json.dumps({"value": {"error": "stale element reference"}}))
+        with patch.object(driver, "find", side_effect=["old", "current"]) as find, patch.object(driver, "command", side_effect=[stale, None, None]) as command, patch.object(module.time, "sleep"):
+            driver.click(".source-row")
+        self.assertEqual([call.args for call in find.call_args_list], [(".source-row", "css selector")] * 2)
+        self.assertEqual([call.args[1] for call in command.call_args_list], ["/execute/sync", "/execute/sync", "/element/current/click"])
+        self.assertEqual([call.args[2]["args"][0][module.ELEMENT] for call in command.call_args_list[:2]], ["old", "current"])
+
+    def test_persistent_stale_scroll_never_dispatches_a_click(self):
+        driver = self.driver()
+        stale = module.DriverError(json.dumps({"value": {"error": "stale element reference"}}))
+        with patch.object(driver, "find", return_value="replaced") as find, patch.object(driver, "command", side_effect=stale) as command, patch.object(module.time, "sleep"):
+            with self.assertRaisesRegex(module.DriverError, "stale element reference"):
+                driver.click(".source-row")
+        self.assertEqual(find.call_count, 3)
+        self.assertEqual([call.args[1] for call in command.call_args_list], ["/execute/sync"] * 3)
+
+    def test_non_stale_scroll_errors_are_not_retried_or_clicked(self):
+        for error in [module.DriverError('{"value":{"error":"no such element"}}'),
+                      module.DriverError('{"value":{"error":"invalid session id"}}'),
+                      module.DriverError('bad response'), ConnectionResetError('unknown scroll outcome')]:
+            driver = self.driver()
+            with self.subTest(error=error), patch.object(driver, "find", return_value="node") as find, patch.object(driver, "command", side_effect=error) as command:
+                with self.assertRaises(type(error)):
+                    driver.click(".source-row")
+                self.assertEqual(find.call_count, 1)
+                self.assertEqual(command.call_count, 1)
+                self.assertEqual(command.call_args.args[1], "/execute/sync")
+
+    def test_xpath_target_is_preserved_when_preparation_relocates(self):
+        driver = self.driver()
+        stale = module.DriverError('{"value":{"error":"stale element reference"}}')
+        with patch.object(driver, "find", side_effect=["old", "current"]) as find, patch.object(driver, "command", side_effect=[stale, None, None]), patch.object(module.time, "sleep"):
+            driver.click("//button[.='确认']", "xpath")
+        self.assertEqual([call.args for call in find.call_args_list], [("//button[.='确认']", "xpath")] * 2)
+
     def test_click_stale_failure_does_not_replay_the_action(self):
         driver=self.driver();stale=module.DriverError(json.dumps({"value":{"error":"stale element reference"}}))
         with patch.object(driver,"find",return_value="node"), patch.object(driver,"command",side_effect=[None,stale]) as command:
