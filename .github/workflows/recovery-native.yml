@@ -9,6 +9,9 @@ on:
       - 'docs/real-encoder-synthetic-ci.md'
       - '.github/workflows/real-encoder-synthetic.yml'
       - '.github/real-encoder-ci-request.json'
+      - 'scripts/lexical_ablation/**'
+      - 'docs/lexical-ablation.md'
+      - '.github/workflows/lexical-ablation.yml'
 permissions:
   contents: read
 concurrency:

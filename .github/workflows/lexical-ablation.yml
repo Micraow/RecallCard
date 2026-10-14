@@ -1,0 +1,38 @@
+name: 合成词法排序消融
+on:
+  workflow_dispatch:
+  push:
+    branches: ["recovery/native-20261011"]
+    paths:
+      - 'scripts/lexical_ablation/**'
+      - 'python/recallcard_worker/event_lexical.py'
+      - '.github/workflows/lexical-ablation.yml'
+  pull_request:
+    paths:
+      - 'scripts/lexical_ablation/**'
+      - 'python/recallcard_worker/event_lexical.py'
+      - '.github/workflows/lexical-ablation.yml'
+permissions:
+  contents: read
+jobs:
+  synthetic:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 方法回归与两个哈希随机种子的可复现性
+        run: |
+          python3 -m unittest discover -s scripts/lexical_ablation -p 'test_*.py' -v
+          PYTHONHASHSEED=1 python3 scripts/lexical_ablation/evaluate.py --repo "$PWD" --out "$RUNNER_TEMP/lexical-ablation-first"
+          PYTHONHASHSEED=2 python3 scripts/lexical_ablation/evaluate.py --repo "$PWD" --out "$RUNNER_TEMP/lexical-ablation-second"
+          cmp "$RUNNER_TEMP/lexical-ablation-first/results.json" "$RUNNER_TEMP/lexical-ablation-second/results.json"
+          cmp "$RUNNER_TEMP/lexical-ablation-first/fixture.json" "$RUNNER_TEMP/lexical-ablation-second/fixture.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-lexical-ablation-${{ github.sha }}
+          path: ${{ runner.temp }}/lexical-ablation-first/*.json
+          if-no-files-found: error
+          retention-days: 7
