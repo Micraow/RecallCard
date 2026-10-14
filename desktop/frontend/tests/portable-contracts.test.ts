@@ -102,5 +102,41 @@ test('附件正文不会被复制包冒充为所属用户原话', () => {
     {ref:'attachment:evt_synthetic/'+'a'.repeat(64),kind:'attachment',text:'合成文件正文',role:'user'},
     {ref:'event:evt_synthetic',kind:'event',text:'合成消息',role:'user'},
   ]});
-  assert.deepEqual(choices.map(row=>row.ref),['event:evt_synthetic']);
+  assert.equal(choices.length,2);
+  assert.equal(choices[0].kind,'attachment'); assert.equal(choices[0].role,null);
+  assert.equal(choices[1].role,'user');
+});
+
+function attachmentContext(): PortableContext {
+  const parent = 'event:evt_'+'a'.repeat(64), hash = 'b'.repeat(64);
+  const ref = 'attachment:'+parent.slice(6)+'/'+hash;
+  return {...context('附件正文，非用户原话\n'+ref+'\n合成原件'), selected_refs:[ref], records:[{
+    ...context().records[0],ref,kind:'attachment',role:null,evidence:'Attachment/Content',
+    source_refs:[parent],object_sha256:hash,
+  }]};
+}
+test('附件预览校验独立证据、父消息和原件摘要，不能伪装为消息', () => {
+  const good=attachmentContext();
+  assert.equal(validatePortableContext(good,'personal',good.selected_refs),good);
+  for(const fields of [{role:'user'},{evidence:'UserExplicit'},{kind:'event'},
+    {source_refs:['event:foreign']},{object_sha256:'c'.repeat(64)},{source_refs:undefined}]) {
+    const bad={...good,records:[{...good.records[0],...fields}]};
+    assert.throws(()=>validatePortableContext(bad,'personal',good.selected_refs),/不一致/);
+  }
+});
+test('附件复制前原件变化或撤回均不写剪贴板，稳定原件只复制明确预览', async () => {
+  const before=attachmentContext(), writes:string[]=[];
+  const changed={...before,text:before.text+'新内容'};
+  assert.equal((await revalidateAndCopy(before,async()=>changed,async text=>{writes.push(text);},()=>true))?.copied,false);
+  await assert.rejects(()=>revalidateAndCopy(before,async()=>{throw new Error('附件原件无法核验');},async text=>{writes.push(text);},()=>true),/无法核验/);
+  assert.deepEqual(writes,[]);
+  assert.equal((await revalidateAndCopy(before,async()=>before,async text=>{writes.push(text);},()=>true))?.copied,true);
+  assert.deepEqual(writes,[before.text]);
+});
+test('真实附件复制预览优先附件标签，不把上传者角色当正文作者', async () => {
+  const bundle=await build({stdin:{contents:`import {createElement} from 'react'; import {renderToStaticMarkup} from 'react-dom/server'; import {PortablePreview} from './src/components/PortableContext.tsx'; export const render=preview=>renderToStaticMarkup(createElement(PortablePreview,{preview}));`,resolveDir:new URL('..',import.meta.url).pathname,loader:'tsx'},bundle:true,platform:'node',format:'esm',write:false,loader:{'.css':'empty'},define:{'process.env.NODE_ENV':'"production"'},banner:{js:`import {createRequire} from 'node:module'; const require=createRequire(${JSON.stringify(import.meta.url)});`}});
+  const {render}=await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
+  const item=attachmentContext(); item.records[0].role='user';
+  const html=render(item);
+  assert.match(html,/附件正文，非用户原话/); assert.doesNotMatch(html,/>用户原话</);
 });

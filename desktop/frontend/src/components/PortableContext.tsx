@@ -66,17 +66,17 @@ export function PortableContextDialog({ service, initialResults, initialGoal, cl
       {!search.loading && page && !fresh && <p role="status">问题已改变，下面仍是旧问题的结果。请重新查找，旧选择暂不能预览或复制。</p>}
       {search.error && <ErrorNotice error={search.error} retry={find} />}
       {fresh && page && <RecallCoverage page={page} />}
-      {fresh && page?.results.some(row => row.kind === "attachment") && <p>附件正文可通过只读检索入口继续读取；当前复制包暂不包含附件，请单独核对原件。</p>}
+      {fresh && page?.results.some(row => row.kind === "attachment") && <p>已支持的 UTF-8 附件正文可单独选择，按文件内容标注，不代表上传者的原话或已确认事实；不会附带原始文件。</p>}
       {fresh && !choices.length && <p role="status">这次没有找到匹配来源，不代表从未聊过。试试人名、项目名或记得的几个关键词；不会沿用上次的资料。</p>}
       {!!choices.length && <fieldset disabled={busy || !fresh}><legend>相关来源 · 已选 {refs.length} / 8 条 · 共 {choices.length} 条候选</legend>
         {choices.map(choice => <label className="portable-choice" key={choice.ref}>
           <input type="checkbox" checked={refs.includes(choice.ref)} disabled={!refs.includes(choice.ref) && refs.length >= 8}
             onChange={e => { setRefs(e.target.checked ? [...refs, choice.ref] : refs.filter(ref => ref !== choice.ref)); invalidate(); }} />
-          <span><Badge>{choice.role === "user" ? "用户原话" : choice.role === "assistant" ? "AI 回答，非用户事实" : choice.kind === "memory" ? "记忆 · " + evidenceLabel(choice.evidence) : "原始来源"}</Badge> {choice.label}
+          <span><Badge>{choice.kind === "attachment" ? "附件正文，非用户原话" : choice.role === "user" ? "用户原话" : choice.role === "assistant" ? "AI 回答，非用户事实" : choice.kind === "memory" ? "记忆 · " + evidenceLabel(choice.evidence) : "原始来源"}</Badge> {choice.label}
             <span className="portable-excerpt">{choice.snippet}</span>{choice.support_note && <small className="context-note">{choice.support_note}</small>}<small>{choice.ref}</small></span>
         </label>)}
       </fieldset>}
-      <p className="context-note">默认选择前 8 条候选，可以取消后换选其他来源。不会复制：未勾选的 {Math.max(0, choices.length - refs.length)} 条结果、其他历史消息、附件原件及附件正文。稳定背景会一并带入，完整内容见下方预览；片段不代表完整会话或同一分支。</p>
+      <p className="context-note">默认选择前 8 条候选，可以取消后换选其他来源。不会复制：未勾选的 {Math.max(0, choices.length - refs.length)} 条结果、其他历史消息、未勾选的附件正文及附件原始文件。复制后的文字由系统剪贴板承载，可能受系统同步和剪贴板历史设置影响。稳定背景会一并带入，完整内容见下方预览；片段不代表完整会话或同一分支。</p>
       {error && <ErrorNotice error={error} />}
       {preview && <PortablePreview preview={preview} />}
       {status && <p role="status">{status}</p>}
@@ -91,7 +91,7 @@ export function PortablePreview({ preview }: { preview: PortableContext }) {
   return <section aria-label="上下文复制预览">
     <h3>{preview.included_count} 条来源 · {utf8Bytes(preview.text).toLocaleString()} 字节 UTF-8</h3>
     <ul>{preview.records.map(record => <li key={record.ref}>
-      <Badge>{record.role === "user" ? "用户原话" : record.role === "assistant" ? "AI 回答，非用户事实" : evidenceLabel(record.evidence)}</Badge>{" "}
+      <Badge>{record.kind === "attachment" ? "附件正文，非用户原话" : record.role === "user" ? "用户原话" : record.role === "assistant" ? "AI 回答，非用户事实" : evidenceLabel(record.evidence)}</Badge>{" "}
       {record.conversation_title || record.text.slice(0, 60) || record.ref}{record.truncated && " · 正文仅节选"}{!record.content_retained && " · 未保留正文"}
     </li>)}</ul>
     {preview.pending_refs.length > 0 && <p>预算内未复制的引用：{preview.pending_refs.join("、")}</p>}

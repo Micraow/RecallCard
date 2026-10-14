@@ -452,3 +452,283 @@ fn prepare_repeat_cancel_and_invalid_selection_do_not_write_canonical_files() {
     f.ui.close_vault();
     assert!(prepare(&f, &refs, "", 32768).is_err());
 }
+
+fn attachment_input(conversation: &str, message: &str, bytes: &[u8], mime: &str) -> Value {
+    let mut value = input(conversation, message, "合成父消息正文不应随附件复制");
+    value["metadata"]["source_assets"] = json!({"files":[{
+        "name":"synthetic-copy.txt", "payload_status":"retained",
+        "declared_media_type":mime,"detected_media_type":"application/octet-stream",
+        "object_sha256":recallcard::hash(bytes),"byte_count":bytes.len()
+    }]});
+    value
+}
+fn capture_attachment(f: &Fixture, value: Value, bytes: &[u8]) -> (Event, String) {
+    let hash = recallcard::hash(bytes);
+    fs::write(f.vault.root().join("objects").join(&hash), bytes).unwrap();
+    let event = capture(f, value);
+    let reference = format!("attachment:{}/{hash}", event.id);
+    (event, reference)
+}
+
+#[test]
+fn attachment_search_to_mixed_handoff_preserves_body_and_independent_provenance() {
+    for role in ["user", "assistant"] {
+        let f = setup();
+        let content = "\u{feff}COPY_ATTACHMENT_823\r\n合成独立文件🙂\n";
+        let mut value = attachment_input("附件来源", role, content.as_bytes(), "text/plain");
+        value["role"] = json!(role);
+        value["origin"] = json!(if role == "user" {
+            "user_input"
+        } else {
+            "assistant_output"
+        });
+        value["occurred_at"] = json!("2024-04-05T06:07:08Z");
+        let (parent, reference) = capture_attachment(&f, value, content.as_bytes());
+        let normal = capture(&f, input("普通对话", "normal", "合成普通原话"));
+        let memory = add(&f, &normal, "合成记忆", json!({}));
+        let found =
+            f.ui.search(&f.info.session_id, "personal", "COPY_ATTACHMENT_823", "all")
+                .unwrap();
+        assert_eq!(found["results"][0]["ref"], reference);
+        let refs = [event_ref(&normal), reference.clone(), memory_ref(&memory)];
+        let result = prepare(&f, &refs, "继续", 32768).unwrap();
+        assert_eq!(result["selected_refs"], json!(refs));
+        assert_eq!(result["included_count"], 3);
+        let row = &result["records"][1];
+        assert_eq!(row["kind"], "attachment");
+        assert!(row["role"].is_null());
+        assert_eq!(row["text"], content);
+        assert_eq!(row["evidence"], "Attachment/Content");
+        assert_eq!(row["object_sha256"], recallcard::hash(content.as_bytes()));
+        assert_eq!(row["source_refs"], json!([event_ref(&parent)]));
+        assert_eq!(row["sources"][0]["role"], role);
+        assert_eq!(row["conversation_title"], "合成会话 附件来源");
+        assert!(row["time_note"]
+            .as_str()
+            .unwrap()
+            .contains("不是文件创建时间"));
+        assert_eq!(result["background"], bootstrap(&f));
+        let text = result["text"].as_str().unwrap();
+        assert!(text.contains(content));
+        assert!(text.contains("附件内容，非用户原话"));
+        assert!(text.contains("附件原件 SHA-256"));
+        assert!(!text.contains(&parent.data.text()));
+        assert_eq!(
+            f.vault.event(&parent.id).unwrap().data.text(),
+            parent.data.text()
+        );
+    }
+}
+
+#[test]
+fn attachment_handoff_revalidates_parent_scope_revision_suppression_and_session() {
+    for mode in [
+        "scope",
+        "revision",
+        "suppression",
+        "session",
+        "generated",
+        "foreign_object",
+    ] {
+        let mut f = setup();
+        let bytes = b"COPY_REVALIDATION_62";
+        let (event, reference) = capture_attachment(
+            &f,
+            attachment_input("权限", "same", bytes, "text/plain"),
+            bytes,
+        );
+        prepare(&f, std::slice::from_ref(&reference), "", 32768).unwrap();
+        match mode {
+            "scope" => {
+                assert!(f
+                    .ui
+                    .prepare_selected_context(
+                        &f.info.session_id,
+                        "project:other",
+                        &[reference],
+                        "",
+                        32768
+                    )
+                    .is_err());
+                continue;
+            }
+            "revision" => {
+                let mut revised = event.data.clone();
+                revised.content = "合成更新已移除附件".into();
+                revised.metadata = json!({});
+                revised.revision_of = Some(event.id.clone());
+                f.vault.capture(revised).unwrap();
+            }
+            "suppression" => {
+                f.vault.suppress(&event.id, "合成撤回".into()).unwrap();
+            }
+            "session" => f.ui.close_vault(),
+            "generated" => {
+                let mut revised = event.data.clone();
+                revised.content = "recallcard.context/1 合成生成上下文".into();
+                revised.revision_of = Some(event.id.clone());
+                let generated = f.vault.capture(revised).unwrap();
+                let generated_ref =
+                    format!("attachment:{}/{}", generated.id, recallcard::hash(bytes));
+                assert!(prepare(&f, &[generated_ref], "", 32768).is_err());
+            }
+            "foreign_object" => {
+                let foreign = b"COPY_FOREIGN_OBJECT_21";
+                fs::write(
+                    f.vault
+                        .root()
+                        .join("objects")
+                        .join(recallcard::hash(foreign)),
+                    foreign,
+                )
+                .unwrap();
+                let forged = format!("attachment:{}/{}", event.id, recallcard::hash(foreign));
+                assert!(prepare(&f, &[forged], "", 32768).is_err());
+                continue;
+            }
+            _ => unreachable!(),
+        }
+        assert!(prepare(&f, &[reference], "", 32768).is_err(), "{mode}");
+    }
+}
+
+#[test]
+fn attachment_handoff_rejects_bad_originals_and_preserves_duplicate_association_rules() {
+    for mode in [
+        "missing",
+        "tampered",
+        "invalid_utf8",
+        "pdf",
+        "unsupported",
+        "large",
+        "duplicate",
+    ] {
+        let f = setup();
+        let bytes = match mode {
+            "invalid_utf8" => b"COPY_BODY_51\xff".to_vec(),
+            "pdf" => b"%PDF-1.7 COPY_BODY_51".to_vec(),
+            "large" => vec![b'x'; 1024 * 1024 + 1],
+            _ => b"COPY_BODY_51".to_vec(),
+        };
+        let mut value = attachment_input(
+            "原件",
+            "one",
+            &bytes,
+            if mode == "unsupported" {
+                "application/octet-stream"
+            } else {
+                "text/plain"
+            },
+        );
+        if mode == "duplicate" {
+            let mut invalid = value["metadata"]["source_assets"]["files"][0].clone();
+            invalid["byte_count"] = json!(1);
+            value["metadata"]["source_assets"]["files"]
+                .as_array_mut()
+                .unwrap()
+                .insert(0, invalid);
+        }
+        let (_, reference) = capture_attachment(&f, value, &bytes);
+        let path = f
+            .vault
+            .root()
+            .join("objects")
+            .join(recallcard::hash(&bytes));
+        if matches!(mode, "missing" | "tampered") {
+            prepare(&f, std::slice::from_ref(&reference), "", 32768).unwrap();
+            if mode == "missing" {
+                fs::remove_file(&path).unwrap();
+            } else {
+                fs::write(&path, vec![b'z'; bytes.len()]).unwrap();
+            }
+        }
+        let result = prepare(&f, &[reference], "", 32768);
+        if mode == "duplicate" {
+            assert_eq!(result.unwrap()["records"][0]["text"], "COPY_BODY_51");
+        } else {
+            assert!(result.is_err(), "{mode}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn attachment_handoff_rejects_symlink_substitution_after_preview() {
+    let f = setup();
+    let bytes = b"COPY_LINK_84";
+    let (_, reference) = capture_attachment(
+        &f,
+        attachment_input("链接", "one", bytes, "text/plain"),
+        bytes,
+    );
+    prepare(&f, std::slice::from_ref(&reference), "", 32768).unwrap();
+    let path = f.vault.root().join("objects").join(recallcard::hash(bytes));
+    let external = f._dir.path().join("external");
+    fs::write(&external, bytes).unwrap();
+    fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(external, path).unwrap();
+    assert!(prepare(&f, &[reference], "", 32768).is_err());
+}
+
+#[test]
+fn eight_attachment_handoff_is_utf8_bounded_read_only_and_accounts_for_every_ref() {
+    let f = setup();
+    let mut originals = BTreeMap::new();
+    for index in 0..8 {
+        let text = format!("COPY_LARGE_{index}\n{}", "合成🙂\"引文\"\r\n".repeat(1500));
+        let (_, reference) = capture_attachment(
+            &f,
+            attachment_input("预算", &index.to_string(), text.as_bytes(), "text/plain"),
+            text.as_bytes(),
+        );
+        originals.insert(reference, text);
+    }
+    let refs = originals.keys().cloned().collect::<Vec<_>>();
+    let mut before = BTreeMap::new();
+    snapshot(f.vault.root(), f.vault.root(), &mut before);
+    for budget in [8000, 16000, 32768] {
+        let result = prepare(&f, &refs, "", budget).unwrap();
+        assert!(serde_json::to_vec(&result).unwrap().len() <= budget);
+        assert_eq!(result["partial"], true);
+        let mut accounted = Vec::new();
+        for row in result["records"].as_array().unwrap() {
+            let reference = row["ref"].as_str().unwrap();
+            assert!(originals[reference].starts_with(row["text"].as_str().unwrap()));
+            assert_eq!(row["truncated"], true);
+            assert!(row["role"].is_null());
+            accounted.push(reference.to_owned());
+        }
+        accounted.extend(
+            result["pending_refs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r.as_str().unwrap().to_owned()),
+        );
+        accounted.sort();
+        assert_eq!(accounted, refs);
+    }
+    assert!(prepare(&f, &[refs[0].clone(), refs[0].clone()], "", 32768).is_err());
+    let mut after = BTreeMap::new();
+    snapshot(f.vault.root(), f.vault.root(), &mut after);
+    assert_eq!(before, after);
+}
+
+#[test]
+fn attachment_without_conversation_title_never_falls_back_to_unselected_parent_body() {
+    let f = setup();
+    let bytes = b"COPY_UNTITLED_44";
+    let mut value = attachment_input("未命名", "one", bytes, "text/plain");
+    value["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("conversation_title");
+    let (event, reference) = capture_attachment(&f, value, bytes);
+    let result = prepare(&f, &[reference], "", 32768).unwrap();
+    assert_eq!(result["records"][0]["conversation_title"], "未命名会话");
+    assert_eq!(
+        result["records"][0]["sources"][0]["conversation_title"],
+        "未命名会话"
+    );
+    assert!(!result.to_string().contains(&event.data.text()));
+}

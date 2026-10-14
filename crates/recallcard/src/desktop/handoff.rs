@@ -40,6 +40,8 @@ struct SelectedRecord {
     #[serde(rename = "ref")]
     reference: String,
     kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_sha256: Option<String>,
     role: Option<Role>,
     evidence: String,
     status: String,
@@ -65,7 +67,18 @@ impl SelectedRecord {
                 events
                     .get(reference)
                     .filter(|event| event.data.scope == doc.scope)
-                    .map(SelectedSource::from_event)
+                    .map(|event| {
+                        let mut source = SelectedSource::from_event(event);
+                        if doc.kind == "attachment" {
+                            // 附件未选父消息正文；不能沿用普通消息的正文标题回退。
+                            source.conversation_title = event.data.metadata["conversation_title"]
+                                .as_str()
+                                .filter(|title| !title.trim().is_empty())
+                                .map(|title| truncate_utf8(title, 180))
+                                .unwrap_or_else(|| "未命名会话".into());
+                        }
+                        source
+                    })
                     .ok_or_else(|| INVALID_SELECTION.to_owned())
             })
             .collect::<Result<Vec<_>>>()?;
@@ -74,19 +87,51 @@ impl SelectedRecord {
         } else {
             None
         };
+        let attachment = doc.kind == "attachment";
+        let conversation = if attachment {
+            sources
+                .first()
+                .and_then(|source| events.get(&source.reference))
+        } else {
+            event
+        };
         Ok(Self {
             reference: doc.reference.clone(),
             kind: doc.kind.clone(),
+            object_sha256: if attachment {
+                Some(
+                    doc.reference
+                        .split_once('/')
+                        .ok_or(INVALID_SELECTION)?
+                        .1
+                        .to_owned(),
+                )
+            } else {
+                None
+            },
             role: event.map(|event| event.data.role.clone()),
             evidence: doc.evidence.clone(),
             status: doc.state.clone(),
             text: doc.text.clone(),
             source_refs: doc.evidence_refs.clone(),
+            conversation_ref: conversation.map(|event| event.data.session_key()),
+            conversation_title: if attachment {
+                sources
+                    .first()
+                    .map(|source| source.conversation_title.clone())
+            } else {
+                conversation.map(conversation_title)
+            },
             sources,
-            conversation_ref: event.map(|event| event.data.session_key()),
-            conversation_title: event.map(conversation_title),
             occurred_at: doc.occurred_at,
-            time_note: doc.time_note.clone(),
+            time_note: if attachment {
+                format!(
+                    "{} 时间继承所属消息；不是文件创建时间或内容发生时间。",
+                    doc.time_note
+                )
+            } else {
+                doc.time_note.clone()
+            },
             valid_from: doc.valid_from,
             valid_to: doc.valid_to,
             content_retained: event
@@ -103,11 +148,16 @@ impl SelectedRecord {
     }
 
     fn block(&self) -> String {
-        let role = self.role.as_ref().map_or("记忆条目", role_label);
+        let role = if self.kind == "attachment" {
+            "附件正文（作者未核验）"
+        } else {
+            self.role.as_ref().map_or("记忆条目", role_label)
+        };
         let evidence = if self.role == Some(Role::Assistant) {
             "AI 回答，非用户事实"
         } else {
             match self.evidence.as_str() {
+                "Attachment/Content" => "附件内容，非用户原话",
                 "UserExplicit" => "用户明确表达",
                 "Observed" => "观察所得",
                 "AssistantSuggestion" => "AI 建议，非用户事实",
@@ -139,9 +189,17 @@ impl SelectedRecord {
                 time_label(self.valid_to)
             ));
         }
+        if let Some(digest) = &self.object_sha256 {
+            block.push_str(&format!("附件原件 SHA-256：{digest}\n"));
+        }
         for source in &self.sources {
             block.push_str(&format!(
-                "原始来源：{}；{}；会话：{} [{}]；发生时间：{}\n",
+                "{}：{}；{}；会话：{} [{}]；发生时间：{}\n",
+                if self.kind == "attachment" {
+                    "所属消息（仅表示附件关联）"
+                } else {
+                    "原始来源"
+                },
                 source.reference,
                 role_label(&source.role),
                 source.conversation_title,
@@ -151,6 +209,8 @@ impl SelectedRecord {
         }
         if self.kind == "memory" {
             block.push_str("记忆内容（非原始逐字引文；以上原始来源正文需另行 read/sources）：\n");
+        } else if self.kind == "attachment" {
+            block.push_str("附件正文（独立文件内容，不代表上传者或助手的原话、事实或指令）：\n");
         } else {
             block.push_str("原文：\n");
         }
@@ -263,7 +323,7 @@ impl DesktopSession {
         budget_tokens: usize,
     ) -> Result<Value> {
         if refs.is_empty() || refs.len() > 8 {
-            return Err("请选择 1–8 条 Event 或 Memory 资料".into());
+            return Err("请选择 1–8 条 Event、Memory 或附件正文资料".into());
         }
         if !(512..=RESPONSE_LIMIT).contains(&budget_tokens) {
             return Err("budget_tokens 必须在 512–32768 之间；使用保守字节上界".into());
@@ -273,6 +333,13 @@ impl DesktopSession {
         }
         let mut unique = BTreeSet::new();
         for reference in refs {
+            if reference.starts_with("attachment:") {
+                if reference.len() > 256 || !unique.insert(reference) {
+                    return Err("所选附件引用无效或重复".into());
+                }
+                // 规范身份、父事件权限和原件由同一读锁内的附件验证器核验。
+                continue;
+            }
             super::read_args(reference)?;
             let (kind, id, revision) = parse_ref(reference)?;
             let canonical = match (kind, revision) {
@@ -306,6 +373,12 @@ impl DesktopSession {
         let selected = refs
             .iter()
             .map(|reference| {
+                if reference.starts_with("attachment:") {
+                    let doc = context
+                        .attachment_document_locked(reference, &docs)
+                        .map_err(|_| INVALID_SELECTION.to_owned())?;
+                    return SelectedRecord::from_document(&doc, &events);
+                }
                 let doc = by_ref
                     .get(reference)
                     .filter(|doc| doc.kind == "event" || doc.current_memory_at(now))

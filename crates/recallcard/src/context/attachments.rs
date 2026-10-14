@@ -91,6 +91,60 @@ fn files(event: &Event) -> impl Iterator<Item = &Value> {
         .into_iter()
         .flatten()
 }
+// 与分页、复制共用同一验证器；调用者必须先核验当前父事件的授权。
+fn verified_body(vault: &Vault, event: &Event, object: &str) -> Result<(Value, String)> {
+    // 多个附件声明可能共用同一原件；与搜索一样跳过不支持或损坏的声明。
+    // 不能让无效的第一条声明遮蔽后面的有效关联，也不能无限重复读取同一对象。
+    let mut examined_bytes = 0usize;
+    let mut selected = None;
+    for file in files(event)
+        .take(FILES)
+        .filter(|f| f["object_sha256"] == object)
+    {
+        let Some(size) = file["byte_count"]
+            .as_u64()
+            .filter(|size| *size <= FILE_BYTES as u64)
+        else {
+            continue;
+        };
+        if !supported(file) {
+            continue;
+        }
+        if examined_bytes + size as usize > TOTAL_BYTES {
+            break;
+        }
+        examined_bytes += size as usize;
+        if let Ok(text) = body(vault, file) {
+            selected = Some((file, text));
+            break;
+        }
+    }
+    selected
+        .map(|(file, text)| (file.clone(), text))
+        .ok_or_else(|| "附件关联或原件无法核验".into())
+}
+fn projection(parent: &Document, event: &Event, file: &Value, text: String) -> Document {
+    let mut doc = parent.clone();
+    doc.reference = format!(
+        "attachment:{}/{}",
+        event.id,
+        file["object_sha256"].as_str().unwrap_or("")
+    );
+    doc.kind = "attachment".into();
+    doc.text = text;
+    doc.evidence = "Attachment/Content".into();
+    doc.evidence_refs = vec![parent.reference.clone()];
+    doc.entities = [
+        "name",
+        "library_name",
+        "archive_name_alias",
+        "source_file_id",
+    ]
+    .iter()
+    .filter_map(|key| file[*key].as_str().map(str::to_owned))
+    .collect();
+    doc
+}
 fn ordinary(doc: &Document) -> bool {
     doc.kind == "event" && matches!(doc.role, Some(Role::User | Role::Assistant))
 }
@@ -144,27 +198,28 @@ impl Context<'_> {
                 if !seen.insert(object.to_owned()) {
                     continue;
                 }
-                let mut doc = (*parent).clone();
-                doc.reference = format!("attachment:{}/{object}", event.id);
-                doc.kind = "attachment".into();
-                doc.text = text;
-                doc.evidence = "Attachment/Content".into();
-                doc.evidence_refs = vec![parent.reference.clone()];
-                doc.entities = [
-                    "name",
-                    "library_name",
-                    "archive_name_alias",
-                    "source_file_id",
-                ]
-                .iter()
-                .filter_map(|key| file[*key].as_str().map(str::to_owned))
-                .collect();
-                docs.push(doc);
+                docs.push(projection(parent, &event, file, text));
             }
             Ok(())
         })?;
         let coverage = json!({"status":if limited || skipped > 0 {"partial"}else{"ready"},"projection":PROJECTION,"mode":"bounded_local_lexical_scan","semantic":false,"files_examined":examined,"documents":docs.len(),"skipped":skipped,"limited":limited,"bytes_examined":bytes,"file_bytes_limit":FILE_BYTES,"total_bytes_limit":TOTAL_BYTES,"file_limit":FILES});
         Ok((docs, coverage))
+    }
+    /// 调用者持有 vault 读锁，parents 必须来自该锁内的 documents_locked。
+    /// 只读取所选附件，不扫描其他对象；不获取嵌套读锁。
+    pub(crate) fn attachment_document_locked(
+        &self,
+        reference: &str,
+        parents: &[Document],
+    ) -> Result<Document> {
+        let (id, object) = parse(reference)?;
+        let parent = parents
+            .iter()
+            .find(|d| d.reference == format!("event:{id}") && ordinary(d))
+            .ok_or("附件来源不可访问、已修订或已抑制")?;
+        let event = self.vault.event(id)?;
+        let (file, text) = verified_body(self.vault, &event, object)?;
+        Ok(projection(parent, &event, &file, text))
     }
     pub(super) fn attachment_page(&self, args: &ReadPageArgs, sources: bool) -> Result<Value> {
         if args.refs.len() != 1
@@ -187,33 +242,7 @@ impl Context<'_> {
             .find(|d| d.reference == format!("event:{id}") && ordinary(d))
             .ok_or("附件来源不可访问、已修订或已抑制")?;
         let event = self.vault.event(id)?;
-        // 多个附件声明可能共用同一原件；与搜索一样跳过不支持或损坏的声明。
-        // 不能让无效的第一条声明遮蔽后面的有效关联，也不能无限重复读取同一对象。
-        let mut examined_bytes = 0usize;
-        let mut selected = None;
-        for file in files(&event)
-            .take(FILES)
-            .filter(|f| f["object_sha256"] == object)
-        {
-            let Some(size) = file["byte_count"]
-                .as_u64()
-                .filter(|size| *size <= FILE_BYTES as u64)
-            else {
-                continue;
-            };
-            if !supported(file) {
-                continue;
-            }
-            if examined_bytes + size as usize > TOTAL_BYTES {
-                break;
-            }
-            examined_bytes += size as usize;
-            if let Ok(text) = body(self.vault, file) {
-                selected = Some((file, text));
-                break;
-            }
-        }
-        let (file, text) = selected.ok_or("附件关联或原件无法核验")?;
+        let (file, text) = verified_body(self.vault, &event, object)?;
         let snapshot = hash(
             &serde_json::to_vec(&json!([PROJECTION, event, object])).map_err(|_| "附件快照无效")?,
         );

@@ -3,6 +3,7 @@ import type { SearchPage } from "./types";
 export interface PortableRecord {
   ref: string; kind: string; role: string | null; evidence: string; text: string;
   conversation_title: string | null; truncated: boolean; content_retained: boolean;
+  source_refs?: string[]; object_sha256?: string;
 }
 export interface PortableContext {
   text: string; scope: string; selected_refs: string[]; selected_count: number;
@@ -15,12 +16,21 @@ export interface ReplyPreview {
 }
 export const utf8Bytes = (text: string) => new TextEncoder().encode(text).length;
 
+// 附件自身没有可核验说话者；引用、父消息和原件摘要必须相互一致。
+function validPortableAttachment(record: PortableRecord) {
+  if (record.kind !== "attachment") return !record.ref.startsWith("attachment:");
+  const match = /^attachment:(evt_[a-f0-9]{64})\/([a-f0-9]{64})$/.exec(record.ref);
+  return !!match && record.role === null && record.evidence === "Attachment/Content"
+    && record.object_sha256 === match[2]
+    && JSON.stringify(record.source_refs) === JSON.stringify([`event:${match[1]}`]);
+}
+
 export function validatePortableContext(value: PortableContext, scope: string, refs: string[]) {
   if (!value || typeof value.text !== "string" || !value.text || value.scope !== scope
     || !Array.isArray(value.records) || !Array.isArray(value.pending_refs)
     || JSON.stringify(value.selected_refs) !== JSON.stringify(refs)
     || value.selected_count !== refs.length || value.included_count !== value.records.length
-    || value.records.some(record => !refs.includes(record.ref))
+    || value.records.some(record => !refs.includes(record.ref) || !validPortableAttachment(record))
     || value.pending_refs.some(ref => !refs.includes(ref)))
     throw new Error("上下文预览与当前选择不一致，请重新准备。");
   return value;
@@ -46,14 +56,13 @@ export async function revalidateAndCopy(
 export function recallChoices(page: SearchPage | null | undefined) {
   const seen = new Set<string>();
   return (page?.results || []).filter(row => {
-    // 现有复制包仅支持 Event/Memory；附件不伪装成父消息或用户原话。
-    if (row.kind === "attachment" || seen.has(row.ref)) return false;
+    if (!["event", "memory", "attachment"].includes(row.kind) || seen.has(row.ref)) return false;
     seen.add(row.ref); return true;
   }).map(row => ({
     ref: row.ref,
     label: row.conversation_title || Array.from(row.text || row.content || row.snippet || row.ref).slice(0, 72).join(""),
     snippet: Array.from(row.text || row.content || row.snippet || "").slice(0, 240).join(""),
-    role: row.role, evidence: row.evidence || "", kind: row.kind,
+    role: row.kind === "attachment" ? null : row.role, evidence: row.evidence || "", kind: row.kind,
     support_note: recallSupportNote(row),
   }));
 }
