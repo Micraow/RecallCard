@@ -1,186 +1,452 @@
-//! 可选 Python 语义检索。配置只来自可信启动者；请求不能选择进程、文件或联网权限。
+//! 可选语义索引：本机 ONNX 编码或显式批准的云端编码。
+//!
+//! 索引是派生物，随时可由正本重建；正本文件本身永不外发，外发只发生在批准的云编码
+//! 请求体内，且逐批计量。索引与正本通过 generation 与逐文档 content_hash 绑定，
+//! 正本变化后旧索引立即失效，不会用过期向量冒充当前事实。
 use crate::{
     context::Document,
-    model::{hash, validate_scope, Result},
+    model::{hash, Result},
+    policy::Access,
+    Vault,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::File,
-    io::Read,
+    fs::{self, File},
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::Stdio,
-    sync::{mpsc, Mutex},
+    sync::Mutex,
     time::Duration,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    process::{Child, ChildStdin, ChildStdout, Command},
-};
 
-const MAX_CACHE_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
-const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-const MAX_DOCUMENTS: usize = 10_000;
-const MAX_VECTOR_VALUES: usize = 500_000;
+pub const INDEX_SCHEMA: &str = "recallcard.semantic-index/2";
+pub const CORPUS_SCHEMA: &str = "recallcard.semantic-corpus/2";
+
+/// 本机默认编码模型；512 维、CLS 池化、L2 归一化，与 model-lock.json 一致。
+pub const LOCAL_MODEL: &str = "Qdrant/bge-small-zh-v1.5";
+pub const LOCAL_DIMENSIONS: usize = 512;
+/// bge-zh 检索查询前缀；只加在查询侧，不加在文档侧。
+pub const QUERY_INSTRUCTION: &str = "为这个句子生成表示以用于检索相关文章：";
+
+const MAX_INDEX_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_DOCUMENTS: usize = 200_000;
 const MAX_RESULTS: usize = 100;
-
-fn default_timeout() -> u64 {
-    5000
-}
-fn default_key_env() -> String {
-    "RECALLCARD_EMBEDDING_API_KEY".into()
-}
-fn default_calls() -> usize {
-    20
-}
-fn default_bytes() -> usize {
-    65_536
-}
-
-/// 只能由用户/可信宿主在启动时提供；不接受 search/MCP/native 请求中的此配置。
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticConfig {
-    pub python: PathBuf,
-    pub python_path: PathBuf,
-    pub index_path: PathBuf,
-    pub expected_space_signature: String,
-    #[serde(default)]
-    pub query_cache_path: Option<PathBuf>,
-    #[serde(default)]
-    pub cloud_query: Option<CloudQueryApproval>,
-    #[serde(default = "default_timeout")]
-    pub timeout_ms: u64,
-}
-
-/// 此对象表示已经获得的独立 query 外发批准；从来不批准语料外发或自动建索引。
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CloudQueryApproval {
-    pub endpoint: String,
-    pub scopes: Vec<String>,
-    #[serde(default = "default_key_env")]
-    pub key_env: String,
-    #[serde(default = "default_calls")]
-    pub max_network_calls: usize,
-    #[serde(default = "default_bytes")]
-    pub max_transmitted_bytes: usize,
-}
+const MAX_TEXT_BYTES: usize = 8 * 1024;
+const LOCAL_BATCH: usize = 64;
+const CLOUD_BATCH: usize = 16;
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_TRANSMIT_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_KEY_ENV: &str = "RECALLCARD_EMBEDDING_API_KEY";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SemanticError(pub &'static str);
 type SResult<T> = std::result::Result<T, SemanticError>;
+
 fn failure<T>(code: &'static str) -> SResult<T> {
     Err(SemanticError(code))
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+/// model::Result 以字符串承载错误；统一把 IO/JSON 错误映射为用户可读文本。
+fn io(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+/// 编码来源。本机模型不需要批准；云端必须由本机维护者显式配置端点与凭据环境变量。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Provider {
+    /// 进程内 ONNX 推理，模型固定；首次使用需要联网下载模型文件，之后走本地缓存。
+    Local,
+    /// OpenAI 兼容 /v1/embeddings；只接受 https 端点，凭据只从环境变量读取。
+    Cloud {
+        endpoint: String,
+        model: String,
+        dimensions: usize,
+        #[serde(default = "default_key_env")]
+        key_env: String,
+        #[serde(default = "default_timeout")]
+        timeout_ms: u64,
+        #[serde(default = "default_transmit_bytes")]
+        max_transmitted_bytes: usize,
+    },
+}
+
+fn default_key_env() -> String {
+    DEFAULT_KEY_ENV.into()
+}
+fn default_timeout() -> u64 {
+    DEFAULT_TIMEOUT_MS
+}
+fn default_transmit_bytes() -> usize {
+    DEFAULT_TRANSMIT_BYTES
+}
+
+/// 只能由用户或可信宿主在启动时提供；检索与 MCP 请求不能选择编码来源或联网权限。
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Space {
+pub struct SemanticConfig {
+    pub provider: Provider,
+    #[serde(default = "default_index_path")]
+    pub index_path: PathBuf,
+}
+
+fn default_index_path() -> PathBuf {
+    PathBuf::from(".index/semantic")
+}
+
+/// 编码空间身份。任何一项变化都使旧索引整体失效，不同模型的向量不可混算。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Space {
     provider: String,
-    endpoint: String,
     model: String,
     dimensions: usize,
-    revision: String,
-    document_instruction: String,
     query_instruction: String,
+    document_instruction: String,
     normalization: String,
     preprocessing_version: String,
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct IndexDocument {
-    #[serde(rename = "ref")]
-    reference: String,
-    content_hash: String,
-    input_hash: String,
-    scope: String,
-    vector: Vec<f64>,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Index {
-    schema: String,
-    space: Space,
-    space_signature: String,
-    generation: String,
-    scope: Vec<String>,
-    documents: Vec<IndexDocument>,
-    #[serde(default = "complete")]
-    complete: bool,
-}
-fn complete() -> bool {
-    true
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QueryCache {
-    schema: String,
-    space_signature: String,
-    queries: Vec<CachedQuery>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CachedQuery {
-    query_hash: String,
-    input_hash: String,
-    vector: Vec<f64>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Row {
-    #[serde(rename = "ref")]
-    reference: String,
-    score: f64,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SearchResult {
-    results: Vec<Row>,
-    ranking: String,
-    space_signature: String,
-    generation: String,
-    #[serde(default)]
-    query_cache_hit: Option<bool>,
-    #[serde(default)]
-    diagnostics: Option<Value>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorkerError {
-    code: String,
-    message: String,
+
+fn space_signature(space: &Space) -> Result<String> {
+    Ok(hash(&serde_json::to_vec(space).map_err(io)?))
 }
 
-fn digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-fn bounded_string(value: &str, limit: usize, empty: bool) -> bool {
-    value.len() <= limit && !value.contains('\0') && (empty || !value.trim().is_empty())
-}
-fn valid_scopes(scopes: &[String]) -> bool {
-    scopes.len() <= 256
-        && scopes.iter().all(|scope| validate_scope(scope).is_ok())
-        && scopes.iter().collect::<BTreeSet<_>>().len() == scopes.len()
-}
-fn validate_vector(vector: &[f64], dimensions: usize, normalized: bool) -> SResult<()> {
-    let norm = vector.iter().copied().fold(0.0_f64, f64::hypot);
-    if vector.len() != dimensions
-        || !vector.iter().all(|v| v.is_finite())
-        || !norm.is_finite()
-        || norm == 0.0
-        || (normalized && (norm - 1.0).abs() > 1e-6)
-    {
-        return failure("invalid_cache");
+impl Provider {
+    fn space(&self) -> Space {
+        match self {
+            Provider::Local => Space {
+                provider: "local-onnx".into(),
+                model: LOCAL_MODEL.into(),
+                dimensions: LOCAL_DIMENSIONS,
+                query_instruction: QUERY_INSTRUCTION.into(),
+                document_instruction: String::new(),
+                normalization: "l2".into(),
+                preprocessing_version: "1".into(),
+            },
+            Provider::Cloud {
+                model, dimensions, ..
+            } => Space {
+                provider: "cloud-openai-compatible".into(),
+                model: model.clone(),
+                dimensions: *dimensions,
+                query_instruction: String::new(),
+                document_instruction: String::new(),
+                normalization: "l2".into(),
+                preprocessing_version: "1".into(),
+            },
+        }
     }
-    Ok(())
+
+    fn validate(&self) -> Result<()> {
+        match self {
+            Provider::Local => Ok(()),
+            Provider::Cloud {
+                endpoint,
+                model,
+                dimensions,
+                key_env,
+                timeout_ms,
+                max_transmitted_bytes,
+            } => {
+                if !endpoint.starts_with("https://") || endpoint.len() > 2048 {
+                    return Err("云端点必须是 https 绝对地址".into());
+                }
+                if endpoint.contains('@') || endpoint.contains("localhost") {
+                    return Err("云端点不能内嵌凭据或指向本机".into());
+                }
+                if model.trim().is_empty() || model.len() > 256 {
+                    return Err("模型标识为空或过长".into());
+                }
+                if !(1..=16384).contains(dimensions) {
+                    return Err("维度必须在 1–16384 之间".into());
+                }
+                if !key_env
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    || key_env.is_empty()
+                    || key_env.len() > 128
+                {
+                    return Err("凭据环境变量名不合法".into());
+                }
+                if *timeout_ms < 100 || *timeout_ms > 300_000 {
+                    return Err("超时必须在 100–300000 毫秒之间".into());
+                }
+                if *max_transmitted_bytes < 1024 || *max_transmitted_bytes > 64 * 1024 * 1024 {
+                    return Err("外发预算必须在 1 KiB–64 MiB 之间".into());
+                }
+                Ok(())
+            }
+        }
+    }
 }
+
+/// 编码器：本机 ONNX 或批准的云端点。两者产出同一形状（L2 归一化定长向量）。
+pub(crate) trait Encoder: Send {
+    fn space(&self) -> Space;
+    fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>>;
+    fn transmitted_bytes(&self) -> u64;
+}
+
+struct LocalEncoder {
+    space: Space,
+    model: Mutex<fastembed::TextEmbedding>,
+}
+
+impl Encoder for LocalEncoder {
+    fn space(&self) -> Space {
+        self.space.clone()
+    }
+    fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.embed(texts, "")
+    }
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        Ok(self
+            .embed(&[text.to_string()], QUERY_INSTRUCTION)?
+            .remove(0))
+    }
+    fn transmitted_bytes(&self) -> u64 {
+        0
+    }
+}
+
+impl LocalEncoder {
+    fn open(provider: &Provider) -> Result<Self> {
+        let Provider::Local = provider else {
+            return Err("本机编码器配置类型不符".into());
+        };
+        // 缓存目录沿用 fastembed 约定（FASTEMBED_CACHE_DIR / HF_HOME），不另设配置项。
+        let model = fastembed::TextEmbedding::try_new(fastembed::TextInitOptions::new(
+            fastembed::EmbeddingModel::BGESmallZHV15,
+        ))
+        .map_err(|_| "本机编码模型不可用；首次使用需要联网下载模型文件".to_string())?;
+        Ok(Self {
+            space: provider.space(),
+            model: Mutex::new(model),
+        })
+    }
+
+    fn embed(&self, texts: &[String], instruction: &str) -> Result<Vec<Vec<f32>>> {
+        let prepared: Vec<String> = texts
+            .iter()
+            .map(|text| {
+                if instruction.is_empty() {
+                    text.clone()
+                } else {
+                    format!("{instruction}{text}")
+                }
+            })
+            .collect();
+        let mut model = self
+            .model
+            .lock()
+            .map_err(|_| "本机编码器忙或已损坏，请重启进程".to_string())?;
+        let mut vectors = Vec::with_capacity(prepared.len());
+        for chunk in prepared.chunks(LOCAL_BATCH) {
+            let batch = model
+                .embed(chunk.iter().map(String::as_str).collect::<Vec<_>>(), None)
+                .map_err(|_| "本机编码失败".to_string())?;
+            for vector in batch {
+                vectors.push(normalize(vector));
+            }
+        }
+        if vectors.len() != texts.len() {
+            return Err("本机编码输出数量与输入不符".into());
+        }
+        Ok(vectors)
+    }
+}
+
+fn normalize(vector: Vec<f32>) -> Vec<f32> {
+    let norm = vector
+        .iter()
+        .map(|v| (*v as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    if norm == 0.0 || !norm.is_finite() {
+        return vector;
+    }
+    vector.iter().map(|v| (*v as f64 / norm) as f32).collect()
+}
+
+struct CloudEncoder {
+    space: Space,
+    endpoint: String,
+    model: String,
+    dimensions: usize,
+    api_key: String,
+    timeout: Duration,
+    budget: usize,
+    transmitted: Mutex<u64>,
+}
+
+impl CloudEncoder {
+    fn open(provider: &Provider) -> Result<Self> {
+        let Provider::Cloud {
+            endpoint,
+            model,
+            dimensions,
+            key_env,
+            timeout_ms,
+            max_transmitted_bytes,
+        } = provider
+        else {
+            return Err("云端编码器配置类型不符".into());
+        };
+        let api_key = std::env::var(key_env).map_err(|_| {
+            format!("云端编码需要凭据环境变量 {key_env}；不会从命令行或配置文件读取密钥")
+        })?;
+        if api_key.trim().is_empty() {
+            return Err(format!("凭据环境变量 {key_env} 为空"));
+        }
+        Ok(Self {
+            space: provider.space(),
+            endpoint: endpoint.clone(),
+            model: model.clone(),
+            dimensions: *dimensions,
+            api_key,
+            timeout: Duration::from_millis(*timeout_ms),
+            budget: *max_transmitted_bytes,
+            transmitted: Mutex::new(0),
+        })
+    }
+
+    fn request(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let body = json!({
+            "model": self.model,
+            "input": texts,
+            "dimensions": self.dimensions,
+            "encoding_format": "float",
+        });
+        let payload = serde_json::to_vec(&body).map_err(io)?;
+        let mut sent = self
+            .transmitted
+            .lock()
+            .map_err(|_| "计量锁已损坏".to_string())?;
+        if *sent + payload.len() as u64 > self.budget as u64 {
+            return Err("云端外发预算已用尽；提高预算或改用本机模型".into());
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(self.timeout)
+            .build()
+            .map_err(|_| "无法创建云端编码客户端".to_string())?;
+        let response = client
+            .post(&self.endpoint)
+            .bearer_auth(&self.api_key)
+            .header("content-type", "application/json")
+            .body(payload.clone())
+            .send()
+            .map_err(|_| "云端编码请求失败；不会自动更换供应商".to_string())?;
+        *sent += payload.len() as u64;
+        let status = response.status();
+        let text = response
+            .text()
+            .map_err(|_| "云端编码响应无法读取".to_string())?;
+        if !status.is_success() {
+            // 不回显响应正文：供应商错误页可能包含密钥回显或内部路径。
+            return Err(format!("云端编码返回状态 {status}"));
+        }
+        let parsed: Value =
+            serde_json::from_str(&text).map_err(|_| "云端编码响应不是有效 JSON".to_string())?;
+        let rows = parsed["data"]
+            .as_array()
+            .ok_or("云端编码响应缺少 data 数组".to_string())?;
+        if rows.len() != texts.len() {
+            return Err("云端编码输出数量与输入不符".into());
+        }
+        let mut sorted: Vec<(usize, Vec<f32>)> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let index = row["index"].as_u64().ok_or("缺少向量序号".to_string())? as usize;
+            let values = row["embedding"]
+                .as_array()
+                .ok_or("缺少向量数值".to_string())?;
+            if values.len() != self.dimensions {
+                return Err("云端返回维度与配置不符".into());
+            }
+            let vector: Vec<f32> = values
+                .iter()
+                .map(|v| v.as_f64().ok_or_else(|| "向量含非数值".to_string()))
+                .collect::<Result<Vec<f64>>>()?
+                .into_iter()
+                .map(|v| v as f32)
+                .collect();
+            sorted.push((index, normalize(vector)));
+        }
+        sorted.sort_by_key(|(index, _)| *index);
+        if sorted.windows(2).any(|w| w[0].0 == w[1].0)
+            || sorted.first().map(|(i, _)| *i) != Some(0)
+            || sorted.last().map(|(i, _)| *i) != Some(texts.len() - 1)
+        {
+            return Err("云端返回序号不连续或重复".into());
+        }
+        Ok(sorted.into_iter().map(|(_, v)| v).collect())
+    }
+}
+
+impl Encoder for CloudEncoder {
+    fn space(&self) -> Space {
+        self.space.clone()
+    }
+    fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut vectors = Vec::with_capacity(texts.len());
+        for chunk in texts.chunks(CLOUD_BATCH) {
+            vectors.extend(self.request(chunk)?);
+        }
+        Ok(vectors)
+    }
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        Ok(self.request(&[text.to_string()])?.remove(0))
+    }
+    fn transmitted_bytes(&self) -> u64 {
+        self.transmitted.lock().map(|v| *v).unwrap_or(u64::MAX)
+    }
+}
+
+fn open_encoder(provider: &Provider) -> Result<Box<dyn Encoder>> {
+    provider.validate()?;
+    match provider {
+        Provider::Local => Ok(Box::new(LocalEncoder::open(provider)?)),
+        Provider::Cloud { .. } => Ok(Box::new(CloudEncoder::open(provider)?)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 语料：正本投影。Event 与 Memory 都进入索引，未整理的原始对话同样可被语义召回。
+// ---------------------------------------------------------------------------
+
+fn corpus_text(document: &Document) -> String {
+    // 长正文只取前 MAX_TEXT_BYTES，避免单条吃掉整批预算；截断在 UTF-8 边界。
+    crate::context::truncate_utf8(&document.text, MAX_TEXT_BYTES).to_string()
+}
+
+pub(crate) fn corpus_documents(
+    documents: &[Document],
+    scopes: &[String],
+    time: DateTime<Utc>,
+    instruction: &str,
+) -> Vec<Value> {
+    documents
+        .iter()
+        .filter(|document| {
+            scopes.contains(&document.scope)
+                && (document.kind == "event" || document.current_memory_at(time))
+        })
+        .map(|document| {
+            let text = corpus_text(document);
+            json!({
+                "ref": document.reference,
+                "kind": document.kind,
+                "scope": document.scope,
+                "content_hash": hash(document.text.as_bytes()),
+                "input_hash": prepared_hash(instruction, &text),
+                "text": text,
+            })
+        })
+        .collect()
+}
+
 fn prepared_hash(instruction: &str, text: &str) -> String {
     if instruction.is_empty() {
         hash(text.as_bytes())
@@ -189,103 +455,160 @@ fn prepared_hash(instruction: &str, text: &str) -> String {
     }
 }
 
-/// 拒绝设备/FIFO/目录和直接符号链接，限制解析前读取量；本机父目录仍须由宿主管理。
-fn read_local<T: serde::de::DeserializeOwned>(path: &Path) -> SResult<T> {
-    let metadata =
-        std::fs::symlink_metadata(path).map_err(|_| SemanticError("cache_unavailable"))?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_CACHE_BYTES {
-        return failure("invalid_cache");
-    }
-    let file = File::open(path).map_err(|_| SemanticError("cache_unavailable"))?;
-    if !file
-        .metadata()
-        .map_err(|_| SemanticError("cache_unavailable"))?
-        .is_file()
-    {
-        return failure("invalid_cache");
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_CACHE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| SemanticError("cache_unavailable"))?;
-    if bytes.len() as u64 > MAX_CACHE_BYTES {
-        return failure("invalid_cache");
-    }
-    // 直接反序列化严格结构；不能先转 Value 而吞掉重复字段。
-    serde_json::from_slice(&bytes).map_err(|_| SemanticError("invalid_cache"))
-}
-
-pub(crate) fn corpus_documents(
-    documents: &[Document],
-    scopes: &[String],
-    time: DateTime<Utc>,
-) -> Vec<Value> {
-    documents.iter().filter(|document| scopes.contains(&document.scope) && document.current_memory_at(time))
-        .map(|document| json!({"ref":document.reference,"content_hash":hash(document.text.as_bytes()),"text":document.text,"scope":document.scope}))
-        .collect()
-}
 fn corpus_generation(documents: &[Value]) -> String {
-    hash(&serde_json::to_vec(documents).expect("语料只包含可序列化 JSON"))
+    let identity: Vec<(&Value, &Value)> = documents
+        .iter()
+        .map(|d| (&d["ref"], &d["input_hash"]))
+        .collect();
+    hash(&serde_json::to_vec(&identity).expect("语料只包含可序列化 JSON"))
 }
 
-impl Index {
-    fn validate(&self, expected: &str) -> SResult<()> {
-        let space = &self.space;
-        if self.schema != "recallcard.embedding-index/1" || !self.complete {
-            return failure(if self.complete {
-                "invalid_cache"
+// ---------------------------------------------------------------------------
+// 索引文件：元数据 JSON + 向量二进制。两者都在 .index/ 下，可整体删除后重建。
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IndexMeta {
+    schema: String,
+    space: Space,
+    space_signature: String,
+    generation: String,
+    scope: Vec<String>,
+    dimensions: usize,
+    #[serde(default)]
+    complete: bool,
+    documents: Vec<IndexDocument>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IndexDocument {
+    #[serde(rename = "ref")]
+    reference: String,
+    content_hash: String,
+    input_hash: String,
+    scope: String,
+    kind: String,
+}
+
+/// 只读索引句柄。open() 完成全部校验；编码器在首次查询时才构造，
+/// 未配置语义检索的进程不会加载模型，也不会联网。
+pub struct SemanticIndex {
+    config: SemanticConfig,
+    meta: IndexMeta,
+    vectors: Vec<Vec<f32>>,
+    encoder: Mutex<Option<Box<dyn Encoder>>>,
+}
+
+impl SemanticIndex {
+    /// 从配置打开索引。索引缺失、损坏、模型空间不符或正本已变化时返回明确错误码，
+    /// 调用方据此降级为纯词法检索，不会静默返回错误结果。
+    pub fn open(config: &Path) -> Result<Self> {
+        let parsed: SemanticConfig = read_json_file(config)?;
+        Self::from_config(parsed)
+    }
+
+    pub fn from_config(config: SemanticConfig) -> Result<Self> {
+        config.provider.validate()?;
+        let space = config.provider.space();
+        let expected = space_signature(&space)?;
+        let dir = config.index_path.clone();
+        let meta: IndexMeta = read_json_file(&dir.join("index.json"))?;
+        if meta.schema != INDEX_SCHEMA || !meta.complete {
+            return Err(if meta.complete {
+                "索引 schema 版本不符，请运行 recallcard index build".into()
             } else {
-                "index_incomplete"
+                "索引构建未完成，请重新运行 recallcard index build".into()
             });
         }
-        let signature = hash(
-            &serde_json::to_vec(
-                &serde_json::to_value(space).map_err(|_| SemanticError("invalid_cache"))?,
-            )
-            .map_err(|_| SemanticError("invalid_cache"))?,
-        );
-        if self.space_signature != expected || signature != expected {
-            return failure("signature_mismatch");
+        if meta.space_signature != expected {
+            return Err("索引由不同编码空间生成；请重建索引".into());
         }
-        if !bounded_string(&space.provider, 128, false)
-            || !bounded_string(&space.model, 256, false)
-            || !bounded_string(&space.endpoint, 2048, false)
-            || !bounded_string(&space.revision, 256, false)
-            || !bounded_string(&space.document_instruction, 2048, true)
-            || !bounded_string(&space.query_instruction, 2048, true)
-            || !(1..=8192).contains(&space.dimensions)
-            || !["l2", "none"].contains(&space.normalization.as_str())
-            || space.preprocessing_version != "utf8-v1"
-            || !digest(&self.generation)
-            || !valid_scopes(&self.scope)
-            || self.documents.len() > MAX_DOCUMENTS
-            || self.documents.len().saturating_mul(space.dimensions) > MAX_VECTOR_VALUES
-        {
-            return failure("invalid_cache");
+        if meta.dimensions != space.dimensions || meta.documents.len() > MAX_DOCUMENTS {
+            return Err("索引维度或规模不合法".into());
         }
-        let mut refs = BTreeSet::new();
-        let mut inputs: BTreeMap<&str, &[f64]> = BTreeMap::new();
-        for document in &self.documents {
-            if !self.scope.contains(&document.scope)
-                || !refs.insert(&document.reference)
-                || !digest(&document.content_hash)
-                || !digest(&document.input_hash)
-            {
-                return failure("invalid_cache");
-            }
-            validate_vector(
-                &document.vector,
-                space.dimensions,
-                space.normalization == "l2",
-            )?;
-            if inputs
-                .insert(&document.input_hash, &document.vector)
-                .is_some_and(|old| old != document.vector)
-            {
-                return failure("invalid_cache");
-            }
+        let vectors = read_vectors(
+            &dir.join("vectors.bin"),
+            meta.dimensions,
+            meta.documents.len(),
+        )?;
+        Ok(Self {
+            config,
+            meta,
+            vectors,
+            encoder: Mutex::new(None),
+        })
+    }
+
+    pub fn index_path(&self) -> &Path {
+        &self.config.index_path
+    }
+
+    /// 编码查询。不访问正本、不持有 Vault 锁，因此不会阻塞写入。
+    /// 编码器在首次调用时构造；构造失败只降级为词法检索，不中断请求。
+    pub(crate) fn query_vector(&self, query: &str) -> SResult<Vec<f32>> {
+        let mut slot = self
+            .encoder
+            .lock()
+            .map_err(|_| SemanticError("encoder_unavailable"))?;
+        if slot.is_none() {
+            *slot = Some(
+                open_encoder(&self.config.provider)
+                    .map_err(|_| SemanticError("encoder_unavailable"))?,
+            );
         }
-        Ok(())
+        let encoder = slot.as_ref().expect("编码器已构造");
+        let vector = encoder
+            .embed_query(query)
+            .map_err(|_| SemanticError("query_encode_failed"))?;
+        if vector.len() != self.meta.dimensions {
+            return failure("dimension_mismatch");
+        }
+        Ok(vector)
+    }
+
+    /// 用已编码的查询向量对当前正本打分。正本变化时返回错误码而非过期结果。
+    pub(crate) fn rank(
+        &self,
+        vector: &[f32],
+        documents: &[Document],
+        limit: usize,
+        scopes: &[String],
+        time: DateTime<Utc>,
+    ) -> SResult<Vec<String>> {
+        self.check_current(documents, scopes, time)?;
+        if vector.len() != self.meta.dimensions {
+            return failure("dimension_mismatch");
+        }
+        let mut scored: Vec<(f32, usize)> = self
+            .vectors
+            .iter()
+            .enumerate()
+            .map(|(index, stored)| (dot(vector, stored), index))
+            .collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let take = limit.clamp(1, MAX_RESULTS).min(scored.len());
+        Ok(scored[..take]
+            .iter()
+            .filter(|(score, _)| *score > 0.0)
+            .map(|(_, index)| self.meta.documents[*index].reference.clone())
+            .collect())
+    }
+
+    pub fn document_count(&self) -> usize {
+        self.meta.documents.len()
+    }
+
+    pub fn space_summary(&self) -> Value {
+        json!({
+            "provider": self.meta.space.provider,
+            "model": self.meta.space.model,
+            "dimensions": self.meta.dimensions,
+            "documents": self.meta.documents.len(),
+            "generation": self.meta.generation,
+            "complete": self.meta.complete,
+        })
     }
 
     fn check_current(
@@ -294,32 +617,34 @@ impl Index {
         scopes: &[String],
         time: DateTime<Utc>,
     ) -> SResult<()> {
-        if self.scope.iter().any(|scope| !scopes.contains(scope)) {
+        if self.meta.scope.iter().collect::<BTreeSet<_>>() != scopes.iter().collect::<BTreeSet<_>>()
+        {
             return failure("scope_mismatch");
         }
-        let corpus = corpus_documents(documents, &self.scope, time);
-        if corpus_generation(&corpus) != self.generation || corpus.len() != self.documents.len() {
+        let instruction = &self.meta.space.document_instruction;
+        let corpus = corpus_documents(documents, scopes, time, instruction);
+        if corpus_generation(&corpus) != self.meta.generation
+            || corpus.len() != self.meta.documents.len()
+        {
             return failure("generation_mismatch");
         }
-        let expected_refs: BTreeSet<&str> = corpus
-            .iter()
-            .filter_map(|document| document["ref"].as_str())
-            .collect();
-        let current: BTreeMap<&str, &Document> = documents
+        let live: BTreeMap<&str, &Document> = documents
             .iter()
             .map(|document| (document.reference.as_str(), document))
             .collect();
-        for document in &self.documents {
-            if !expected_refs.contains(document.reference.as_str()) {
-                return failure("generation_mismatch");
-            }
-            let Some(live) = current.get(document.reference.as_str()) else {
+        for (index, document) in self.meta.documents.iter().enumerate() {
+            let Some(current) = live.get(document.reference.as_str()) else {
                 return failure("generation_mismatch");
             };
-            if document.scope != live.scope
-                || document.content_hash != hash(live.text.as_bytes())
-                || document.input_hash
-                    != prepared_hash(&self.space.document_instruction, &live.text)
+            let Some(row) = corpus.get(index) else {
+                return failure("generation_mismatch");
+            };
+            if row["ref"].as_str() != Some(document.reference.as_str()) {
+                return failure("generation_mismatch");
+            }
+            if current.scope != document.scope
+                || document.content_hash != hash(current.text.as_bytes())
+                || document.input_hash != prepared_hash(instruction, &corpus_text(current))
             {
                 return failure("content_mismatch");
             }
@@ -328,437 +653,600 @@ impl Index {
     }
 }
 
-pub(crate) struct Candidates {
-    index: Index,
-    pub references: Vec<String>,
-}
-impl Candidates {
-    pub(crate) fn revalidate(
-        &self,
-        documents: &[Document],
-        scopes: &[String],
-        time: DateTime<Utc>,
-    ) -> SResult<()> {
-        self.index.check_current(documents, scopes, time)
-    }
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-/// 全进程只持有一个 worker；损坏、超时或输出越界后停用，避免重启重置联网预算。
-pub struct SemanticSearch {
-    config: SemanticConfig,
-    supervisor: Mutex<Supervisor>,
-}
-struct Supervisor {
-    sender: Option<mpsc::Sender<Job>>,
-    next_id: u64,
-    disabled: Option<SemanticError>,
-}
-struct Job {
-    request: Vec<u8>,
-    reply: mpsc::SyncSender<SResult<Vec<u8>>>,
-}
-
-impl SemanticSearch {
-    pub fn from_config_file(path: &Path) -> Result<Self> {
-        let config = read_local(path)
-            .map_err(|_| "无法读取语义检索启动配置；需使用可信本机普通文件".to_owned())?;
-        Self::new(config)
+fn read_vectors(path: &Path, dimensions: usize, rows: usize) -> Result<Vec<Vec<f32>>> {
+    crate::vault::reject_symlink(path)?;
+    let expected = rows * dimensions * 4;
+    let metadata = fs::metadata(path).map_err(|e| format!("向量文件不可读：{e}"))?;
+    if metadata.len() as usize != expected || metadata.len() > MAX_INDEX_BYTES {
+        return Err("向量文件与索引元数据不匹配；请重建索引".into());
     }
-    pub fn new(config: SemanticConfig) -> Result<Self> {
-        if config.python.as_os_str().is_empty()
-            || !config.python_path.is_absolute()
-            || !config.index_path.is_absolute()
-            || config
-                .query_cache_path
-                .as_ref()
-                .is_some_and(|path| !path.is_absolute())
-            || !digest(&config.expected_space_signature)
-            || !(10..=120_000).contains(&config.timeout_ms)
-        {
-            return Err(
-                "语义检索启动配置无效：需可信解释器、绝对路径、空间签名及 10–120000ms 超时".into(),
-            );
-        }
-        if let Some(approval) = &config.cloud_query {
-            if approval.scopes.is_empty()
-                || !valid_scopes(&approval.scopes)
-                || !bounded_string(&approval.endpoint, 2048, false)
-                || !approval.endpoint.starts_with("https://")
-                || approval.key_env.is_empty()
-                || approval.key_env.len() > 128
-                || !approval.key_env.bytes().enumerate().all(|(index, byte)| {
-                    byte.is_ascii_alphabetic()
-                        || byte == b'_'
-                        || (index > 0 && byte.is_ascii_digit())
-                })
-                || !(1..=1000).contains(&approval.max_network_calls)
-                || !(1..=4 * 1024 * 1024).contains(&approval.max_transmitted_bytes)
-            {
-                return Err(
-                    "云查询批准配置无效；需明确 HTTPS 接收者、scope、密钥环境变量名和有限用量"
-                        .into(),
-                );
-            }
-        }
-        Ok(Self {
-            config,
-            supervisor: Mutex::new(Supervisor {
-                sender: None,
-                next_id: 0,
-                disabled: None,
-            }),
-        })
+    let mut buffer = Vec::with_capacity(expected);
+    File::open(path)
+        .map_err(io)?
+        .read_to_end(&mut buffer)
+        .map_err(io)?;
+    let (rows, remainder) = buffer.as_chunks();
+    if !remainder.is_empty() {
+        return Err("向量文件长度不是 4 字节对齐".into());
     }
-
-    pub(crate) fn candidates(
-        &self,
-        query: &str,
-        documents: &[Document],
-        selected: &[Document],
-        scopes: &[String],
-        time: DateTime<Utc>,
-    ) -> SResult<Candidates> {
-        let index: Index = read_local(&self.config.index_path)?;
-        index.validate(&self.config.expected_space_signature)?;
-        index.check_current(documents, scopes, time)?;
-        let selected_refs: BTreeSet<&str> = selected
-            .iter()
-            .map(|document| document.reference.as_str())
-            .collect();
-        let allowed_refs = index
-            .documents
-            .iter()
-            .filter(|document| selected_refs.contains(document.reference.as_str()))
-            .map(|document| document.reference.clone())
-            .collect::<Vec<_>>();
-        if allowed_refs.is_empty() {
-            return failure("no_eligible_memories");
-        }
-        let allowed_scopes: Vec<String> = selected
-            .iter()
-            .filter(|document| allowed_refs.contains(&document.reference))
-            .map(|document| document.scope.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let query_vector = self.cached_query(&index.space, query)?;
-        let mut request = json!({"index":index,"allowed_scopes":allowed_scopes,"allowed_refs":allowed_refs,"limit":MAX_RESULTS,"expected_generation":index.generation});
-        if let Some(vector) = query_vector {
-            request["op"] = json!("query_vector");
-            request["query_vector"] = json!(vector);
-            request["space_signature"] = json!(self.config.expected_space_signature);
-        } else {
-            let Some(approval) = &self.config.cloud_query else {
-                return failure("query_not_cached");
-            };
-            if approval.endpoint != index.space.endpoint
-                || allowed_scopes
-                    .iter()
-                    .any(|scope| !approval.scopes.contains(scope))
-            {
-                return failure("query_not_approved");
-            }
-            request["op"] = json!("query");
-            request["query"] = json!(query);
-        }
-        let result = self.exchange(request)?;
-        let _ = (result.query_cache_hit, result.diagnostics);
-        if result.ranking != "cosine"
-            || result.space_signature != index.space_signature
-            || result.generation != index.generation
-            || result.results.len() > MAX_RESULTS
-        {
-            self.invalidate();
-            return failure("malformed_response");
-        }
-        let mut seen = BTreeSet::new();
-        for row in &result.results {
-            if !allowed_refs.contains(&row.reference)
-                || !row.score.is_finite()
-                || !(-1.0..=1.0).contains(&row.score)
-                || !seen.insert(&row.reference)
-            {
-                self.invalidate();
-                return failure("malformed_response");
-            }
-        }
-        // 分数只用于排序，不作为来源可信度；Rust 再融合完整文本候选，保留未 Dream 的 Event。
-        Ok(Candidates {
-            index,
-            references: result
-                .results
-                .into_iter()
-                .map(|row| row.reference)
-                .collect(),
-        })
-    }
-
-    fn cached_query(&self, space: &Space, query: &str) -> SResult<Option<Vec<f64>>> {
-        let Some(path) = &self.config.query_cache_path else {
-            return Ok(None);
-        };
-        let cache: QueryCache = read_local(path)?;
-        if cache.schema != "recallcard.embedding-query-cache/1"
-            || cache.space_signature != self.config.expected_space_signature
-            || cache.queries.len() > 32
-        {
-            return failure("query_cache_incompatible");
-        }
-        let query_hash = hash(query.as_bytes());
-        let input_hash = prepared_hash(&space.query_instruction, query);
-        let mut seen = BTreeSet::new();
-        let mut found = None;
-        for item in cache.queries {
-            if !digest(&item.query_hash)
-                || !digest(&item.input_hash)
-                || !seen.insert(item.query_hash.clone())
-            {
-                return failure("invalid_cache");
-            }
-            validate_vector(&item.vector, space.dimensions, false)?;
-            if item.query_hash == query_hash {
-                if item.input_hash != input_hash {
-                    return failure("query_cache_incompatible");
-                }
-                found = Some(item.vector);
-            }
-        }
-        Ok(found)
-    }
-
-    fn invalidate(&self) {
-        if let Ok(mut supervisor) = self.supervisor.try_lock() {
-            supervisor.disabled = Some(SemanticError("malformed_response"));
-            supervisor.sender = None;
-        }
-    }
-
-    fn exchange(&self, mut request: Value) -> SResult<SearchResult> {
-        let mut supervisor = self
-            .supervisor
-            .try_lock()
-            .map_err(|_| SemanticError("worker_busy"))?;
-        if let Some(error) = supervisor.disabled {
-            return Err(error);
-        }
-        if supervisor.sender.is_none() {
-            let (sender, receiver) = mpsc::channel();
-            let config = self.config.clone();
-            std::thread::Builder::new()
-                .name("recallcard-semantic".into())
-                .spawn(move || supervise(config, receiver))
-                .map_err(|_| SemanticError("worker_unavailable"))?;
-            supervisor.sender = Some(sender);
-        }
-        supervisor.next_id += 1;
-        let id = supervisor.next_id;
-        request["id"] = json!(id);
-        let mut encoded = serde_json::to_vec(&request).map_err(|_| SemanticError("input_limit"))?;
-        encoded.push(b'\n');
-        if encoded.len() > MAX_REQUEST_BYTES {
-            return failure("input_limit");
-        }
-        let (reply, receiver) = mpsc::sync_channel(1);
-        let received = if supervisor
-            .sender
-            .as_ref()
-            .unwrap()
-            .send(Job {
-                request: encoded,
-                reply,
-            })
-            .is_err()
-        {
-            failure("worker_unavailable")
-        } else {
-            receiver
-                .recv_timeout(Duration::from_millis(self.config.timeout_ms + 500))
-                .unwrap_or_else(|_| failure("worker_timeout"))
-        };
-        let bytes = match received {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                supervisor.disabled = Some(error);
-                supervisor.sender = None;
-                return Err(error);
-            }
-        };
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Envelope {
-            id: u64,
-            ok: bool,
-            #[serde(default)]
-            result: Option<SearchResult>,
-            #[serde(default)]
-            error: Option<WorkerError>,
-            #[serde(default)]
-            diagnostics: Option<Value>,
-        }
-        let envelope: Envelope = match serde_json::from_slice(&bytes) {
-            Ok(envelope) => envelope,
-            Err(_) => {
-                supervisor.disabled = Some(SemanticError("malformed_response"));
-                supervisor.sender = None;
-                return failure("malformed_response");
-            }
-        };
-        let _ = envelope.diagnostics;
-        if envelope.id != id
-            || (envelope.ok && (envelope.result.is_none() || envelope.error.is_some()))
-            || (!envelope.ok && (envelope.error.is_none() || envelope.result.is_some()))
-        {
-            supervisor.disabled = Some(SemanticError("malformed_response"));
-            supervisor.sender = None;
-            return failure("malformed_response");
-        }
-        if !envelope.ok {
-            // 错误正文和任意 worker 字段都不向客户端转发，只使用固定白名单错误码。
-            let error = envelope.error.unwrap();
-            let _ = error.message;
-            let code = match error.code.as_str() {
-                "network_disabled" | "approval_required" | "scope_denied" => "query_not_approved",
-                "network_budget_exhausted" => "network_budget_exhausted",
-                "missing_key" => "key_unavailable",
-                "generation_mismatch" => "generation_mismatch",
-                "signature_mismatch" => "signature_mismatch",
-                "index_incomplete" => "index_incomplete",
-                "network_error" => "network_error",
-                "provider_error" => "provider_error",
-                "provider_auth" => "provider_auth",
-                "rate_limited" => "rate_limited",
-                "redirect_blocked" => "redirect_blocked",
-                "model_mismatch" => "model_mismatch",
-                _ => "worker_error",
-            };
-            return failure(code);
-        }
-        Ok(envelope.result.unwrap())
-    }
+    Ok(rows
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect::<Vec<f32>>()
+        .chunks_exact(dimensions)
+        .map(|row| row.to_vec())
+        .collect())
 }
 
-struct Process {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
-}
-impl Process {
-    fn start(config: &SemanticConfig) -> SResult<Self> {
-        let mut command = Command::new(&config.python);
-        // -I/-S 拒绝当前目录、用户 site 和 PYTHON* 环境注入；只载入启动者指定的模块根目录。
-        command.args(["-I", "-S", "-c", "import sys; sys.path.insert(0, sys.argv[1]); from recallcard_worker.__main__ import main; raise SystemExit(main(sys.argv[2:]))"])
-            .arg(&config.python_path).arg("--stdio").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).env_clear();
-        for name in ["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"] {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
-        if let Some(approval) = &config.cloud_query {
-            command
-                .args([
-                    "--allow-network",
-                    "--approve-data",
-                    "query",
-                    "--approve-endpoint",
-                    &approval.endpoint,
-                    "--key-env",
-                    &approval.key_env,
-                ])
-                .arg("--max-network-calls")
-                .arg(approval.max_network_calls.to_string())
-                .arg("--max-transmitted-bytes")
-                .arg(approval.max_transmitted_bytes.to_string())
-                .args(["--max-retries", "0"])
-                .arg("--timeout")
-                .arg((config.timeout_ms as f64 / 1000.0).to_string());
-            for scope in &approval.scopes {
-                command.arg("--approve-scope").arg(scope);
-            }
-            if let Some(value) = std::env::var_os(&approval.key_env) {
-                command.env(&approval.key_env, value);
-            }
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|_| SemanticError("worker_unavailable"))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or(SemanticError("worker_unavailable"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(SemanticError("worker_unavailable"))?;
-        Ok(Self {
-            child,
-            stdin,
-            stdout,
-        })
+fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    crate::vault::reject_symlink(path)?;
+    let metadata = fs::metadata(path).map_err(|e| format!("配置或索引不可读：{e}"))?;
+    if !metadata.is_file() || metadata.len() > MAX_INDEX_BYTES {
+        return Err("配置或索引不是有界常规文件".into());
     }
-    async fn exchange(&mut self, request: &[u8]) -> SResult<Vec<u8>> {
-        self.stdin
-            .write_all(request)
-            .await
-            .map_err(|_| SemanticError("worker_io"))?;
-        self.stdin
-            .flush()
-            .await
-            .map_err(|_| SemanticError("worker_io"))?;
-        let mut response = Vec::new();
-        loop {
-            let mut buffer = [0u8; 4096];
-            let count = self
-                .stdout
-                .read(&mut buffer)
-                .await
-                .map_err(|_| SemanticError("worker_io"))?;
-            if count == 0 {
-                return failure("worker_exited");
-            }
-            response.extend_from_slice(&buffer[..count]);
-            if response.len() > MAX_RESPONSE_BYTES {
-                return failure("output_limit");
-            }
-            if let Some(newline) = response.iter().position(|byte| *byte == b'\n') {
-                if newline + 1 != response.len() {
-                    return failure("malformed_response");
-                }
-                return Ok(response);
-            }
-        }
-    }
+    let mut text = String::new();
+    File::open(path)
+        .map_err(io)?
+        .read_to_string(&mut text)
+        .map_err(io)?;
+    serde_json::from_str(&text).map_err(|e| format!("配置或索引 JSON 无效：{e}"))
 }
 
-fn supervise(config: SemanticConfig, receiver: mpsc::Receiver<Job>) {
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-    else {
-        return;
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        crate::vault::reject_symlink(parent)?;
+        fs::create_dir_all(parent).map_err(io)?;
+    }
+    let temporary = path.with_extension("tmp");
+    {
+        let mut file = File::create(&temporary).map_err(io)?;
+        file.write_all(bytes).map_err(io)?;
+        file.sync_all().map_err(io)?;
+    }
+    fs::rename(&temporary, path).map_err(io)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 构建与状态
+// ---------------------------------------------------------------------------
+
+/// 增量重建索引：input_hash 未变化的文档沿用旧向量，只编码新增与变更部分。
+pub fn build_index(vault: &Vault, access: Access, config: Option<&Path>) -> Result<Value> {
+    let parsed = resolve_config(vault, config)?;
+    let encoder = open_encoder(&parsed.provider)?;
+    build_index_with_encoder(vault, access, &parsed, encoder.as_ref())
+}
+
+fn resolve_config(vault: &Vault, config: Option<&Path>) -> Result<SemanticConfig> {
+    let parsed: SemanticConfig = match config {
+        Some(path) => read_json_file(path)?,
+        None => SemanticConfig {
+            provider: Provider::Local,
+            index_path: vault.root().join(default_index_path()),
+        },
     };
-    let mut process: Option<Process> = None;
-    while let Ok(job) = receiver.recv() {
-        let result = runtime.block_on(async {
-            tokio::time::timeout(Duration::from_millis(config.timeout_ms), async {
-                if process.is_none() {
-                    process = Some(Process::start(&config)?);
-                }
-                process.as_mut().unwrap().exchange(&job.request).await
-            })
-            .await
-            .unwrap_or_else(|_| failure("worker_timeout"))
-        });
-        let broken = result.is_err();
-        let _ = job.reply.send(result);
-        if broken {
-            break;
+    parsed.provider.validate()?;
+    if !parsed.index_path.is_absolute() && config.is_some() {
+        return Err("配置文件中的 index_path 必须是绝对路径".into());
+    }
+    Ok(parsed)
+}
+
+/// 构建核心。编码器由调用方提供：生产走 open_encoder，测试注入确定性实现。
+pub(crate) fn build_index_with_encoder(
+    vault: &Vault,
+    access: Access,
+    parsed: &SemanticConfig,
+    encoder: &dyn Encoder,
+) -> Result<Value> {
+    let index_path = if parsed.index_path.is_absolute() {
+        parsed.index_path.clone()
+    } else {
+        vault.root().join(&parsed.index_path)
+    };
+    crate::vault::reject_symlink(&index_path)?;
+
+    let space = encoder.space();
+    let signature = space_signature(&space)?;
+    let scopes = access.scopes().to_vec();
+
+    let _guard = vault.read_guard()?;
+    let context = crate::context::Context::new(vault, access);
+    let documents = context.documents()?;
+    let now = Utc::now();
+    let corpus = corpus_documents(&documents, &scopes, now, &space.document_instruction);
+    if corpus.len() > MAX_DOCUMENTS {
+        return Err(format!("语料超过 {MAX_DOCUMENTS} 条上限；请先缩小授权范围"));
+    }
+    let generation = corpus_generation(&corpus);
+
+    // 旧索引只在编码空间一致时可复用向量；不同模型的向量绝不混算。
+    let previous: Option<(IndexMeta, Vec<Vec<f32>>)> = (|| {
+        let meta: IndexMeta = read_json_file(&index_path.join("index.json")).ok()?;
+        if meta.schema != INDEX_SCHEMA || meta.space_signature != signature || !meta.complete {
+            return None;
+        }
+        let vectors = read_vectors(
+            &index_path.join("vectors.bin"),
+            meta.dimensions,
+            meta.documents.len(),
+        )
+        .ok()?;
+        Some((meta, vectors))
+    })();
+
+    let reuse: BTreeMap<String, (usize, &IndexDocument)> = previous
+        .as_ref()
+        .map(|(meta, _)| {
+            meta.documents
+                .iter()
+                .enumerate()
+                .map(|(index, document)| (document.reference.clone(), (index, document)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut output_documents = Vec::with_capacity(corpus.len());
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(corpus.len());
+    let mut pending: Vec<(usize, String)> = Vec::new();
+    let mut reused = 0usize;
+
+    for (position, row) in corpus.iter().enumerate() {
+        let reference = row["ref"].as_str().unwrap_or_default().to_string();
+        let input_hash = row["input_hash"].as_str().unwrap_or_default().to_string();
+        let document = IndexDocument {
+            reference: reference.clone(),
+            content_hash: row["content_hash"].as_str().unwrap_or_default().to_string(),
+            input_hash: input_hash.clone(),
+            scope: row["scope"].as_str().unwrap_or_default().to_string(),
+            kind: row["kind"].as_str().unwrap_or_default().to_string(),
+        };
+        let reusable = reuse
+            .get(&reference)
+            .filter(|(_, old)| old.input_hash == input_hash && old.scope == document.scope)
+            .and_then(|(old_index, _)| previous.as_ref()?.1.get(*old_index))
+            .filter(|vector| vector.len() == space.dimensions);
+        if let Some(vector) = reusable {
+            vectors.push(vector.clone());
+            reused += 1;
+        } else {
+            vectors.push(Vec::new());
+            pending.push((
+                position,
+                row["text"].as_str().unwrap_or_default().to_string(),
+            ));
+        }
+        output_documents.push(document);
+    }
+
+    let encoded = if pending.is_empty() {
+        0
+    } else {
+        let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
+        // 编码失败（云错误页、模型损坏）不转发供应商正文：可能含密钥回显或内部路径。
+        let encoded = encoder
+            .embed_documents(&texts)
+            .map_err(|_| "编码失败；索引未写入，正文未外泄".to_string())?;
+        if encoded.len() != texts.len() {
+            return Err("编码输出数量与待编码文档不符".into());
+        }
+        for ((position, _), vector) in pending.iter().zip(encoded) {
+            if vector.len() != space.dimensions {
+                return Err("编码输出维度与空间不符".into());
+            }
+            vectors[*position] = vector;
+        }
+        texts.len()
+    };
+
+    if vectors
+        .iter()
+        .any(|vector| vector.len() != space.dimensions)
+    {
+        return Err("存在未填充的向量；索引未写入".into());
+    }
+
+    // 半成品先写 complete=false，全部落盘后才翻转，避免中断留下可用假象。
+    let partial = IndexMeta {
+        schema: INDEX_SCHEMA.into(),
+        space: space.clone(),
+        space_signature: signature.clone(),
+        generation: generation.clone(),
+        scope: scopes.clone(),
+        dimensions: space.dimensions,
+        complete: false,
+        documents: output_documents.clone(),
+    };
+    write_atomic(
+        &index_path.join("index.json"),
+        &serde_json::to_vec_pretty(&partial).map_err(io)?,
+    )?;
+    write_atomic(&index_path.join("vectors.bin"), &pack_vectors(&vectors))?;
+    let final_meta = IndexMeta {
+        complete: true,
+        ..partial
+    };
+    write_atomic(
+        &index_path.join("index.json"),
+        &serde_json::to_vec_pretty(&final_meta).map_err(io)?,
+    )?;
+
+    Ok(json!({
+        "ok": true,
+        "index_path": index_path,
+        "documents": output_documents.len(),
+        "encoded": encoded,
+        "reused": reused,
+        "generation": generation,
+        "transmitted_bytes": encoder.transmitted_bytes(),
+        "space": {
+            "provider": space.provider,
+            "model": space.model,
+            "dimensions": space.dimensions,
+        },
+        "note": "索引是派生物，可用 recallcard index build 重建；正本文件不受影响"
+    }))
+}
+
+fn pack_vectors(vectors: &[Vec<f32>]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vectors.len() * vectors.first().map_or(0, |v| v.len()) * 4);
+    for vector in vectors {
+        for value in vector {
+            bytes.extend_from_slice(&value.to_le_bytes());
         }
     }
-    if let Some(mut process) = process {
-        // 包括超时、客户端退出和协议失败；取消异步管道无需等待阻塞读线程。
-        runtime.block_on(async {
-            let _ = tokio::time::timeout(Duration::from_millis(250), process.child.kill()).await;
-        });
+    bytes
+}
+
+/// 报告索引覆盖，不触发编码或联网。
+pub fn index_status(vault: &Vault) -> Result<Value> {
+    let path = vault.root().join(default_index_path());
+    let meta: IndexMeta = match read_json_file(&path.join("index.json")) {
+        Ok(meta) => meta,
+        Err(error) => {
+            return Ok(json!({
+                "configured": false,
+                "index_path": path,
+                "reason": error,
+                "note": "未配置语义索引时检索走纯词法通道"
+            }))
+        }
+    };
+    let vectors = read_vectors(
+        &path.join("vectors.bin"),
+        meta.dimensions,
+        meta.documents.len(),
+    );
+    let kinds =
+        meta.documents
+            .iter()
+            .fold(BTreeMap::<String, usize>::new(), |mut acc, document| {
+                *acc.entry(document.kind.clone()).or_insert(0) += 1;
+                acc
+            });
+    Ok(json!({
+        "configured": true,
+        "index_path": path,
+        "schema": meta.schema,
+        "complete": meta.complete,
+        "provider": meta.space.provider,
+        "model": meta.space.model,
+        "dimensions": meta.dimensions,
+        "documents": meta.documents.len(),
+        "by_kind": kinds,
+        "scope": meta.scope,
+        "generation": meta.generation,
+        "vectors_readable": vectors.is_ok(),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        context::{Context, SearchArgs},
+        model::Source,
+        policy::Access,
+        EventInput, Origin, Role, Vault,
+    };
+
+    /// 确定性假编码器：字符二元组频次向量，L2 归一化。
+    /// 让"连接池"查询与含"连接池"的文档得分最高，且构建/查询两次结果一致。
+    struct FakeEncoder;
+
+    const FAKE_DIM: usize = 64;
+
+    fn fake_vector(text: &str) -> Vec<f32> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut vector = vec![0f32; FAKE_DIM];
+        for window in chars.windows(2) {
+            let bigram: String = window.iter().collect();
+            let digest = hash(bigram.as_bytes());
+            let index = u8::from_str_radix(&digest[..2], 16).unwrap() as usize % FAKE_DIM;
+            vector[index] += 1.0;
+        }
+        normalize(vector)
+    }
+
+    impl Encoder for FakeEncoder {
+        fn space(&self) -> Space {
+            Space {
+                provider: "fake-test".into(),
+                model: "fake-v1".into(),
+                dimensions: FAKE_DIM,
+                query_instruction: String::new(),
+                document_instruction: String::new(),
+                normalization: "l2".into(),
+                preprocessing_version: "1".into(),
+            }
+        }
+        fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|t| fake_vector(t)).collect())
+        }
+        fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+            Ok(fake_vector(text))
+        }
+        fn transmitted_bytes(&self) -> u64 {
+            0
+        }
+    }
+
+    fn setup() -> (tempfile::TempDir, Vault) {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::init(&dir.path().join("vault")).unwrap();
+        (dir, vault)
+    }
+
+    fn capture(vault: &Vault, content: &str) -> crate::model::Event {
+        let input = EventInput {
+            occurred_at: None,
+            scope: "personal".into(),
+            session_id: Some("conv".into()),
+            turn_id: None,
+            run_id: None,
+            step_id: None,
+            revision_of: None,
+            reply_to: None,
+            caused_by: None,
+            kind: "message".into(),
+            parts: Vec::new(),
+            metadata: Value::Null,
+            capture: Default::default(),
+            role: Role::User,
+            origin: Origin::UserInput,
+            content: content.into(),
+            source: Source {
+                platform: "test".into(),
+                account_namespace: String::new(),
+                conversation_id: "conv".into(),
+                message_id: format!("m_{}", hash(content.as_bytes())),
+                url: None,
+            },
+        };
+        vault.capture(input).unwrap()
+    }
+
+    fn access() -> Access {
+        Access::new(vec!["personal".into()]).unwrap()
+    }
+
+    fn build(vault: &Vault) -> Value {
+        let config = SemanticConfig {
+            provider: Provider::Local,
+            index_path: vault.root().join(".index/semantic"),
+        };
+        build_index_with_encoder(vault, access(), &config, &FakeEncoder).unwrap()
+    }
+
+    fn open_index(vault: &Vault) -> SemanticIndex {
+        let dir = vault.root().join(".index/semantic");
+        let meta: IndexMeta =
+            serde_json::from_slice(&fs::read(dir.join("index.json")).unwrap()).unwrap();
+        let vectors = read_vectors(
+            &dir.join("vectors.bin"),
+            meta.dimensions,
+            meta.documents.len(),
+        )
+        .unwrap();
+        SemanticIndex {
+            config: SemanticConfig {
+                provider: Provider::Local,
+                index_path: dir,
+            },
+            meta,
+            vectors,
+            encoder: Mutex::new(Some(Box::new(FakeEncoder))),
+        }
+    }
+
+    fn search_args(query: &str) -> SearchArgs {
+        SearchArgs {
+            query: query.into(),
+            target: "all".into(),
+            session_ref: None,
+            as_of: None,
+            limit: 5,
+            detail: "brief".into(),
+            budget_bytes: 8192,
+            cursor: None,
+        }
+    }
+
+    #[test]
+    fn build_writes_complete_index_covering_events() {
+        let (_d, vault) = setup();
+        capture(&vault, "用户修复了数据库连接池泄漏");
+        capture(&vault, "用户喜欢在深夜重构代码");
+        let report = build(&vault);
+        assert_eq!(report["complete"], Value::Null); // complete 在文件里，不在报告里
+        assert!(report["documents"].as_u64().unwrap() >= 2);
+        assert_eq!(report["encoded"].as_u64().unwrap(), 2);
+        assert_eq!(report["reused"].as_u64().unwrap(), 0);
+        let meta: IndexMeta = serde_json::from_slice(
+            &fs::read(vault.root().join(".index/semantic/index.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(meta.complete);
+        assert!(meta.documents.iter().all(|d| d.kind == "event"));
+    }
+
+    #[test]
+    fn rebuild_is_incremental_by_input_hash() {
+        let (_d, vault) = setup();
+        capture(&vault, "第一条事实");
+        build(&vault);
+        capture(&vault, "第二条事实");
+        let report = build(&vault);
+        assert_eq!(report["encoded"].as_u64().unwrap(), 1);
+        assert_eq!(report["reused"].as_u64().unwrap(), 1);
+    }
+
+    #[test]
+    fn semantic_ranking_lifts_matching_document() {
+        let (_d, vault) = setup();
+        capture(&vault, "数据库连接池泄漏已在深夜修复");
+        capture(&vault, "周末计划去爬山看日出");
+        capture(&vault, "早餐吃了豆浆和油条");
+        build(&vault);
+        let index = open_index(&vault);
+        let context = Context::with_semantic(&vault, access(), &index);
+        let response = context.search(search_args("连接池")).unwrap();
+        assert_eq!(response["coverage"]["semantic_search"], "available");
+        assert_eq!(response["coverage"]["ranking"], "rrf");
+        let first = response["results"][0]["text"].as_str().unwrap();
+        assert!(first.contains("连接池"));
+    }
+
+    #[test]
+    fn capture_after_build_invalidates_rank_not_request() {
+        let (_d, vault) = setup();
+        capture(&vault, "已索引的事实");
+        build(&vault);
+        let index = open_index(&vault);
+        capture(&vault, "构建之后新增的事实");
+        // 正本变化后语义通道降级为固定错误码；请求整体仍成功返回词法结果。
+        let context = Context::with_semantic(&vault, access(), &index);
+        let response = context.search(search_args("事实")).unwrap();
+        assert_eq!(response["coverage"]["semantic_search"], "unavailable");
+        assert_eq!(
+            response["coverage"]["semantic_error"],
+            "generation_mismatch"
+        );
+    }
+
+    #[test]
+    fn index_from_other_scope_is_rejected() {
+        let (_d, vault) = setup();
+        capture(&vault, "个人范围事实");
+        build(&vault);
+        let index = open_index(&vault);
+        let wide = Access::new(vec!["personal".into(), "project".into()]).unwrap();
+        let context = Context::with_semantic(&vault, wide, &index);
+        let response = context.search(search_args("事实")).unwrap();
+        assert_eq!(response["coverage"]["semantic_error"], "scope_mismatch");
+    }
+
+    #[test]
+    fn incomplete_or_foreign_index_is_refused_at_open() {
+        let (_d, vault) = setup();
+        capture(&vault, "任意事实");
+        build(&vault);
+        let dir = vault.root().join(".index/semantic");
+        // complete=false 的半成品不可用
+        let mut meta: Value =
+            serde_json::from_slice(&fs::read(dir.join("index.json")).unwrap()).unwrap();
+        meta["complete"] = json!(false);
+        fs::write(dir.join("index.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+        let config = SemanticConfig {
+            provider: Provider::Local,
+            index_path: dir.clone(),
+        };
+        let error = match SemanticIndex::from_config(config) {
+            Err(error) => error,
+            Ok(_) => panic!("半成品索引不应可用"),
+        };
+        assert!(error.contains("未完成"), "{error}");
+        // 恢复 complete，改模型空间 → 签名不符
+        meta["complete"] = json!(true);
+        fs::write(dir.join("index.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+        let config = SemanticConfig {
+            provider: Provider::Cloud {
+                endpoint: "https://example.com/v1/embeddings".into(),
+                model: "text-embedding-v4".into(),
+                dimensions: 1024,
+                key_env: default_key_env(),
+                timeout_ms: default_timeout(),
+                max_transmitted_bytes: default_transmit_bytes(),
+            },
+            index_path: dir,
+        };
+        let error = match SemanticIndex::from_config(config) {
+            Err(error) => error,
+            Ok(_) => panic!("不同编码空间的索引不应可用"),
+        };
+        assert!(error.contains("编码空间"), "{error}");
+    }
+
+    #[test]
+    fn cloud_provider_validation_rejects_insecure_endpoints() {
+        let base = |endpoint: &str, key_env: &str| Provider::Cloud {
+            endpoint: endpoint.into(),
+            model: "text-embedding-v4".into(),
+            dimensions: 1024,
+            key_env: key_env.into(),
+            timeout_ms: default_timeout(),
+            max_transmitted_bytes: default_transmit_bytes(),
+        };
+        assert!(base("http://api.example.com/v1/embeddings", "K")
+            .validate()
+            .is_err());
+        assert!(base("https://localhost/v1/embeddings", "K")
+            .validate()
+            .is_err());
+        assert!(base("https://user:pass@example.com/v1", "K")
+            .validate()
+            .is_err());
+        assert!(base("https://api.example.com/v1", "BAD-ENV!")
+            .validate()
+            .is_err());
+        assert!(base("https://api.example.com/v1", "RECALLCARD_KEY")
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn encoder_error_surfaces_as_fixed_code_only() {
+        struct Broken;
+        impl Encoder for Broken {
+            fn space(&self) -> Space {
+                FakeEncoder.space()
+            }
+            fn embed_documents(&self, _: &[String]) -> Result<Vec<Vec<f32>>> {
+                Err("供应商内部路径 /opt/secret 与密钥 sk-abc 泄漏样本".into())
+            }
+            fn embed_query(&self, _: &str) -> Result<Vec<f32>> {
+                Err("供应商内部路径 /opt/secret 与密钥 sk-abc 泄漏样本".into())
+            }
+            fn transmitted_bytes(&self) -> u64 {
+                0
+            }
+        }
+        let (_d, vault) = setup();
+        capture(&vault, "任意事实");
+        let config = SemanticConfig {
+            provider: Provider::Local,
+            index_path: vault.root().join(".index/semantic"),
+        };
+        let error = build_index_with_encoder(&vault, access(), &config, &Broken).unwrap_err();
+        assert!(error.contains("编码"), "{error}");
+        assert!(
+            !error.contains("secret") && !error.contains("sk-abc"),
+            "{error}"
+        );
     }
 }

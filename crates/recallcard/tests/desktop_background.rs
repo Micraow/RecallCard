@@ -67,12 +67,9 @@ fn confirm(f: &mut Fixture, review: &BackgroundReview, approval: bool) -> Result
     f.ui.confirm_background_change(&f.info.session_id, "personal", &review.preview_id, approval)
 }
 fn bootstrap(vault: &Vault) -> Value {
-    transport::invoke(
-        &Context::new(vault, Access::new(vec!["personal".into()]).unwrap()),
-        "bootstrap",
-        json!({}),
-    )
-    .unwrap()
+    transport::Service::new(vault, Access::new(vec!["personal".into()]).unwrap())
+        .invoke("bootstrap", json!({}))
+        .unwrap()
 }
 
 #[test]
@@ -128,19 +125,6 @@ fn choosing_existing_memory_previews_real_default_and_preserves_all_evidence() {
     assert!(current.candidates[0].selected && current.candidates[0].included);
     assert!(!current.candidates[0].can_include);
     assert!(current.candidates[0].can_remove);
-    let handoff =
-        f.ui.continuation(
-            &f.info.session_id,
-            "personal",
-            &f.event.data.session_key(),
-            "合成继续",
-        )
-        .unwrap();
-    assert_eq!(handoff["background"], saved["background"]);
-    assert!(handoff["text"]
-        .as_str()
-        .unwrap()
-        .contains(saved["background"]["stable_text"].as_str().unwrap()));
     assert!(confirm(&mut f, &preview, false).is_err());
     assert_eq!(f.vault.event(&f.event.id).unwrap(), f.event);
 }
@@ -454,7 +438,7 @@ fn truncation_is_shared_and_never_carries_body_without_evidence_and_reference() 
     assert!(row.reason.contains("长度预算"));
     let larger = Context::new(&f.vault, Access::new(vec!["personal".into()]).unwrap())
         .bootstrap(BootstrapArgs {
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         })
         .unwrap();
     assert!(larger["stable_text"]
@@ -462,16 +446,6 @@ fn truncation_is_shared_and_never_carries_body_without_evidence_and_reference() 
         .unwrap()
         .contains(&long.data.content));
     assert_eq!(larger["refs"], json!([format!("memory:{}@2", long.id)]));
-    let handoff =
-        f.ui.continuation(
-            &f.info.session_id,
-            "personal",
-            &f.event.data.session_key(),
-            "",
-        )
-        .unwrap();
-    assert_eq!(handoff["background"], saved["background"]);
-    assert_eq!(handoff["truncated"], true);
 }
 
 #[test]

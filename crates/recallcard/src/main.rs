@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 #[derive(Parser)]
@@ -24,6 +24,7 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 }
+
 #[derive(Subcommand)]
 enum Command {
     /// 创建本地事实源目录
@@ -33,45 +34,17 @@ enum Command {
         #[arg(long)]
         file: String,
     },
-    /// 导入主动提供的导出或日志文件
-    Import {
-        #[arg(long)]
-        format: String,
-        #[arg(long)]
-        file: String,
-        #[arg(long)]
-        scope: String,
+    /// 打印 Agent 接入配置片段；不修改任何文件
+    Connect {
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+        #[arg(long, default_value = "claude-code")]
+        client: String,
     },
-    /// 手工 Dream：导出、预览、按摘要批准与恢复
+    /// 手工 Dream：导出、审阅、按摘要批准与恢复
     Dream {
         #[command(subcommand)]
         action: DreamCommand,
-    },
-    /// 以浏览器原生消息协议提供受限只读访问
-    NativeHost {
-        #[arg(long, required = true)]
-        scope: Vec<String>,
-        #[arg(long)]
-        allowed_extension: String,
-        origin: String,
-        #[arg(long)]
-        parent_window: Option<u64>,
-        #[arg(long)]
-        ipc_endpoint: Option<PathBuf>,
-    },
-    /// 生成待人工检查/注册的 Native Messaging 文件
-    NativeInstall {
-        /// 明确允许扩展在此范围内保存用户预览确认的可见对话；默认不允许写入
-        #[arg(long)]
-        capture_scope: Option<String>,
-        #[arg(long, required = true)]
-        scope: Vec<String>,
-        #[arg(long)]
-        extension_id: String,
-        #[arg(long)]
-        output_dir: PathBuf,
-        #[arg(long)]
-        ipc_endpoint: Option<PathBuf>,
     },
     /// 人工管理长期记忆
     Memory {
@@ -87,32 +60,14 @@ enum Command {
     },
     /// 返回记忆的原始证据
     Sources { id: String },
-    /// 按当前授权/抑制状态导出可选Embedding输入；不会发送云端
-    EmbeddingExport {
-        #[arg(long, required = true)]
-        scope: Vec<String>,
-    },
-    /// 校验并先提交本地正本，再整合与推送指定 Git 远端
-    Sync {
-        #[arg(long)]
-        remote: String,
-    },
-    /// 查看资料库 Git 状态，不访问远端
-    Status,
-    /// 离线重建文本快照与视图，不重新调用模型
-    Rebuild,
-    /// 根据 canonical Memory 重新生成人类视图
-    Views,
-    /// 检查 schema、摘要与证据完整性
-    Doctor,
     /// 生成授权范围内的稳定启动资料
     Bootstrap {
         #[arg(long, required = true)]
         scope: Vec<String>,
         #[arg(long, default_value_t = 1500)]
-        budget_tokens: usize,
+        budget_bytes: usize,
     },
-    /// 不依赖 Dream 或云 API 的中英文文本检索
+    /// 中英文文本检索；不依赖 Dream 或云 API
     Search {
         query: String,
         #[arg(long, required = true)]
@@ -122,7 +77,7 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         limit: usize,
         #[arg(long, default_value_t = 1500)]
-        budget_tokens: usize,
+        budget_bytes: usize,
         #[arg(long)]
         session_ref: Option<String>,
         #[arg(long)]
@@ -131,39 +86,28 @@ enum Command {
         detail: String,
         #[arg(long)]
         cursor: Option<String>,
-        /// 由本机维护者固定的可选语义 worker 配置；默认不启用
+        /// 由本机维护者固定的可选语义索引配置；默认不启用
         #[arg(long)]
         semantic_config: Option<PathBuf>,
     },
-    /// 为本地 Agent 提供四个只读工具；范围由此处绑定
+    /// 重建语义索引；只读正本，不外发
+    Index {
+        #[command(subcommand)]
+        action: IndexCommand,
+    },
+    /// 为本地 Agent 提供 MCP 工具；范围由此处绑定
     Mcp {
         #[arg(long, required = true)]
         scope: Vec<String>,
         #[arg(long)]
-        ipc_endpoint: Option<PathBuf>,
-        #[arg(long, conflicts_with = "ipc_endpoint")]
         semantic_config: Option<PathBuf>,
     },
-    /// 启动固定资料库和范围的只读本机 IPC 服务
-    Daemon {
-        #[arg(long, required = true)]
-        scope: Vec<String>,
-        #[arg(long)]
-        endpoint: Option<PathBuf>,
-        #[arg(long, default_value_t = 5000)]
-        timeout_ms: u64,
-        #[arg(long, default_value_t = 16)]
-        max_connections: usize,
-        #[arg(long)]
-        semantic_config: Option<PathBuf>,
-    },
-    /// 只读响应 Claude Code 启动/恢复/压缩生命周期，不运行外部 Agent
-    AgentHook {
-        #[arg(long, required = true)]
-        scope: Vec<String>,
-        #[arg(long, default_value_t = 1500)]
-        budget_tokens: usize,
-    },
+    /// 离线重建文本快照与视图，不重新调用模型
+    Rebuild,
+    /// 根据 canonical Memory 重新生成人类视图
+    Views,
+    /// 检查 schema、摘要与证据完整性
+    Doctor,
     /// 抑制记录及其原始证据，防止检索与下一次 Dream 再次提炼
     Forget {
         id: String,
@@ -173,6 +117,25 @@ enum Command {
     /// 显式撤销一条抑制规则
     Restore { id: String },
 }
+
+#[derive(Subcommand)]
+enum IndexCommand {
+    /// 导出当前授权/抑制状态下的编码输入
+    Export {
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+    },
+    /// 用本机模型重建索引
+    Build {
+        #[arg(long, required = true)]
+        scope: Vec<String>,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// 显示索引覆盖与模型空间
+    Status,
+}
+
 #[derive(Subcommand)]
 enum DreamCommand {
     /// 导出明确选择的有界来源；不自动发送任何云端
@@ -201,6 +164,7 @@ enum DreamCommand {
     /// 恢复中断的本机多文件事务，冲突时停止
     Recover,
 }
+
 #[derive(Subcommand)]
 enum MemoryCommand {
     /// 从已审核的 JSON 添加一条记忆
@@ -225,6 +189,7 @@ enum MemoryCommand {
         state: State,
     },
 }
+
 #[derive(Clone, ValueEnum)]
 enum State {
     Active,
@@ -235,80 +200,71 @@ enum State {
 
 fn input_text(file: &str) -> Result<String> {
     let mut text = String::new();
-    if file == "-" {
-        std::io::stdin()
-            .take(16 * 1024 * 1024 + 1)
-            .read_to_string(&mut text)
-            .map_err(|e| e.to_string())?;
+    let mut source: Box<dyn Read> = if file == "-" {
+        Box::new(std::io::stdin().take(MAX_INPUT_BYTES as u64 + 1))
     } else {
-        std::fs::File::open(file)
-            .map_err(|e| e.to_string())?
-            .take(16 * 1024 * 1024 + 1)
-            .read_to_string(&mut text)
-            .map_err(|e| e.to_string())?;
-    }
-    if text.len() > 16 * 1024 * 1024 {
+        Box::new(
+            std::fs::File::open(file)
+                .map_err(|e| e.to_string())?
+                .take(MAX_INPUT_BYTES as u64 + 1),
+        )
+    };
+    source
+        .read_to_string(&mut text)
+        .map_err(|e| e.to_string())?;
+    if text.len() > MAX_INPUT_BYTES {
         return Err("输入不能超过 16 MiB".into());
     }
     Ok(text)
 }
+
+const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
+
 fn input<T: DeserializeOwned>(file: &str) -> Result<T> {
     serde_json::from_str(&input_text(file)?).map_err(|e| format!("输入 JSON 无效：{e}"))
 }
+
 fn value<T: serde::Serialize>(v: T) -> Result<Value> {
     serde_json::to_value(v).map_err(|e| e.to_string())
 }
+
+/// 接入片段只是文本输出；写入项目配置由用户或 Agent 自行完成。
+fn connect_snippet(vault: &Path, scopes: &[String], client: &str) -> Result<Value> {
+    let binary = std::env::current_exe().map_err(|e| e.to_string())?;
+    let args: Vec<String> = [
+        vec!["--vault".into(), vault.to_string_lossy().into_owned()],
+        scopes
+            .iter()
+            .flat_map(|scope| ["--scope".into(), scope.clone()])
+            .collect(),
+        vec!["mcp".into()],
+    ]
+    .concat();
+    let entry = json!({"command": binary, "args": args});
+    let config = match client {
+        "claude-code" => json!({"mcpServers": {"recallcard": entry}}),
+        "codex" => json!({"mcp_servers": {"recallcard": entry}}),
+        other => return Err(format!("未知客户端：{other}；支持 claude-code、codex")),
+    };
+    Ok(json!({
+        "client": client,
+        "config": config,
+        "scopes": scopes,
+        "tools": ["bootstrap", "search", "read", "sources", "knowledge_write"],
+        "note": "把 config 合并进客户端配置文件；范围与资料库路径已固定，Agent 不能扩大"
+    }))
+}
+
 fn run(cli: Cli) -> Result<Value> {
-    if matches!(cli.command, Command::Init) {
+    if let Command::Init = cli.command {
         let vault = Vault::init(&cli.vault)?;
-        return Ok(json!({"ok":true, "vault":vault.root(), "schema_version":1}));
+        return Ok(json!({"ok": true, "vault": vault.root(), "schema_version": 1}));
     }
     let vault = Vault::open(&cli.vault)?;
     match cli.command {
         Command::Init => unreachable!(),
         Command::Capture { file } => value(vault.capture(input::<EventInput>(&file)?)?),
-        Command::Import {
-            format,
-            file,
-            scope,
-        } => {
-            let parsed = if file == "-" {
-                let text = input_text(&file)?;
-                recallcard::import_bundle::parse_import_bytes(&format, text.as_bytes(), &scope)?
-            } else {
-                recallcard::import_bundle::read_import_file(
-                    std::path::Path::new(&file),
-                    &format,
-                    &scope,
-                )?
-            };
-            let before = vault.events()?.len();
-            let mut refs = Vec::new();
-            for event in parsed.events {
-                refs.push(format!("event:{}", vault.capture(event)?.id));
-            }
-            let after = vault.events()?.len();
-            Ok(
-                json!({"ok":true,"events_added":after.saturating_sub(before),"events_seen":refs.len(),"refs":refs,"coverage":parsed.coverage,
-                "note":"仅导入显式提供的文件；导入中断可安全重复运行，已写原始事件不回滚"}),
-            )
-        }
-        Command::NativeInstall {
-            capture_scope,
-            scope,
-            extension_id,
-            output_dir,
-            ipc_endpoint,
-        } => recallcard::native::prepare_install_from_binary(
-            &vault,
-            scope,
-            &extension_id,
-            &output_dir,
-            ipc_endpoint,
-            capture_scope,
-            &std::env::current_exe().map_err(|e| e.to_string())?,
-        ),
-        Command::NativeHost { .. } => Err("Native host 必须使用 framed stdio 模式".into()),
+        Command::Connect { scope, client } => connect_snippet(vault.root(), &scope, &client),
         Command::Dream { action } => match action {
             DreamCommand::Export {
                 source,
@@ -355,14 +311,14 @@ fn run(cli: Cli) -> Result<Value> {
             if kind == "view" {
                 return Context::new(&vault, Access::new(scope)?).read(ReadArgs {
                     refs: vec![id],
-                    budget_tokens: 32768,
+                    budget_bytes: 32768,
                 });
             }
             ensure_current_visible(&vault, record_id, revision)?;
             if !scope.is_empty() {
                 Context::new(&vault, Access::new(scope)?).read(ReadArgs {
                     refs: vec![id.clone()],
-                    budget_tokens: 32768,
+                    budget_bytes: 32768,
                 })?;
             }
             vault.read(record_id)
@@ -380,37 +336,41 @@ fn run(cli: Cli) -> Result<Value> {
                 value(vault.sources(record_id)?)
             }
         }
-        Command::EmbeddingExport { scope } => {
-            Context::new(&vault, Access::new(scope)?).embedding_corpus()
-        }
+        Command::Index { action } => match action {
+            IndexCommand::Export { scope } => {
+                Context::new(&vault, Access::new(scope)?).embedding_corpus()
+            }
+            IndexCommand::Build { scope, config } => {
+                recallcard::semantic::build_index(&vault, Access::new(scope)?, config.as_deref())
+            }
+            IndexCommand::Status => recallcard::semantic::index_status(&vault),
+        },
         Command::Rebuild => vault.rebuild(),
-        Command::Sync { remote } => vault.sync(&remote),
-        Command::Status => vault.git_status(),
-        Command::Views => Ok(json!({"ok":true,"memories":vault.rebuild_views()?})),
+        Command::Views => Ok(json!({"ok": true, "memories": vault.rebuild_views()?})),
         Command::Doctor => vault.doctor(),
         Command::Bootstrap {
             scope,
-            budget_tokens,
-        } => Context::new(&vault, Access::new(scope)?).bootstrap(BootstrapArgs { budget_tokens }),
+            budget_bytes,
+        } => Context::new(&vault, Access::new(scope)?).bootstrap(BootstrapArgs { budget_bytes }),
         Command::Search {
             query,
             scope,
             target,
             limit,
-            budget_tokens,
+            budget_bytes,
             session_ref,
             as_of,
             detail,
             cursor,
             semantic_config,
         } => {
-            let semantic = semantic_config
-                .as_ref()
-                .map(|path| recallcard::semantic::SemanticSearch::from_config_file(path))
+            let index = semantic_config
+                .as_deref()
+                .map(recallcard::semantic::SemanticIndex::open)
                 .transpose()?;
             let access = Access::new(scope)?;
-            let context = match semantic.as_ref() {
-                Some(semantic) => Context::with_semantic(&vault, access, semantic),
+            let context = match index.as_ref() {
+                Some(index) => Context::with_semantic(&vault, access, index),
                 None => Context::new(&vault, access),
             };
             context.search(SearchArgs {
@@ -420,127 +380,36 @@ fn run(cli: Cli) -> Result<Value> {
                 as_of,
                 limit,
                 detail,
-                budget_tokens,
+                budget_bytes,
                 cursor,
             })
         }
         Command::Mcp { .. } => Err("MCP 必须以 stdio 模式启动".into()),
-        Command::Daemon {
-            scope,
-            endpoint,
-            timeout_ms,
-            max_connections,
-            semantic_config,
-        } => {
-            let access = Access::new(scope)?;
-            let endpoint = match endpoint {
-                Some(endpoint) => endpoint,
-                None => recallcard::ipc::default_endpoint(&vault, &access)?,
-            };
-            let mut server = recallcard::ipc::Server::bind(
-                vault,
-                access,
-                endpoint.clone(),
-                recallcard::ipc::Options {
-                    request_timeout: std::time::Duration::from_millis(timeout_ms),
-                    max_connections,
-                },
-            )?;
-            if let Some(path) = semantic_config {
-                server = server.with_semantic(std::sync::Arc::new(
-                    recallcard::semantic::SemanticSearch::from_config_file(&path)?,
-                ));
-            }
-            eprintln!("RecallCard 本机只读服务：{}", endpoint.display());
-            server.run()?;
-            Ok(json!({"ok":true}))
-        }
-        Command::AgentHook {
-            scope,
-            budget_tokens,
-        } => recallcard::agent_hook::session_start(
-            &vault,
-            Access::new(scope)?,
-            budget_tokens,
-            std::io::stdin().lock(),
-        ),
         Command::Forget { id, reason } => value(vault.suppress(&id, reason)?),
         Command::Restore { id } => value(vault.restore(&id)?),
     }
 }
+
 fn main() {
-    if let Some(result) = recallcard::native::dispatch_launcher() {
-        if let Err(error) = result {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-        return;
-    }
     let cli = Cli::parse();
-    if let Command::NativeHost {
-        scope,
-        allowed_extension,
-        origin,
-        ipc_endpoint,
-        ..
-    } = &cli.command
-    {
-        let result = Vault::open(&cli.vault).and_then(|vault| {
-            let access = Access::new(scope.clone())?;
-            if let Some(endpoint) = ipc_endpoint {
-                let client = recallcard::ipc::Client::new(
-                    &vault,
-                    &access,
-                    endpoint.clone(),
-                    std::time::Duration::from_secs(5),
-                )?;
-                return recallcard::native::serve_native_service_io(
-                    |name, args| client.invoke(name, args),
-                    allowed_extension,
-                    origin,
-                    std::io::stdin().lock(),
-                    std::io::stdout().lock(),
-                );
-            }
-            recallcard::native::serve_native(&vault, access, allowed_extension, origin)
-        });
-        if let Err(error) = result {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-        return;
-    }
     if let Command::Mcp {
         scope,
-        ipc_endpoint,
         semantic_config,
     } = &cli.command
     {
         let result = Vault::open(&cli.vault).and_then(|vault| {
             let access = Access::new(scope.clone())?;
-            if let Some(endpoint) = ipc_endpoint {
-                let client = recallcard::ipc::Client::new(
-                    &vault,
-                    &access,
-                    endpoint.clone(),
-                    std::time::Duration::from_secs(5),
-                )?;
-                return recallcard::transport::serve_mcp_service_io(
-                    |name, args| client.invoke(name, args),
-                    std::io::stdin().lock(),
-                    std::io::stdout().lock(),
-                );
-            }
-            if let Some(path) = semantic_config {
-                let semantic = recallcard::semantic::SemanticSearch::from_config_file(path)?;
-                let context = Context::with_semantic(&vault, access, &semantic);
-                return recallcard::transport::serve_mcp_service_io(
-                    |name, args| recallcard::transport::invoke(&context, name, args),
-                    std::io::stdin().lock(),
-                    std::io::stdout().lock(),
-                );
-            }
-            recallcard::transport::serve_mcp(&vault, access)
+            let index = semantic_config
+                .as_deref()
+                .map(recallcard::semantic::SemanticIndex::open)
+                .transpose()?;
+            recallcard::transport::serve_mcp_io(
+                &vault,
+                access,
+                index.as_ref(),
+                std::io::stdin().lock(),
+                std::io::stdout().lock(),
+            )
         });
         if let Err(error) = result {
             eprintln!("{error}");

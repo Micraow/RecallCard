@@ -1,12 +1,12 @@
 //! 工作区的可读来源信息。只从当前授权投影补充显示字段，不扩大检索或读取权限。
-use super::{health_error, DesktopSession, RESPONSE_LIMIT};
+use super::{health_error, RESPONSE_LIMIT};
 use crate::{
     context::{truncate_utf8, Context, Document},
-    model::{Event, EventInput, Result},
+    model::{Event, Result},
     Vault,
 };
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub(super) struct WorkspaceRecords {
     documents: BTreeMap<String, Document>,
@@ -141,98 +141,5 @@ impl WorkspaceRecords {
         } else {
             response
         })
-    }
-
-    pub(super) fn imported_conversations(&self, references: &[String]) -> Vec<Value> {
-        let mut seen = BTreeSet::new();
-        let mut groups = BTreeMap::new();
-        for reference in references {
-            if !seen.insert(reference) {
-                continue;
-            }
-            let Some(event) = self.events.get(reference) else {
-                continue;
-            };
-            let key = event.data.session_key();
-            let group = groups.entry(key).or_insert((event, 0, event.captured_at));
-            group.1 += 1;
-            group.2 = group.2.max(event.captured_at);
-        }
-        groups
-            .into_iter()
-            .map(|(key, (event, count, captured_at))| {
-                json!({
-                    "session_ref":key,"title":conversation_title(event),
-                    "platform":truncate_utf8(&event.data.source.platform,80),
-                    "message_count":count,"captured_at":captured_at,"coverage":"partial"
-                })
-            })
-            .collect()
-    }
-
-    /// 冻结输入只能用于确认成员关系，标题与数量仍从当前可见正本读取。
-    /// 与 capture_batch 相同，自动补上的 revision_of 不改变导入版本身份。
-    pub(super) fn imported_input_conversations(&self, inputs: &[EventInput]) -> Result<Vec<Value>> {
-        fn version_key(input: &EventInput) -> Result<String> {
-            let mut normalized = input.clone();
-            normalized.revision_of = None;
-            normalized.id()
-        }
-        let versions = inputs
-            .iter()
-            .map(version_key)
-            .collect::<Result<BTreeSet<_>>>()?;
-        let mut references = Vec::new();
-        for (reference, event) in &self.events {
-            if versions.contains(&version_key(&event.data)?) {
-                references.push(reference.clone());
-            }
-        }
-        Ok(self.imported_conversations(&references))
-    }
-}
-
-impl DesktopSession {
-    /// 从当前可见的 Event 正本定位会话。UI 不应推导 session hash 或使用历史页序号。
-    pub fn event_location(&self, session_id: &str, scope: &str, reference: &str) -> Result<Value> {
-        super::read_args(reference)?;
-        if !reference.starts_with("event:") {
-            return Err("请选择一条原始消息进行定位".into());
-        }
-        let vault = self.vault(session_id)?;
-        let _guard = vault.read_guard().map_err(|_| health_error())?;
-        let context = self.context(session_id, scope)?;
-        let records = WorkspaceRecords::load(vault, &context)?;
-        let event = records
-            .events
-            .get(reference)
-            .ok_or("该消息不可访问、已变化或已被遗忘，请重新检索")?;
-        let key = event.data.session_key();
-        if key.len() > 4096 {
-            return Err("会话编号过长，无法定位，请从原始记录查看".into());
-        }
-        // 与 conversation_messages 使用相同的正本顺序；断开的片段也不能按 hash 重排。
-        let events = vault
-            .events()
-            .map_err(|_| health_error())?
-            .into_iter()
-            .filter(|event| {
-                event.data.session_key() == key
-                    && records.events.contains_key(&format!("event:{}", event.id))
-            })
-            .collect();
-        let branches = super::branches::ConversationBranches::new(events)?;
-        let index = branches
-            .order()
-            .iter()
-            .position(|index| branches.events[*index].id == event.id)
-            .ok_or("会话记录已经变化，请重新检索")?;
-        let mut location = event_fields(event);
-        location["ref"] = json!(reference);
-        location["message_index"] = json!(index);
-        // 直接以目标开页，不能以 index/20 猜页：长正文会提前耗尽单页预算。
-        location["offset"] = json!(index);
-        location["total"] = json!(branches.events.len());
-        Ok(location)
     }
 }

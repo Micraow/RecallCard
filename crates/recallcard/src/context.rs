@@ -1,5 +1,5 @@
 //! 四个只读能力。先授权/抑制过滤，再排序与预算，避免跨范围信息泄漏。
-use crate::{model::*, policy::Access, semantic::SemanticSearch, Vault};
+use crate::{model::*, policy::Access, semantic::SemanticIndex, Vault};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,7 +22,7 @@ pub struct SearchArgs {
     #[serde(default = "context_detail")]
     pub detail: String,
     #[serde(default = "default_budget")]
-    pub budget_tokens: usize,
+    pub budget_bytes: usize,
     #[serde(default)]
     pub cursor: Option<String>,
 }
@@ -43,18 +43,18 @@ fn default_budget() -> usize {
 pub struct ReadArgs {
     pub refs: Vec<String>,
     #[serde(default = "default_budget")]
-    pub budget_tokens: usize,
+    pub budget_bytes: usize,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapArgs {
     #[serde(default = "default_budget")]
-    pub budget_tokens: usize,
+    pub budget_bytes: usize,
 }
 impl Default for BootstrapArgs {
     fn default() -> Self {
         Self {
-            budget_tokens: default_budget(),
+            budget_bytes: default_budget(),
         }
     }
 }
@@ -123,7 +123,7 @@ impl Document {
 pub struct Context<'a> {
     vault: &'a Vault,
     access: Access,
-    semantic: Option<&'a SemanticSearch>,
+    semantic: Option<&'a SemanticIndex>,
 }
 impl<'a> Context<'a> {
     pub fn new(vault: &'a Vault, access: Access) -> Self {
@@ -134,7 +134,7 @@ impl<'a> Context<'a> {
         }
     }
     /// 只由可信启动代码注入；SearchArgs 不包含配置、路径或网络开关。
-    pub fn with_semantic(vault: &'a Vault, access: Access, semantic: &'a SemanticSearch) -> Self {
+    pub fn with_semantic(vault: &'a Vault, access: Access, semantic: &'a SemanticIndex) -> Self {
         Self {
             vault,
             access,
@@ -223,7 +223,7 @@ impl<'a> Context<'a> {
         bootstrap_projection(&self.documents()?, &self.access.scopes(), args, Utc::now())
     }
     pub fn search(&self, args: SearchArgs) -> Result<Value> {
-        check_budget(args.budget_tokens)?;
+        check_budget(args.budget_bytes)?;
         nonempty(&args.query, "查询")?;
         if args.query.len() > 4096 || args.limit == 0 || args.limit > 50 {
             return Err("query/limit 超过上限（4096 字节/1–50条）".into());
@@ -233,42 +233,38 @@ impl<'a> Context<'a> {
         {
             return Err("未知 target/detail".into());
         }
-        // worker 等待期间不持有 Vault 锁，遗忘/撤权写入可立即生效。
-        let candidate_result = if let Some(semantic) = self.semantic {
-            let snapshot = self.documents()?;
-            let now = Utc::now();
-            let selected = search_documents(&snapshot, &args, now);
-            Some(semantic.candidates(
-                &args.query,
-                &snapshot,
-                &selected,
-                &self.access.scopes(),
-                now,
-            ))
-        } else {
-            None
+        // 编码在锁外完成：本机推理约 2ms，云端可能数十毫秒，都不该阻塞写入。
+        // 编码失败只降级为词法检索，不让请求整体失败。
+        let query_vector = match self.semantic {
+            Some(index) => Some(index.query_vector(&args.query)),
+            None => None,
         };
-        // worker 返回后重读正本并重新计算有效时间；保持最终读取锁到响应构造结束。
         let _final_read_guard = self.vault.read_guard()?;
         let current = self.documents()?;
         let now = Utc::now();
         let docs = search_documents(&current, &args, now);
         let mut semantic_error = None;
-        let semantic_refs = match candidate_result {
-            Some(Ok(candidates)) => {
-                match candidates.revalidate(&current, &self.access.scopes(), now) {
-                    Ok(()) => Some(candidates.references),
+        let semantic_refs = match (self.semantic, query_vector) {
+            (Some(index), Some(vector)) => match vector {
+                Ok(vector) => match index.rank(
+                    &vector,
+                    &current,
+                    args.limit.max(10),
+                    &self.access.scopes(),
+                    now,
+                ) {
+                    Ok(references) => Some(references),
                     Err(error) => {
                         semantic_error = Some(error.0);
                         None
                     }
+                },
+                Err(error) => {
+                    semantic_error = Some(error.0);
+                    None
                 }
-            }
-            Some(Err(error)) => {
-                semantic_error = Some(error.0);
-                None
-            }
-            None => None,
+            },
+            _ => None,
         };
         let generation = hash(&serde_json::to_vec(&docs).map_err(|e| e.to_string())?);
         let tokens = tokenize(&args.query);
@@ -324,8 +320,8 @@ impl<'a> Context<'a> {
             item["score"] = json!(score);
             item["text"] = json!(truncate_utf8(&doc.text, text_limit));
             let mut len = serde_json::to_vec(&item).map_err(|e| e.to_string())?.len();
-            if used + len > args.budget_tokens {
-                let available = args.budget_tokens.saturating_sub(
+            if used + len > args.budget_bytes {
+                let available = args.budget_bytes.saturating_sub(
                     used + len.saturating_sub(item["text"].as_str().unwrap_or("").len()) + 32,
                 );
                 if available < 32 {
@@ -334,7 +330,7 @@ impl<'a> Context<'a> {
                 item["text"] = json!(truncate_utf8(&doc.text, available));
                 item["text_truncated"] = json!(true);
                 len = serde_json::to_vec(&item).map_err(|e| e.to_string())?.len();
-                if used + len > args.budget_tokens {
+                if used + len > args.budget_bytes {
                     break;
                 }
             }
@@ -348,12 +344,13 @@ impl<'a> Context<'a> {
         if let Some(references) = &semantic_refs {
             response["coverage"]["semantic_search"] = json!("available");
             response["coverage"]["semantic_candidates"] = json!(references.len());
-            response["coverage"]["semantic_coverage"] = json!("indexed_current_memories");
+            response["coverage"]["semantic_coverage"] =
+                json!("indexed_events_and_current_memories");
             response["coverage"]["ranking"] = json!("rrf");
         } else if let Some(error) = semantic_error {
             response["coverage"]["semantic_error"] = json!(error);
         }
-        while json_size(&response)? > args.budget_tokens {
+        while json_size(&response)? > args.budget_bytes {
             let count = response["results"].as_array().unwrap().len();
             if count == 0 {
                 return Err("预算不足以容纳搜索状态".into());
@@ -412,7 +409,7 @@ impl<'a> Context<'a> {
     }
     fn read_internal(&self, args: ReadArgs, sources: bool) -> Result<Value> {
         let _read_guard = self.vault.read_guard()?;
-        check_budget(args.budget_tokens)?;
+        check_budget(args.budget_bytes)?;
         if args.refs.is_empty() || args.refs.len() > 32 {
             return Err("refs 必须包含 1–32 个引用".into());
         }
@@ -426,12 +423,12 @@ impl<'a> Context<'a> {
             let value = if kind == "view" {
                 if id == "profile" {
                     let mut value = self.bootstrap(BootstrapArgs {
-                        budget_tokens: args.budget_tokens,
+                        budget_bytes: args.budget_bytes,
                     })?;
                     value["ref"] = json!(reference);
                     value
                 } else {
-                    self.label_view(id, now, args.budget_tokens.saturating_sub(used))?
+                    self.label_view(id, now, args.budget_bytes.saturating_sub(used))?
                 }
             } else if kind == "event" {
                 let event = self.vault.event(id)?;
@@ -461,7 +458,7 @@ impl<'a> Context<'a> {
                 }
             };
             let len = serde_json::to_vec(&value).map_err(|e| e.to_string())?.len();
-            if used + len > args.budget_tokens {
+            if used + len > args.budget_bytes {
                 pending.push(reference.clone());
                 continue;
             }
@@ -470,7 +467,7 @@ impl<'a> Context<'a> {
         }
         let nested_truncated = results.iter().any(|item| item["truncated"] == true);
         let mut response = json!({"results":results,"truncated":!pending.is_empty()||nested_truncated,"pending_refs":pending,"hint":"预算不足时分批 read 或使用 search 获取片段"});
-        while json_size(&response)? > args.budget_tokens {
+        while json_size(&response)? > args.budget_bytes {
             response["truncated"] = json!(true);
             if !response["results"].as_array().unwrap().is_empty() {
                 let removed = response["results"].as_array_mut().unwrap().pop().unwrap();
@@ -496,7 +493,7 @@ pub(crate) fn bootstrap_projection(
     args: BootstrapArgs,
     now: DateTime<Utc>,
 ) -> Result<Value> {
-    check_budget(args.budget_tokens)?;
+    check_budget(args.budget_bytes)?;
     let mut text = format!("{}\n\n个人参考资料（仅用户选定的受保护记忆）：\n", RULES);
     let mut labels = BTreeSet::new();
     let mut reference_ends = Vec::new();
@@ -534,7 +531,7 @@ pub(crate) fn bootstrap_projection(
             .map_or(limit, |(start, _, _)| *start);
         truncate_utf8(&text, boundary)
     };
-    let mut stable_text = clip(args.budget_tokens.saturating_sub(180));
+    let mut stable_text = clip(args.budget_bytes.saturating_sub(180));
     // 覆盖量只作为动态元数据。为其最大十进制宽度预留空间，普通捕获不改变稳定文本/版本。
     let mut response;
     loop {
@@ -544,7 +541,7 @@ pub(crate) fn bootstrap_projection(
             .map(|(_, _, reference)| reference)
             .collect();
         response = json!({"bootstrap_version":hash(stable_text.as_bytes()),"stable_text":stable_text,"reference_data":true,"refs":refs,"coverage":{"captured_events":u64::MAX,"semantic_search":"unavailable","scope_filtered":true},"truncated":stable_text.len()!=text.len(),"budget_unit":"conservative_utf8_bytes"});
-        if json_size(&response)? <= args.budget_tokens {
+        if json_size(&response)? <= args.budget_bytes {
             break;
         }
         if stable_text.len() < 16 {
@@ -752,7 +749,7 @@ pub fn truncate_utf8(s: &str, max: usize) -> String {
 }
 fn check_budget(n: usize) -> Result<()> {
     if !(512..=32768).contains(&n) {
-        Err("budget_tokens 必须在 512–32768 之间；使用保守字节上界".into())
+        Err("budget_bytes 必须在 512–32768 之间；使用保守字节上界".into())
     } else {
         Ok(())
     }
@@ -768,7 +765,7 @@ impl<'a> Context<'a> {
     pub fn embedding_corpus(&self) -> Result<Value> {
         let now = Utc::now();
         let documents =
-            crate::semantic::corpus_documents(&self.documents()?, &self.access.scopes(), now);
+            crate::semantic::corpus_documents(&self.documents()?, &self.access.scopes(), now, "");
         let generation = hash(&serde_json::to_vec(&documents).map_err(|e| e.to_string())?);
         Ok(
             json!({"schema":"recallcard.embedding-corpus/1","generation":generation,"scope":self.access.scopes(),"documents":documents}),

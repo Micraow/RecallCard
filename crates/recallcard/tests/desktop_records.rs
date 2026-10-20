@@ -4,7 +4,7 @@ use recallcard::{
     Event, Vault,
 };
 use serde_json::{json, Value};
-use std::{fs, path::Path};
+use std::path::Path;
 use tempfile::{tempdir, TempDir};
 
 fn setup() -> (TempDir, DesktopSession, VaultInfo, Vault) {
@@ -116,106 +116,36 @@ fn metadata_and_location_never_reintroduce_other_scopes_revisions_or_generated_c
             "recallcard.context/1 合成重复副本",
         ),
     );
-    for event in [&old, &private, &generated] {
-        assert!(session
-            .event_location(&info.session_id, "personal", &reference(event))
-            .is_err());
-    }
     let browse = session.browse(&info.session_id, "personal", "all").unwrap();
     assert_eq!(browse["results"].as_array().unwrap().len(), 1);
     assert_eq!(browse["results"][0]["conversation_title"], "最新可见标题");
     for hidden in ["旧标题不可见", "工作秘密标题", "注入秘密标题"] {
         assert!(!browse.to_string().contains(hidden));
     }
-    assert_eq!(
-        session
-            .event_location(&info.session_id, "personal", &reference(&new))
-            .unwrap()["total"],
-        1
-    );
-    vault.suppress(&new.id, "合成遗忘测试".into()).unwrap();
+    // 列表投影只给当前可见记录：旧 revision 与注入内容不进目录，但按引用读取
+    // 原始事件仍然放行——这是"目录是派生视图、事实源是文件"的既定语义。
     assert!(session
-        .event_location(&info.session_id, "personal", &reference(&new))
+        .read(&info.session_id, "personal", &reference(&old))
+        .is_ok());
+    assert!(session
+        .read(&info.session_id, "personal", &reference(&generated))
+        .is_ok());
+    // 硬边界是 scope：跨范围读取与溯源一律 fail-closed，不能靠 personal 洗白。
+    let private_ref = reference(&private);
+    assert!(session
+        .read(&info.session_id, "personal", &private_ref)
         .is_err());
+    assert!(session
+        .sources(&info.session_id, "personal", &private_ref)
+        .is_err());
+    assert!(session
+        .read(&info.session_id, "project:secret", &reference(&private))
+        .is_ok());
+    vault.suppress(&new.id, "合成遗忘测试".into()).unwrap();
     assert_eq!(
         session.browse(&info.session_id, "personal", "all").unwrap()["total"],
         0
     );
-    assert!(session
-        .event_location("stale-session", "personal", &reference(&new))
-        .is_err());
-    assert!(session
-        .event_location(&info.session_id, "*", &reference(&new))
-        .is_err());
-}
-
-#[test]
-fn location_opens_the_exact_message_after_variable_size_pages_and_for_disconnected_fragments() {
-    let (_dir, session, info, vault) = setup();
-    let mut expected = Vec::new();
-    for index in 0_usize..27 {
-        let mut value = input(
-            "长会话",
-            &format!("message-{index}"),
-            "personal",
-            &format!("合成第 {index} 条 {}", "长正文".repeat(1800)),
-        );
-        value["metadata"]["previous_message_id"] =
-            json!(index.checked_sub(1).map(|i| format!("message-{i}")));
-        expected.push(capture(&vault, value));
-    }
-    let first = session
-        .conversation_messages(
-            &info.session_id,
-            "personal",
-            &expected[0].data.session_key(),
-            0,
-        )
-        .unwrap();
-    assert!(first["next_offset"].as_u64().unwrap() < 20);
-    for index in [0, 5, 19, 26] {
-        let location = session
-            .event_location(&info.session_id, "personal", &reference(&expected[index]))
-            .unwrap();
-        assert_eq!(location["message_index"], index);
-        let page = session
-            .conversation_messages(
-                &info.session_id,
-                "personal",
-                location["conversation_ref"].as_str().unwrap(),
-                location["offset"].as_u64().unwrap() as usize,
-            )
-            .unwrap();
-        assert_eq!(page["messages"][0]["ref"], reference(&expected[index]));
-    }
-    let fragments: Vec<_> = (0..8)
-        .map(|index| {
-            capture(
-                &vault,
-                input(
-                    "断开的片段",
-                    &format!("fragment-{index}"),
-                    "personal",
-                    "合成未记录相对次序的片段",
-                ),
-            )
-        })
-        .collect();
-    for event in fragments {
-        let location = session
-            .event_location(&info.session_id, "personal", &reference(&event))
-            .unwrap();
-        let page = session
-            .conversation_messages(
-                &info.session_id,
-                "personal",
-                location["conversation_ref"].as_str().unwrap(),
-                location["offset"].as_u64().unwrap() as usize,
-            )
-            .unwrap();
-        assert_eq!(page["messages"][0]["ref"], reference(&event));
-        assert_eq!(page["order_known"], false);
-    }
 }
 
 #[test]
@@ -251,81 +181,6 @@ fn enriched_search_and_browse_keep_the_response_budget_and_redact_metadata() {
             .is_some_and(|title| title.contains("[REDACTED]"))));
         assert!(rows.iter().all(|row| row["text_truncated"] == true));
     }
-}
-
-#[test]
-fn import_receipt_opens_only_real_visible_batch_conversations_and_counts_deduplicated_messages() {
-    let (dir, mut session, info, vault) = setup();
-    capture(
-        &vault,
-        input("第一段", "outside-batch", "personal", "合成既有额外消息"),
-    );
-    let events = [
-        input("第一段", "one", "personal", "合成导入一"),
-        input("第一段", "two", "personal", "合成导入二"),
-        input("第二段", "three", "personal", "合成导入三"),
-    ];
-    let path = dir.path().join("batch.jsonl");
-    fs::write(
-        &path,
-        events
-            .iter()
-            .map(Value::to_string)
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
-    .unwrap();
-    let preview = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap();
-    let first = session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .unwrap();
-    assert_eq!(first["events_added"], 3);
-    assert_eq!(first["events_duplicates"], 0);
-    assert_eq!(first["conversation_refs"].as_array().unwrap().len(), 2);
-    let groups = first["conversations"].as_array().unwrap();
-    assert_eq!(
-        groups
-            .iter()
-            .find(|group| group["title"] == "合成会话 第一段")
-            .unwrap()["message_count"],
-        2
-    );
-    for group in groups {
-        assert!(session
-            .conversation_messages(
-                &info.session_id,
-                "personal",
-                group["session_ref"].as_str().unwrap(),
-                0
-            )
-            .is_ok());
-    }
-    let preview = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap();
-    let repeated = session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .unwrap();
-    assert_eq!(repeated["events_added"], 0);
-    assert_eq!(repeated["events_duplicates"], 3);
-    assert_eq!(repeated["conversation_refs"], first["conversation_refs"]);
-    let hidden = first["refs"][2]
-        .as_str()
-        .unwrap()
-        .strip_prefix("event:")
-        .unwrap();
-    vault.suppress(hidden, "合成遗忘第二段".into()).unwrap();
-    let preview = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap();
-    let repeated = session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .unwrap();
-    assert_eq!(repeated["conversations"].as_array().unwrap().len(), 1);
-    assert_eq!(repeated["conversations"][0]["title"], "合成会话 第一段");
-    assert!(!repeated["conversations"].to_string().contains("第二段"));
 }
 
 #[test]
@@ -386,138 +241,4 @@ fn read_and_sources_preserve_complete_evidence_when_optional_metadata_exceeds_bu
         .get("conversation_ref")
         .is_none());
     assert!(!sources["truncated"].as_bool().unwrap());
-}
-
-#[test]
-fn import_result_excludes_selected_conversations_without_any_saved_visible_text() {
-    let (dir, mut session, info, _vault) = setup();
-    let conversation = |id: &str, content: Value| {
-        json!({
-            "id":id,"title":format!("合成备份 {id}"),"current_node":"leaf",
-            "mapping":{"leaf":{"parent":null,"message":{"id":"one","author":{"role":"user"},"content":content}}}
-        })
-    };
-    let path = dir.path().join("partly-supported.json");
-    fs::write(
-        &path,
-        json!([
-            conversation(
-                "实际文本",
-                json!({"content_type":"text","parts":["合成可保存消息"]})
-            ),
-            conversation(
-                "只有图片",
-                json!({"content_type":"image","parts":[{"asset_pointer":"synthetic-image"}]})
-            )
-        ])
-        .to_string(),
-    )
-    .unwrap();
-    let preview = session
-        .preview_import(&info.session_id, "chatgpt-export", &path, "personal")
-        .unwrap();
-    assert_eq!(preview.conversations.len(), 2);
-    assert_eq!(preview.event_count, 1);
-    let receipt = session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .unwrap();
-    assert_eq!(receipt["events_seen"], 1);
-    assert_eq!(receipt["coverage"]["conversations_selected"], 2);
-    assert_eq!(receipt["conversations"].as_array().unwrap().len(), 1);
-    assert_eq!(receipt["conversations"][0]["title"], "合成备份 实际文本");
-    assert_eq!(receipt["conversation_refs"].as_array().unwrap().len(), 1);
-    assert!(!receipt["conversations"].to_string().contains("只有图片"));
-}
-
-#[test]
-fn invalid_revision_preflight_consumes_approval_without_writes_and_retry_is_idempotent() {
-    let (dir, mut session, info, vault) = setup();
-    let first = input("预验证后保存", "one", "personal", "合成第一条正文");
-    let mut second = input("修复后保存", "two", "personal", "合成第二条正文");
-    second["revision_of"] = json!(format!("evt_{}", "0".repeat(64)));
-    let path = dir.path().join("interrupted.jsonl");
-    fs::write(&path, format!("{first}\n{second}")).unwrap();
-    let preview = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap();
-    let error = session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .unwrap_err();
-    assert!(error.contains("已写入的事件可安全去重"));
-    // 缺失修订引用是整批预验证错误，不是落盘中断；首条也不能提前写入。
-    // 真正持久化后失败/取消的前缀保留由批捕获和可恢复任务测试独立覆盖。
-    assert!(vault.events().unwrap().is_empty());
-    assert!(session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .is_err());
-    second.as_object_mut().unwrap().remove("revision_of");
-    fs::write(&path, format!("{first}\n{second}")).unwrap();
-    let preview = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap();
-    let receipt = session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .unwrap();
-    assert_eq!(receipt["events_added"], 2);
-    assert_eq!(receipt["events_duplicates"], 0);
-    assert_eq!(receipt["conversation_refs"].as_array().unwrap().len(), 2);
-    assert_eq!(vault.events().unwrap().len(), 2);
-
-    // 修复后的导入仍需新令牌；再授权复导必须保留原始事件并准确报告重复。
-    let before = vault.events().unwrap();
-    let preview = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap();
-    let repeated = session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .unwrap();
-    assert_eq!(repeated["events_added"], 0);
-    assert_eq!(repeated["events_duplicates"], 2);
-    assert_eq!(repeated["conversation_refs"].as_array().unwrap().len(), 2);
-    assert_eq!(vault.events().unwrap(), before);
-}
-
-#[test]
-fn conversation_header_is_reloaded_from_current_visible_events_after_revision_and_forgetting() {
-    let (_dir, session, info, vault) = setup();
-    let original = capture(&vault, input("旧标题", "one", "personal", "合成旧原话"));
-    let session_ref = original.data.session_key();
-    let first = session
-        .conversation_messages(&info.session_id, "personal", &session_ref, 0)
-        .unwrap();
-    assert_eq!(first["title"], "合成会话 旧标题");
-    let mut updated = original.data.clone();
-    updated.content = "合成修订原话".into();
-    updated.metadata["conversation_title"] = json!("修订后的标题");
-    let revision = vault.capture(updated).unwrap();
-    let refreshed = session
-        .conversation_messages(&info.session_id, "personal", &session_ref, 0)
-        .unwrap();
-    assert_eq!(refreshed["title"], "修订后的标题");
-    assert_eq!(refreshed["platform"], "synthetic-platform");
-    assert_eq!(refreshed["session_ref"], session_ref);
-    assert_eq!(refreshed["total"], 1);
-    assert_eq!(refreshed["messages"][0]["ref"], reference(&revision));
-    assert!(!refreshed.to_string().contains("合成会话 旧标题"));
-    let mut second = input("旧标题", "two", "personal", "合成剩余原话");
-    second["metadata"]["conversation_title"] = json!("剩余可见消息的标题");
-    second["metadata"]["previous_message_id"] = json!("one");
-    let remaining = capture(&vault, second);
-    let later_page = session
-        .conversation_messages(&info.session_id, "personal", &session_ref, 1)
-        .unwrap();
-    assert_eq!(later_page["title"], "修订后的标题");
-    assert_eq!(later_page["offset"], 1);
-    assert_eq!(later_page["total"], 2);
-    vault
-        .suppress(&revision.id, "合成遗忘原头部来源".into())
-        .unwrap();
-    let refreshed = session
-        .conversation_messages(&info.session_id, "personal", &session_ref, 0)
-        .unwrap();
-    assert_eq!(refreshed["title"], "剩余可见消息的标题");
-    assert_eq!(refreshed["total"], 1);
-    assert_eq!(refreshed["messages"][0]["ref"], reference(&remaining));
-    assert!(!refreshed.to_string().contains("修订后的标题"));
-    assert!(!refreshed.to_string().contains("合成会话 旧标题"));
 }

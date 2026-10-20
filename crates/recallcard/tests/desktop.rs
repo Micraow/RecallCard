@@ -231,100 +231,10 @@ fn pasted_note_vault_switch_revokes_preview_for_both_sessions() {
 }
 
 #[test]
-fn import_preview_is_read_only_redacted_and_confirmed_exactly_once() {
-    let (dir, mut session, info) = session();
-    assert_eq!(info.scopes, vec!["personal"]);
-    assert_eq!(info.health["ok"], true);
-    let vault = Vault::open(Path::new(&info.root)).unwrap();
-    let path = dir.path().join("合成导入.jsonl");
-    let input = event_input(
-        "preview",
-        "合成偏好：中文。password=synthetic-not-a-real-secret",
-        "personal",
-    );
-    fs::write(&path, input.to_string()).unwrap();
-    let preview = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap();
-    assert_eq!(preview.event_count, 1);
-    assert_eq!(preview.redacted_event_count, 1);
-    assert!(preview.samples[0].content.contains("[REDACTED]"));
-    assert!(!serde_json::to_string(&preview)
-        .unwrap()
-        .contains("synthetic-not-a-real-secret"));
-    assert!(vault.events().unwrap().is_empty());
-    assert!(vault.memories().unwrap().is_empty());
-    let result = session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .unwrap();
-    assert_eq!(result["events_added"], 1);
-    assert!(session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .is_err());
-    let reference = result["refs"][0].as_str().unwrap();
-    let record = session
-        .read(&info.session_id, "personal", reference)
-        .unwrap();
-    assert!(record["results"][0]["record"]["content"]
-        .as_str()
-        .unwrap()
-        .contains("[REDACTED]"));
-    let again = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap();
-    assert_eq!(
-        session
-            .confirm_import(&info.session_id, &again.preview_id)
-            .unwrap()["events_added"],
-        0
-    );
-    assert_eq!(session.status(&info.session_id).unwrap().event_count, 1);
-}
-
-#[test]
-fn import_file_edits_and_replacements_invalidate_approval() {
-    let (dir, mut session, info) = session();
-    let path = dir.path().join("import.jsonl");
-    let bytes = event_input("hash", "预览时的原文", "personal").to_string();
-    fs::write(&path, &bytes).unwrap();
-    let preview = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap();
-    fs::write(
-        &path,
-        event_input("hash", "确认前被换掉的内容", "personal").to_string(),
-    )
-    .unwrap();
-    assert!(session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .unwrap_err()
-        .contains("文件已改变"));
-    assert_eq!(session.status(&info.session_id).unwrap().event_count, 0);
-
-    fs::write(&path, &bytes).unwrap();
-    let preview = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap();
-    // 即使新文件字节相同，也必须重新选择；不能把旧批准转移到替代文件。
-    fs::rename(&path, dir.path().join("original.jsonl")).unwrap();
-    fs::write(&path, &bytes).unwrap();
-    assert!(session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .is_err());
-    assert_eq!(session.status(&info.session_id).unwrap().event_count, 0);
-}
-
-#[test]
 fn selecting_or_failing_to_select_another_vault_revokes_old_commands() {
     let (dir, mut session, first) = session();
-    let path = dir.path().join("import.jsonl");
-    fs::write(
-        &path,
-        event_input("switch", "合成原文", "personal").to_string(),
-    )
-    .unwrap();
     let preview = session
-        .preview_import(&first.session_id, "manual-jsonl", &path, "personal")
+        .preview_note(&first.session_id, "personal", "属于第一个资料库的合成笔记")
         .unwrap();
     let second = session
         .select_vault(&dir.path().join("second"), true)
@@ -332,12 +242,13 @@ fn selecting_or_failing_to_select_another_vault_revokes_old_commands() {
     assert_ne!(first.session_id, second.session_id);
     assert!(session.status(&first.session_id).is_err());
     assert!(session
-        .confirm_import(&first.session_id, &preview.preview_id)
+        .confirm_note(&first.session_id, &preview.preview_id)
         .is_err());
     assert!(session
-        .confirm_import(&second.session_id, &preview.preview_id)
+        .confirm_note(&second.session_id, &preview.preview_id)
         .is_err());
     assert_eq!(session.status(&second.session_id).unwrap().event_count, 0);
+    // 选择不存在的资料库失败，并连带废弃当前会话
     assert!(session
         .select_vault(&dir.path().join("does-not-exist"), false)
         .is_err());
@@ -393,103 +304,21 @@ fn every_read_and_source_path_filters_scope_and_suppression() {
 }
 
 #[test]
-fn invalid_import_never_echoes_private_parser_data_or_writes() {
-    let (dir, mut session, info) = session();
-    let path = dir.path().join("invalid.jsonl");
-    let mut invalid = event_input("invalid", "合法内容", "personal");
-    invalid["synthetic-private-secret"] = json!("synthetic-secret-value");
-    fs::write(&path, invalid.to_string()).unwrap();
-    let error = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap_err();
-    assert!(!error.contains("synthetic"));
-    assert!(!error.contains(&dir.path().display().to_string()));
-    fs::write(
-        &path,
-        event_input("scope", "原文", "project:other").to_string(),
-    )
-    .unwrap();
-    assert!(session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .is_err());
-    assert_eq!(session.status(&info.session_id).unwrap().event_count, 0);
-}
-
-#[test]
-fn import_read_is_bounded_and_all_adapters_use_preview() {
-    let (dir, mut session, info) = session();
-    let path = dir.path().join("large.jsonl");
-    fs::File::create(&path)
-        .unwrap()
-        .set_len(16 * 1024 * 1024 + 1)
-        .unwrap();
-    assert!(session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap_err()
-        .contains("16 MiB"));
-    assert!(session
-        .preview_import(&info.session_id, "manual-jsonl", dir.path(), "personal")
-        .is_err());
-    fs::write(
-        &path,
-        json!({
-            "type":"user", "uuid":"adapter-user", "sessionId":"adapter-session",
-            "message":{"content":"合成 Claude Code 内容"}
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let claude = session
-        .preview_import(&info.session_id, "claude-code", &path, "personal")
-        .unwrap();
-    assert_eq!(claude.event_count, 1);
-    session
-        .confirm_import(&info.session_id, &claude.preview_id)
-        .unwrap();
-    fs::write(
-        &path,
-        json!([{
-            "id":"adapter-chatgpt", "current_node":"node", "mapping":{
-                "node":{"parent":null,"message":{
-                    "id":"chatgpt-user", "author":{"role":"user"},
-                    "content":{"content_type":"text","parts":["合成 ChatGPT 内容"]}
-                }}
-            }
-        }])
-        .to_string(),
-    )
-    .unwrap();
-    let chatgpt = session
-        .preview_import(&info.session_id, "chatgpt-export", &path, "personal")
-        .unwrap();
-    assert_eq!(chatgpt.event_count, 1);
-    session
-        .confirm_import(&info.session_id, &chatgpt.preview_id)
-        .unwrap();
-    assert_eq!(session.status(&info.session_id).unwrap().event_count, 2);
-}
-
-#[test]
 fn cancelling_or_replacing_a_preview_revokes_its_confirmation() {
-    let (dir, mut session, info) = session();
-    let path = dir.path().join("preview.jsonl");
-    fs::write(
-        &path,
-        event_input("preview", "合成原文", "personal").to_string(),
-    )
-    .unwrap();
+    let (_dir, mut session, info) = session();
     let first = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
+        .preview_note(&info.session_id, "personal", "第一版合成笔记")
         .unwrap();
     let second = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
+        .preview_note(&info.session_id, "personal", "替换后的合成笔记")
         .unwrap();
+    // 新预览作废旧令牌
     assert!(session
-        .confirm_import(&info.session_id, &first.preview_id)
+        .confirm_note(&info.session_id, &first.preview_id)
         .is_err());
     session.cancel_previews(&info.session_id).unwrap();
     assert!(session
-        .confirm_import(&info.session_id, &second.preview_id)
+        .confirm_note(&info.session_id, &second.preview_id)
         .is_err());
     assert_eq!(session.status(&info.session_id).unwrap().event_count, 0);
 }
@@ -663,155 +492,4 @@ fn dream_scope_conflict_and_vault_switch_are_fail_closed() {
         .apply_dream(&second.session_id, &preview.preview_id, true)
         .is_err());
     assert!(vault.memories().unwrap().is_empty());
-}
-
-#[cfg(unix)]
-#[test]
-fn selected_import_file_cannot_be_a_symlink_or_turn_into_one() {
-    use std::os::unix::fs::symlink;
-    let (dir, mut session, info) = session();
-    let target = dir.path().join("target.jsonl");
-    let link = dir.path().join("link.jsonl");
-    fs::write(
-        &target,
-        event_input("link", "合成内容", "personal").to_string(),
-    )
-    .unwrap();
-    symlink(&target, &link).unwrap();
-    assert!(session
-        .preview_import(&info.session_id, "manual-jsonl", &link, "personal")
-        .is_err());
-    let parent_link = dir.path().join("arbitrary-parent-link");
-    symlink(dir.path(), &parent_link).unwrap();
-    assert!(session
-        .preview_import(
-            &info.session_id,
-            "manual-jsonl",
-            &parent_link.join("target.jsonl"),
-            "personal",
-        )
-        .is_err());
-    let preview = session
-        .preview_import(&info.session_id, "manual-jsonl", &target, "personal")
-        .unwrap();
-    let moved = dir.path().join("moved.jsonl");
-    fs::rename(&target, &moved).unwrap();
-    symlink(&moved, &target).unwrap();
-    assert!(session
-        .confirm_import(&info.session_id, &preview.preview_id)
-        .is_err());
-    assert_eq!(session.status(&info.session_id).unwrap().event_count, 0);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_system_tmp_alias_allows_native_file_selection() {
-    let directory = tempfile::Builder::new()
-        .prefix("recallcard-desktop-system-alias-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let mut session = DesktopSession::default();
-    let info = session
-        .select_vault(&directory.path().join("vault"), true)
-        .unwrap();
-    let path = directory.path().join("selected.jsonl");
-    assert!(path.starts_with("/tmp"));
-    fs::write(
-        &path,
-        event_input("macos-native-alias", "合成系统目录内容", "personal").to_string(),
-    )
-    .unwrap();
-    let preview = session
-        .preview_import(&info.session_id, "manual-jsonl", &path, "personal")
-        .unwrap();
-    assert_eq!(preview.event_count, 1);
-    assert_eq!(
-        session
-            .confirm_import(&info.session_id, &preview.preview_id)
-            .unwrap()["events_added"],
-        1
-    );
-}
-
-#[test]
-fn conversation_import_guides_roles_and_cross_ai_continuation_without_dream() {
-    let (dir, mut service, info) = session();
-    let input = json!({"schema":"recallcard.conversation/1","capture_id":"capture-desktop-test","captured_at":"2026-10-07T00:00:00Z","title":"选型对话","source":{"platform":"deepseek","conversation_id":"demo","url":"https://chat.deepseek.com/a/chat/s/demo"},"coverage":{"extent":"visible_only","complete":false,"reason":"visible_only","warnings":[]},"messages":[{"id":"a","role":"user","text":"决定使用 Rust。","occurred_at":null},{"id":"b","role":"assistant","text":"建议增加 Python，等待确认。","occurred_at":null}]});
-    let file = dir.path().join("DeepSeek会话.json");
-    fs::write(&file, input.to_string()).unwrap();
-    let p = service
-        .preview_import(&info.session_id, "auto", &file, "personal")
-        .unwrap();
-    assert_eq!(p.format, "recallcard-conversation");
-    assert_eq!(p.samples[1].role, recallcard::Role::Assistant);
-    service
-        .confirm_import(&info.session_id, &p.preview_id)
-        .unwrap();
-    let list = service.conversations(&info.session_id, "personal").unwrap();
-    let item = &list["conversations"][0];
-    assert_eq!(item["title"], "选型对话");
-    assert_eq!(item["message_count"], 2);
-    let conversation = item["session_ref"].as_str().unwrap();
-    let messages = service
-        .conversation_messages(&info.session_id, "personal", conversation, 0)
-        .unwrap();
-    assert_eq!(messages["messages"][1]["role"], "assistant");
-    assert!(messages["messages"][0]["occurred_at"].is_null());
-    let handoff = service
-        .continuation(
-            &info.session_id,
-            "personal",
-            conversation,
-            "继续实现已经决定的部分",
-        )
-        .unwrap();
-    let text = handoff["text"].as_str().unwrap();
-    assert!(text.contains("recallcard.context/1"));
-    assert!(text.contains("决定使用 Rust"));
-    assert!(text.contains("建议增加 Python"));
-    assert!(text.contains("原始时间未知"));
-    assert_eq!(handoff["message_count"], 2);
-    let vault = Vault::open(Path::new(&info.root)).unwrap();
-    assert!(vault.memories().unwrap().is_empty());
-    assert!(service
-        .continuation(&info.session_id, "work", conversation, "")
-        .is_err());
-    vault
-        .suppress(&vault.events().unwrap()[0].id, "撤回测试".into())
-        .unwrap();
-    let now = service
-        .continuation(&info.session_id, "personal", conversation, "")
-        .unwrap();
-    assert!(!now["text"].as_str().unwrap().contains("决定使用 Rust"));
-}
-
-#[test]
-fn conversation_pages_are_bounded_and_vault_switch_rejects_old_handoff() {
-    let (dir, mut service, info) = session();
-    let vault = Vault::open(Path::new(&info.root)).unwrap();
-    for i in 0..22 {
-        capture(&vault, &format!("page-{i}"), "personal");
-    }
-    let list = service.conversations(&info.session_id, "personal").unwrap();
-    let reference = list["conversations"][0]["session_ref"].as_str().unwrap();
-    let first = service
-        .conversation_messages(&info.session_id, "personal", reference, 0)
-        .unwrap();
-    assert!(first["next_offset"].as_u64().is_some());
-    assert!(first.to_string().len() < 32768);
-    let next = service
-        .conversation_messages(
-            &info.session_id,
-            "personal",
-            reference,
-            first["next_offset"].as_u64().unwrap() as usize,
-        )
-        .unwrap();
-    assert!(next["next_offset"].is_null());
-    service
-        .select_vault(&dir.path().join("另一个资料库"), true)
-        .unwrap();
-    assert!(service
-        .continuation(&info.session_id, "personal", reference, "")
-        .is_err());
 }

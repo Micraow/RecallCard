@@ -60,7 +60,7 @@ fn memory_forget_propagates_to_revision_search_read_bootstrap_embedding_and_drea
     let c = context(&v);
     let result = c
         .search(
-            serde_json::from_value::<SearchArgs>(json!({"query":"合成","budget_tokens":12000}))
+            serde_json::from_value::<SearchArgs>(json!({"query":"合成","budget_bytes":12000}))
                 .unwrap(),
         )
         .unwrap();
@@ -72,13 +72,13 @@ fn memory_forget_propagates_to_revision_search_read_bootstrap_embedding_and_drea
         assert!(c
             .read(ReadArgs {
                 refs: vec![reference],
-                budget_tokens: 12000
+                budget_bytes: 12000
             })
             .is_err());
     }
     assert!(!c
         .bootstrap(BootstrapArgs {
-            budget_tokens: 12000
+            budget_bytes: 12000
         })
         .unwrap()
         .to_string()

@@ -182,7 +182,7 @@ struct Handoff<'a> {
     scope: &'a str,
     goal: &'a str,
     refs: &'a [String],
-    budget_tokens: usize,
+    budget_bytes: usize,
 }
 
 impl Handoff<'_> {
@@ -226,7 +226,7 @@ impl Handoff<'_> {
             "text":text,"stable_prefix":self.stable_prefix,"background":self.background,
             "records":records,"selected_refs":self.refs,"selected_count":self.refs.len(),"included_count":records.len(),
             "pending_refs":pending,"partial":partial,"truncated":truncated,
-            "scope":self.scope,"budget_tokens":self.budget_tokens,
+            "scope":self.scope,"budget_bytes":self.budget_bytes,
             "budget_unit":"conservative_utf8_bytes","estimated_tokens":0,
         });
         // 和 core 一样使用整个 JSON 的 UTF-8 字节上界；估算值本身也计入预算。
@@ -244,7 +244,7 @@ impl Handoff<'_> {
     fn fits(&self, records: &[SelectedRecord]) -> Result<bool> {
         Ok(self.response(records)?["estimated_tokens"]
             .as_u64()
-            .is_some_and(|bytes| bytes <= self.budget_tokens as u64))
+            .is_some_and(|bytes| bytes <= self.budget_bytes as u64))
     }
 }
 
@@ -256,13 +256,13 @@ impl DesktopSession {
         scope: &str,
         refs: &[String],
         goal: &str,
-        budget_tokens: usize,
+        budget_bytes: usize,
     ) -> Result<Value> {
         if refs.is_empty() || refs.len() > 8 {
             return Err("请选择 1–8 条 Event 或 Memory 资料".into());
         }
-        if !(512..=RESPONSE_LIMIT).contains(&budget_tokens) {
-            return Err("budget_tokens 必须在 512–32768 之间；使用保守字节上界".into());
+        if !(512..=RESPONSE_LIMIT).contains(&budget_bytes) {
+            return Err("budget_bytes 必须在 512–32768 之间；使用保守字节上界".into());
         }
         if goal.len() > 4096 {
             return Err("当前目标最多 4096 字节，请缩短后重试".into());
@@ -325,7 +325,7 @@ impl DesktopSession {
                 goal.trim()
             },
             refs,
-            budget_tokens,
+            budget_bytes,
         };
         if !handoff.fits(&[])? {
             return Err(SMALL_BUDGET.into());

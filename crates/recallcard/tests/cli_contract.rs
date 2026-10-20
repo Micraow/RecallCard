@@ -111,7 +111,7 @@ fn cli_search_exposes_session_time_detail_and_pagination() {
         "Rust",
         "--scope",
         "personal",
-        "--budget-tokens",
+        "--budget-bytes",
         "12000",
     ];
     let result = ok(run(
@@ -146,37 +146,18 @@ fn cli_search_exposes_session_time_detail_and_pagination() {
     assert_ne!(page["results"][0]["ref"], next["results"][0]["ref"]);
 }
 #[test]
-fn cli_import_accepts_stdin_and_rejects_oversized_files_before_writing() {
+fn cli_capture_accepts_stdin_and_rejects_oversized_files_before_writing() {
     let (dir, vault) = setup();
-    let input = json!({"role":"user","origin":"native","content":"合成主动粘贴", "scope":"personal", "source":{"platform":"manual-web","conversation_id":"stdin","message_id":"one"}}).to_string()+"\n";
-    let result = run(
-        &vault,
-        &[
-            "import",
-            "--format",
-            "manual-jsonl",
-            "--file",
-            "-",
-            "--scope",
-            "personal",
-        ],
-        Some(&input),
-    );
+    let input = json!({"role":"user","origin":"native","content":"合成主动粘贴", "scope":"personal", "source":{"platform":"manual-web","conversation_id":"stdin","message_id":"one"}}).to_string();
+    let result = run(&vault, &["capture", "--file", "-"], Some(&input));
     ok(result);
     assert_eq!(vault.events().unwrap().len(), 1);
-    let oversized = dir.path().join("oversized.jsonl");
+    // 超限输入在解析前就被拒绝，不落盘任何事件
+    let oversized = dir.path().join("oversized.json");
     std::fs::write(&oversized, vec![b' '; 16 * 1024 * 1024 + 1]).unwrap();
     let result = run(
         &vault,
-        &[
-            "import",
-            "--format",
-            "manual-jsonl",
-            "--file",
-            oversized.to_str().unwrap(),
-            "--scope",
-            "personal",
-        ],
+        &["capture", "--file", oversized.to_str().unwrap()],
         None,
     );
     assert!(!result.status.success());

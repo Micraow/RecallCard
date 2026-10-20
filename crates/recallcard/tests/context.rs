@@ -15,7 +15,7 @@ fn capture(v: &Vault, scope: &str, id: &str, text: &str) -> String {
     v.capture(input).unwrap().id
 }
 fn search(query: &str) -> SearchArgs {
-    serde_json::from_value(json!({"query":query,"budget_tokens":12000})).unwrap()
+    serde_json::from_value(json!({"query":query,"budget_bytes":12000})).unwrap()
 }
 fn context(v: &Vault) -> Context<'_> {
     Context::new(v, Access::new(vec!["personal".into()]).unwrap())
@@ -49,12 +49,12 @@ fn authorization_filters_search_read_sources_and_bootstrap() {
     assert!(c
         .read(ReadArgs {
             refs: vec![format!("event:{hidden}")],
-            budget_tokens: 12000
+            budget_bytes: 12000
         })
         .is_err());
     assert!(!c
         .bootstrap(BootstrapArgs {
-            budget_tokens: 12000
+            budget_bytes: 12000
         })
         .unwrap()
         .to_string()
@@ -64,12 +64,10 @@ fn authorization_filters_search_read_sources_and_bootstrap() {
 fn unknown_scope_parameter_cannot_expand_tool_access() {
     let (_d, v) = setup();
     capture(&v, "project:secret", "a", "隐藏专用内容");
-    assert!(transport::invoke(
-        &context(&v),
-        "search",
-        json!({"query":"隐藏","scope":"project:secret"})
-    )
-    .is_err());
+    let service = transport::Service::new(&v, Access::new(vec!["personal".into()]).unwrap());
+    assert!(service
+        .invoke("search", json!({"query":"隐藏","scope":"project:secret"}))
+        .is_err());
 }
 #[test]
 fn latest_revision_is_searchable_old_evidence_remains_readable() {
@@ -83,7 +81,7 @@ fn latest_revision_is_searchable_old_evidence_remains_readable() {
     assert!(c
         .read(ReadArgs {
             refs: vec![format!("event:{old}")],
-            budget_tokens: 12000
+            budget_bytes: 12000
         })
         .is_ok());
 }
@@ -99,7 +97,7 @@ fn suppression_prevents_recall_until_explicit_restore() {
     assert!(context(&v)
         .read(ReadArgs {
             refs: vec![id.clone()],
-            budget_tokens: 12000
+            budget_bytes: 12000
         })
         .is_err());
     v.restore(&id).unwrap();
@@ -120,12 +118,12 @@ fn pinned_bootstrap_is_stable_and_does_not_promote_unpinned_text() {
     let c = context(&v);
     let a = c
         .bootstrap(BootstrapArgs {
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         })
         .unwrap();
     let b = c
         .bootstrap(BootstrapArgs {
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         })
         .unwrap();
     assert_eq!(a, b);
@@ -144,7 +142,7 @@ fn suppression_of_memory_also_suppresses_its_sources() {
         .is_empty());
     assert!(!context(&v)
         .bootstrap(BootstrapArgs {
-            budget_tokens: 12000
+            budget_bytes: 12000
         })
         .unwrap()["stable_text"]
         .as_str()
@@ -184,15 +182,16 @@ fn temporal_filters_do_not_rewrite_unknown_time() {
         .is_empty());
 }
 #[test]
-fn mcp_has_exactly_four_readonly_tools_and_no_mutation_route() {
+fn mcp_exposes_four_readonly_tools_plus_event_only_write() {
     let (_d, v) = setup();
     capture(&v, "personal", "a", "跨客户端原始决定");
     let requests = [
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"合成测试","version":"1"}}}),
         json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
-        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"跨客户端","budget_tokens":12000}}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"跨客户端","budget_bytes":12000}}}),
         json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"capture","arguments":{}}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"knowledge_write","arguments":{"content":"用户在会话中明示的新事实"}}}),
     ];
     let data = requests
         .iter()
@@ -202,6 +201,7 @@ fn mcp_has_exactly_four_readonly_tools_and_no_mutation_route() {
     transport::serve_mcp_io(
         &v,
         Access::new(vec!["personal".into()]).unwrap(),
+        None,
         std::io::Cursor::new(data),
         &mut output,
     )
@@ -211,15 +211,38 @@ fn mcp_has_exactly_four_readonly_tools_and_no_mutation_route() {
         .lines()
         .map(|s| serde_json::from_str::<Value>(s).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(responses.len(), 4);
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(responses.len(), 5);
+    let tools = responses[1]["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        ["bootstrap", "search", "read", "sources", "knowledge_write"]
+    );
+    // 四个读工具必须声明只读；唯一的写工具不得声明破坏性。
+    for tool in &tools[..4] {
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool["annotations"]["destructiveHint"], false);
+    }
+    assert_eq!(tools[4]["annotations"]["readOnlyHint"], false);
+    assert_eq!(tools[4]["annotations"]["destructiveHint"], false);
     assert_eq!(responses[2]["result"]["isError"], false);
     assert!(responses[2]["result"]["content"][0]["text"]
         .as_str()
         .unwrap()
         .contains("跨客户端"));
+    // 未知工具名 fail-closed：不产生写入，也不暴露内部错误正文
     assert_eq!(responses[3]["result"]["isError"], true);
-    assert_eq!(v.events().unwrap().len(), 1);
+    // knowledge_write 只增加原始事件，绝不直接生成 Memory
+    assert_eq!(responses[4]["result"]["isError"], false);
+    let events = v.events().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(v.memories().unwrap().is_empty());
+    let written = events
+        .iter()
+        .find(|event| event.data.content.contains("新事实"))
+        .unwrap();
+    assert_eq!(written.data.source.platform, "mcp-agent");
+    assert_eq!(written.data.origin, recallcard::Origin::UserInput);
 }
 #[test]
 fn malformed_and_oversized_transport_fails_closed() {
@@ -229,6 +252,7 @@ fn malformed_and_oversized_transport_fails_closed() {
     assert!(transport::serve_mcp_io(
         &v,
         Access::new(vec!["personal".into()]).unwrap(),
+        None,
         std::io::Cursor::new(input),
         &mut out
     )
@@ -252,12 +276,12 @@ fn complete_responses_respect_server_byte_budgets() {
     let c = context(&v);
     for budget in [512, 1024, 1500, 4096] {
         let mut args = search("中文");
-        args.budget_tokens = budget;
+        args.budget_bytes = budget;
         let r = c.search(args).unwrap();
         assert!(serde_json::to_vec(&r).unwrap().len() <= budget);
         let r = c
             .bootstrap(BootstrapArgs {
-                budget_tokens: budget,
+                budget_bytes: budget,
             })
             .unwrap();
         assert!(serde_json::to_vec(&r).unwrap().len() <= budget);
@@ -270,7 +294,7 @@ fn complete_responses_respect_server_byte_budgets() {
         let r = c
             .read(ReadArgs {
                 refs,
-                budget_tokens: budget,
+                budget_bytes: budget,
             })
             .unwrap();
         assert!(serde_json::to_vec(&r).unwrap().len() <= budget);
@@ -311,7 +335,7 @@ fn metadata_only_file_sources_report_missing_body() {
     let r = context(&v)
         .read(ReadArgs {
             refs: vec![format!("event:{}", e.id)],
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         })
         .unwrap();
     assert_eq!(r["results"][0]["retention"], "content_not_retained");
@@ -365,7 +389,7 @@ fn view(context: &Context<'_>, label: &str) -> Value {
     context
         .read(ReadArgs {
             refs: vec![format!("view:{label}")],
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         })
         .unwrap()["results"][0]
         .clone()
@@ -504,7 +528,7 @@ fn named_view_rejects_paths_encoded_paths_versions_and_controls() {
             context(&vault)
                 .read(ReadArgs {
                     refs: vec![reference.into()],
-                    budget_tokens: 12000
+                    budget_bytes: 12000
                 })
                 .is_err(),
             "{reference}"
@@ -513,7 +537,7 @@ fn named_view_rejects_paths_encoded_paths_versions_and_controls() {
     assert!(context(&vault)
         .read(ReadArgs {
             refs: vec![format!("view:{}", "a".repeat(129))],
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         })
         .is_err());
     for reference in [
@@ -569,7 +593,7 @@ fn named_views_and_entity_search_cannot_reveal_other_scopes() {
     }
     let bootstrap = context
         .bootstrap(BootstrapArgs {
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         })
         .unwrap();
     assert!(!bootstrap.to_string().contains("secret-only-label"));
@@ -577,7 +601,7 @@ fn named_views_and_entity_search_cannot_reveal_other_scopes() {
     for source in [false, true] {
         let args = ReadArgs {
             refs: vec![format!("memory:{}@1", hidden.id)],
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         };
         assert!(if source {
             context.sources(args)
@@ -620,7 +644,7 @@ fn suppression_is_rechecked_for_named_views_and_metadata_search() {
         );
         assert!(!context
             .bootstrap(BootstrapArgs {
-                budget_tokens: 12000
+                budget_bytes: 12000
             })
             .unwrap()["stable_text"]
             .as_str()
@@ -687,7 +711,7 @@ fn default_current_recall_excludes_future_and_expired_memories() {
     assert!(!records.to_string().contains(&expired.id));
     let bootstrap = context
         .bootstrap(BootstrapArgs {
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         })
         .unwrap();
     assert!(bootstrap["stable_text"]
@@ -697,10 +721,22 @@ fn default_current_recall_excludes_future_and_expired_memories() {
     for excluded in ["未来才生效", "已经过期", "future-only", "expired-only"] {
         assert!(!bootstrap.to_string().contains(excluded));
     }
+    // 语料同时覆盖未整理的原始 Event 与当前 Memory：future/expired 记忆不进语料，
+    // 其来源事件仍可被索引，因为事件本身没有生效时间。
     let corpus = context.embedding_corpus().unwrap();
-    assert_eq!(corpus["documents"].as_array().unwrap().len(), 2);
-    assert!(!corpus.to_string().contains(&future.id));
-    assert!(!corpus.to_string().contains(&expired.id));
+    let corpus_documents = corpus["documents"].as_array().unwrap();
+    let memories: Vec<&Value> = corpus_documents
+        .iter()
+        .filter(|document| document["kind"] == "memory")
+        .collect();
+    assert_eq!(memories.len(), 2);
+    assert!(corpus_documents.iter().any(|d| d["kind"] == "event"));
+    assert!(!corpus
+        .to_string()
+        .contains(&format!("memory:{}", future.id)));
+    assert!(!corpus
+        .to_string()
+        .contains(&format!("memory:{}", expired.id)));
     // 默认筛选不删除历史，也不伪造未知的生效日期。
     assert_eq!(
         context
@@ -716,7 +752,7 @@ fn default_current_recall_excludes_future_and_expired_memories() {
         let response = context
             .read(ReadArgs {
                 refs: vec![format!("memory:{}@1", memory.id)],
-                budget_tokens: 12000,
+                budget_bytes: 12000,
             })
             .unwrap();
         assert_eq!(response["results"][0]["record"]["id"], memory.id);
@@ -813,13 +849,13 @@ fn bootstrap_view_directory_is_stable_and_only_current_safe_labels_are_advertise
     let context = context(&vault);
     let first = context
         .bootstrap(BootstrapArgs {
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         })
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
     let second = context
         .bootstrap(BootstrapArgs {
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         })
         .unwrap();
     assert_eq!(first, second);
@@ -866,7 +902,7 @@ fn old_memory_refs_are_rejected_after_update_from_a_named_view() {
     for source in [false, true] {
         let args = ReadArgs {
             refs: vec![reference.clone()],
-            budget_tokens: 12000,
+            budget_bytes: 12000,
         };
         assert!(if source {
             context.sources(args)
@@ -903,7 +939,7 @@ fn named_views_and_mixed_reads_respect_total_byte_budget() {
                     "view:profile".into(),
                     format!("memory:{}@1", memories[0].id),
                 ],
-                budget_tokens: budget,
+                budget_bytes: budget,
             };
             let response = if sources {
                 context.sources(args)
@@ -923,7 +959,7 @@ fn named_views_and_mixed_reads_respect_total_byte_budget() {
     let response = context
         .read(ReadArgs {
             refs: vec!["view:computing".into()],
-            budget_tokens: 4096,
+            budget_bytes: 4096,
         })
         .unwrap();
     assert_eq!(response["truncated"], true);
