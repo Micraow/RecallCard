@@ -1,31 +1,69 @@
 # RecallCard
 
-把不同 AI 的对话和重要记忆收进自己的资料库，带着原话和背景继续任务。
+本地优先的个人 AI 上下文与记忆层。把跨 AI 的对话变成可追溯的本地事实，让下一个 AI 接着用。
 
-## 三步开始
+没有账号、云同步或后台服务。资料以 Markdown 与 JSONL 存在你自己指定的目录里，`grep` 和 `git diff` 都能直接读。
 
-1. **打开桌面版，创建资料库**：选择一个空文件夹
-2. **接入一段对话**：直接选择备份 ZIP、勾选会话并预览导入，或用扩展保存 DeepSeek / ChatGPT 当前可见消息
-3. **换一个 AI 继续**：选择对话后点击「带到另一个AI」，填写下一步目标，检查并复制交接内容，自己发送
+## 它解决什么
 
-默认即可使用本地搜索。整理记忆、浏览器扩展和同步等功能，可以用到时再设置。
+换一个 AI 就要重讲一遍背景，讲完还不准。RecallCard 把你说过的话存成原始事件，把确认过的事实整理成长期记忆，再按需交给当前这个 AI——只交它需要的部分，每条都能追回原话。
 
-桌面0.4已通过标准Linux的28步真实窗口验收：[操作指南](docs/desktop-quickstart-v0.4.md)。常用界面集中为会话和记忆两个工作区。
+## 三条使用路径
 
-## 下载与打开
+**本地 Agent（Claude Code、Codex、DSH 等）** — 支持 MCP 的客户端自己检索：
 
-- Linux 安装包：[下载 0.4.0 安装包](https://github.com/Micraow/RecallCard/actions/runs/37623800674/artifacts/11482734288)（登录 GitHub 后下载 ZIP）；Arch 优先使用 AppImage，Ubuntu 可使用 deb
-- 已拿到运行 ZIP：解压后运行 `recallcard-desktop` 或 `运行桌面版.sh`
-- [三步指南与验收范围](docs/desktop-quickstart-v0.4.md) · [遇到问题](docs/desktop-v0.3.md#当前验收边界)
+```sh
+recallcard connect --vault ~/我的资料 --scope personal
+```
 
-运行ZIP内含CLI与扩展0.3.1。程序提交41e70dd；安装包保留版本、提交号和校验清单。用户自己的Arch/KDE Wayland和登录态网站尚未实测；[0.3旧版](https://github.com/Micraow/RecallCard/actions/runs/37603515640/artifacts/11473229342)继续保留。
+把输出的配置粘贴进客户端，之后它自己 `bootstrap`、`search`、`read`。你不需要手动挑资料。
 
-## 下一步
+**网页 AI** — 把搜索结果复制出来贴进网页，或把网页回复粘贴回来存成事件。网页不能调用工具，所以这一步是人复制粘贴，不需要浏览器扩展。
 
-- [导入与资料格式](docs/usage.md)
-- [生成整理任务与审阅结果](docs/manual-web-dream-task.md)
-- [浏览器保存与导出](docs/browser-conversations-v0.3.md)
-- [命令行与高级功能](docs/project-overview-v0.3.md)
-- [整体设计](docs/RecallCard-DESIGN-v0.2.md) · [实施与验收状态](docs/progress.md)
+**命令行** — 全部能力都可脚本化：捕获、检索、整理、索引、检查。
 
-开发者先运行 [固定提交前检查](docs/preflight.md)，完整能力见 [开发说明](docs/project-overview-v0.3.md)；普通使用不需要先读设计文档或修改配置文件。
+## 快速开始
+
+```sh
+recallcard init    --vault ~/我的资料
+recallcard capture --vault ~/我的资料 --content "决定先核对来源，再继续实现"
+recallcard search  --vault ~/我的资料 --query "核对来源"
+recallcard doctor  --vault ~/我的资料
+```
+
+整理记忆是人工确认的，不在后台自动发生：
+
+```sh
+recallcard dream export --vault ~/我的资料 --source event:xxxx > 任务.md
+# 把任务贴给任意 AI，把结果存成 result.md
+recallcard dream review --vault ~/我的资料 --input result.md
+recallcard dream apply  --vault ~/我的资料 --input result.md
+```
+
+桌面版（Tauri）负责选库、搜索阅读、随身背景、记忆管理、整理审阅、生成连接配置。构建：
+
+```sh
+cd desktop && npm exec --yes --package=@tauri-apps/cli@2.12.1 -- tauri build
+```
+
+## 设计
+
+见 [设计文档](docs/design.md)：不变量、目录结构、三层披露、检索与索引、证据等级、Dream 流程、Agent 接入。
+
+核心只有两条：事实源只有 `events/` 与 `memories/`；索引与视图随时可删可重建。
+
+## 开发
+
+```sh
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+界面回归（jsdom，无需浏览器）：
+
+```sh
+cd desktop/tests/local-dom && npm ci && npm test
+```
+
+约定见 [AGENTS.md](AGENTS.md)。

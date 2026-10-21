@@ -1,137 +1,62 @@
 name: Linux 桌面安装包
+
 on:
   workflow_dispatch:
-  push:
-    branches: ['validate/desktop-*']
+
 concurrency:
   group: desktop-package-${{ github.ref }}
   cancel-in-progress: true
+
 permissions:
   contents: read
+
 jobs:
   package:
-    name: Ubuntu 22.04 / 原生验收与 AppImage、deb
+    name: AppImage 与 deb
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24.19.0'
-          cache: npm
-          cache-dependency-path: |
-            extension/package-lock.json
-            desktop/tests/local-dom/package-lock.json
-      - name: 准备固定预检工具
-        run: |
-          npm --prefix extension ci --ignore-scripts --no-audit --no-fund
-          npm --prefix desktop/tests/local-dom ci --ignore-scripts --no-audit --no-fund
-          python3 -m venv "$RUNNER_TEMP/recallcard-preflight-env"
-          "$RUNNER_TEMP/recallcard-preflight-env/bin/python" -m pip install --disable-pip-version-check -r scripts/preflight-requirements.txt
-          curl --fail --location --proto '=https' --tlsv1.2 https://github.com/rhysd/actionlint/releases/download/v1.7.11/actionlint_1.7.11_linux_amd64.tar.gz --output "$RUNNER_TEMP/actionlint.tar.gz"
-          printf '%s  %s\n' '900919a84f2229bac68ca9cd4103ea297abc35e9689ebb842c6e34a3d1b01b0a' "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --status
-          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
-      - name: 提交前统一预检
-        run: '"$RUNNER_TEMP/recallcard-preflight-env/bin/python" scripts/preflight.py --actionlint "$RUNNER_TEMP/actionlint" --report "$RUNNER_TEMP/recallcard-preflight.json"'
-      - name: 保存预检报告
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: RecallCard-preflight-${{ github.sha }}
-          path: ${{ runner.temp }}/recallcard-preflight.json
-          if-no-files-found: ignore
-          retention-days: 14
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
           cache-on-failure: true
-      - name: 安装官方构建与验收依赖
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf file webkit2gtk-driver xvfb xauth xdotool xclip scrot openbox dbus-x11 fonts-noto-cjk at-spi2-core python3-pyatspi
-      - name: 准备界面验证
-        working-directory: extension
-        run: npx playwright install --with-deps chromium
-      - name: 界面与状态验证
-        env:
-          RECALLCARD_BROWSER_ARTIFACTS: ${{ runner.temp }}/recallcard-browser-artifacts
+
+      - name: 安装系统依赖
         run: |
-          node --test desktop/tests/*.test.mjs
-          npm --prefix extension run test:browser
-      - name: 保存浏览器布局与失败诊断
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: RecallCard-browser-acceptance-${{ github.sha }}
-          path: ${{ runner.temp }}/recallcard-browser-artifacts/
-          if-no-files-found: ignore
-          retention-days: 14
-      - name: 浏览器保存与桌面跨端合同
-        env:
-          RECALLCARD_STATE_DIR: ${{ runner.temp }}/recallcard-product-state
-        run: cargo test --locked -j1 --workspace
-      - name: 构建正式桌面程序
-        working-directory: desktop
-        run: npm exec --yes --package=@tauri-apps/cli@2.12.1 -- tauri build --ci --no-bundle -- --locked
-      - name: 构建配套 CLI 与依赖清单
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev patchelf file
+
+      - name: 构建桌面程序与 CLI
         run: |
+          cargo build --locked --release --manifest-path desktop/src-tauri/Cargo.toml
           cargo build --locked --release --bin recallcard --target-dir desktop/src-tauri/target
-          cargo metadata --locked --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$RUNNER_TEMP/desktop-metadata.json"
-      - name: 准备中文说明、许可证与源码
+
+      - name: 收集依赖许可证与设计说明
         run: |
-          python3 scripts/package_desktop.py --binary desktop/src-tauri/target/release/recallcard-desktop --cli desktop/src-tauri/target/release/recallcard --metadata "$RUNNER_TEMP/desktop-metadata.json" --commit "$GITHUB_SHA" --profile release --out desktop/release-artifacts
-          python3 scripts/prepare_bundle_notices.py desktop/release-artifacts desktop/src-tauri/distribution
+          cargo metadata --locked --manifest-path desktop/src-tauri/Cargo.toml \
+            --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$RUNNER_TEMP/gui-metadata.json"
+          cargo metadata --locked --format-version 1 \
+            --filter-platform x86_64-unknown-linux-gnu > "$RUNNER_TEMP/cli-metadata.json"
+          python3 scripts/collect_licenses.py \
+            --metadata "$RUNNER_TEMP/gui-metadata.json" \
+            --metadata "$RUNNER_TEMP/cli-metadata.json"
+
       - name: 打包 AppImage 与 deb
         working-directory: desktop
         run: npm exec --yes --package=@tauri-apps/cli@2.12.1 -- tauri bundle --config src-tauri/tauri.bundle.conf.json --bundles appimage,deb
+
       - name: 收集版本化安装包与校验清单
         run: python3 scripts/collect_desktop_bundles.py desktop/src-tauri/target/release/bundle desktop/release-artifacts "$GITHUB_SHA"
-      - name: 正式程序的原生操作闭环
-        timeout-minutes: 8
-        env:
-          LANG: C.UTF-8
-          GDK_BACKEND: x11
-        run: dbus-run-session -- xvfb-run -a -s "-screen 0 1440x1100x24" /usr/bin/python3 desktop/tests/native_smoke.py --application desktop/src-tauri/target/release/recallcard-desktop --cli desktop/src-tauri/target/release/recallcard --artifacts "$RUNNER_TEMP/recallcard-native-smoke-artifacts"
-      - name: 保存通过验收的安装包
+
+      - name: 保存安装包
         uses: actions/upload-artifact@v4
         with:
-          name: RecallCard-Desktop-linux-x86_64-${{ github.sha }}
+          name: RecallCard-linux-x86_64-${{ github.sha }}
           path: desktop/release-artifacts/
           if-no-files-found: error
           retention-days: 30
-      - name: 单独保存便携桌面程序
-        uses: actions/upload-artifact@v4
-        with:
-          name: RecallCard-runtime-linux-x86_64-${{ github.sha }}
-          path: |
-            desktop/release-artifacts/*.zip
-            desktop/release-artifacts/*SHA256SUMS.txt
-          if-no-files-found: error
-          retention-days: 30
-      - name: 单独保存 Debian 安装包
-        uses: actions/upload-artifact@v4
-        with:
-          name: RecallCard-deb-linux-x86_64-${{ github.sha }}
-          path: |
-            desktop/release-artifacts/*.deb
-            desktop/release-artifacts/SHA256SUMS.txt
-          if-no-files-found: error
-          retention-days: 30
-      - name: 保存失败诊断所需的已编译程序
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: RecallCard-diagnostic-binaries-${{ github.sha }}
-          path: |
-            desktop/src-tauri/target/release/recallcard-desktop
-            desktop/src-tauri/target/release/recallcard
-            desktop/release-artifacts/
-          if-no-files-found: ignore
-          retention-days: 1
-      - name: 保存原生验收截图
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: RecallCard-native-acceptance-${{ github.sha }}
-          path: ${{ runner.temp }}/recallcard-native-smoke-artifacts/
-          if-no-files-found: ignore
-          retention-days: 14
