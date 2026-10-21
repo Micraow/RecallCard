@@ -369,6 +369,22 @@ impl CloudEncoder {
         })
     }
 
+    /// 记一次外发额度。返回即释放锁，真正的网络等待不占锁。
+    fn reserve(&self, bytes: usize) -> Result<()> {
+        let mut sent = self
+            .transmitted
+            .lock()
+            .map_err(|_| "计量锁已损坏".to_string())?;
+        if *sent + bytes as u64 > self.budget as u64 {
+            return Err(format!(
+                "云端外发预算已用尽：本次已发送 {} 字节，上限 {} 字节；分小时间范围多次整理，或改用本机模型",
+                *sent, self.budget
+            ));
+        }
+        *sent += bytes as u64;
+        Ok(())
+    }
+
     /// 这里的错误文案全部由我们自己写，供应商正文已脱敏，因此可以公开。
     fn request(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let body = json!({
@@ -378,16 +394,8 @@ impl CloudEncoder {
             "encoding_format": "float",
         });
         let payload = serde_json::to_vec(&body).map_err(io)?;
-        let mut sent = self
-            .transmitted
-            .lock()
-            .map_err(|_| "计量锁已损坏".to_string())?;
-        if *sent + payload.len() as u64 > self.budget as u64 {
-            return Err(format!(
-                "云端外发预算已用尽：本次已发送 {} 字节，上限 {} 字节；分小时间范围多次整理，或改用本机模型",
-                *sent, self.budget
-            ));
-        }
+        // 先扣额度再发请求：锁不能跨网络调用持有，否则并发就退化成排队。
+        self.reserve(payload.len())?;
         let client = reqwest::blocking::Client::builder()
             .timeout(self.timeout)
             .build()
@@ -420,6 +428,8 @@ impl CloudEncoder {
                 .map_err(|_| "云端编码响应无法读取".to_string())?;
             let retryable = status.as_u16() == 429 || status.is_server_error();
             if retryable && attempt < 4 {
+                // 重试要再发一次，额度也再记一次。
+                self.reserve(payload.len())?;
                 let wait = Duration::from_millis(600 * u64::from(attempt));
                 crate::log::note("编码", format!("{status}，{} ms 后重试", wait.as_millis()));
                 std::thread::sleep(wait);
@@ -427,7 +437,6 @@ impl CloudEncoder {
             }
             break (status, text);
         };
-        *sent += payload.len() as u64;
         if !status.is_success() {
             // 供应商错误页可能回显密钥，因此先抹掉密钥再截断，只保留可判断原因的部分。
             let detail = redact(&text, &self.api_key);
