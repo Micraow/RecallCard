@@ -198,7 +198,7 @@ impl Settings {
                 next.embedding.provider = value.into();
             }
             if let Some(value) = embedding.get("endpoint").and_then(Value::as_str) {
-                next.embedding.endpoint = value.trim().into();
+                next.embedding.endpoint = crate::providers::normalize_embedding_endpoint(value);
             }
             if let Some(value) = embedding.get("model").and_then(Value::as_str) {
                 next.embedding.model = value.trim().into();
@@ -217,7 +217,7 @@ impl Settings {
         }
         if let Some(llm) = patch.get("llm").and_then(Value::as_object) {
             if let Some(value) = llm.get("base_url").and_then(Value::as_str) {
-                next.llm.base_url = value.trim().trim_end_matches('/').into();
+                next.llm.base_url = crate::providers::normalize_chat_base(value);
             }
             if let Some(value) = llm.get("model").and_then(Value::as_str) {
                 next.llm.model = value.trim().into();

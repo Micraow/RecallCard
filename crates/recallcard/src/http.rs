@@ -15,7 +15,7 @@ use crate::model::Result;
 use crate::policy::Access;
 use crate::settings::Settings;
 use crate::vault::Vault;
-use crate::{dream_task, llm, semantic};
+use crate::{dream_task, llm, providers, semantic};
 
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const DREAM_SOURCE_LIMIT: usize = 64;
@@ -267,6 +267,9 @@ fn dispatch(shared: &Shared, path: &str, body: &Value) -> Result<Value> {
         }),
         "/api/settings" => settings(shared, body),
         "/api/settings/reset" => reset_settings(shared),
+        "/api/providers/normalize" => provider_normalize(body),
+        "/api/providers/models" => provider_models(shared, body),
+        "/api/providers/dimensions" => provider_dimensions(shared, body),
         "/api/vault/open" => open_vault(shared, body),
         "/api/index/build" => build_index(shared),
         "/api/index/progress" => index_progress(shared),
@@ -295,6 +298,72 @@ fn state(shared: &Shared) -> Result<Value> {
             "settings_error": settings_error,
         }))
     })
+}
+
+/// 地址补全放在后端做：界面与命令行共用同一套规则，不用两边各写一遍。
+fn provider_normalize(body: &Value) -> Result<Value> {
+    let kind = optional(body, "kind", "chat");
+    let value = optional(body, "value", "");
+    let normalized = match kind.as_str() {
+        "chat" => providers::normalize_chat_base(&value),
+        "embedding" => providers::normalize_embedding_endpoint(&value),
+        _ => return Err("kind 只能是 chat 或 embedding".into()),
+    };
+    Ok(json!({"value": normalized}))
+}
+
+/// 用户可能还没保存密钥，所以未填时回退到已保存的那一把。
+fn effective_key(shared: &Shared, typed: &str, pick: fn(&Settings) -> &str) -> String {
+    if !typed.trim().is_empty() {
+        return typed.trim().to_owned();
+    }
+    with_state(shared, |state| {
+        let info = state.session.status(&state.session_id)?;
+        let vault = Vault::open(&PathBuf::from(&info.root))?;
+        Ok(pick(&Settings::load(&vault)?).to_owned())
+    })
+    .unwrap_or_default()
+}
+
+fn provider_models(shared: &Shared, body: &Value) -> Result<Value> {
+    let typed_url = optional(body, "base_url", "");
+    let base_url = match typed_url.trim().is_empty() {
+        true => effective_key(shared, "", |settings| &settings.llm.base_url),
+        false => typed_url,
+    };
+    let key = effective_key(shared, &optional(body, "key", ""), |settings| {
+        &settings.llm.key
+    });
+    let models = providers::list_models(&base_url, &key)?;
+    Ok(json!({"models": models}))
+}
+
+fn provider_dimensions(shared: &Shared, body: &Value) -> Result<Value> {
+    let typed_url = optional(body, "endpoint", "");
+    let typed_model = optional(body, "model", "");
+    let (endpoint, model, key) = with_state(shared, |state| {
+        let info = state.session.status(&state.session_id)?;
+        let vault = Vault::open(&PathBuf::from(&info.root))?;
+        let settings = Settings::load(&vault)?;
+        Ok((
+            match typed_url.trim().is_empty() {
+                true => settings.embedding.endpoint.clone(),
+                false => typed_url.clone(),
+            },
+            match typed_model.trim().is_empty() {
+                true => settings.embedding.model.clone(),
+                false => typed_model.clone(),
+            },
+            settings.embedding.key.clone(),
+        ))
+    })?;
+    let typed_key = optional(body, "key", "");
+    let key = match typed_key.trim().is_empty() {
+        true => key,
+        false => typed_key,
+    };
+    let dimensions = providers::embedding_dimensions(&endpoint, &model, &key)?;
+    Ok(json!({"dimensions": dimensions}))
 }
 
 /// 设置文件损坏时留一条出路：直接写回默认值，不需要用户去找文件。
@@ -368,11 +437,11 @@ fn build_index(shared: &Shared) -> Result<Value> {
     let started = std::time::Instant::now();
     set_progress(shared, true, 0, 0, "读取语料");
     crate::log::note("索引", "开始重建");
-    let mut on_progress = |done: usize, total: usize| {
+    let on_progress = |done: usize, total: usize| {
         set_progress(shared, true, done, total, "编码");
     };
     let result =
-        semantic::build_index_from_config_with_progress(&vault, access, &config, &mut on_progress);
+        semantic::build_index_from_config_with_progress(&vault, access, &config, &on_progress);
     set_progress(shared, false, 0, 0, "");
     let result = result?;
     crate::log::done(

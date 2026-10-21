@@ -35,6 +35,10 @@ const MAX_DOCUMENTS: usize = 200_000;
 
 /// 一批编码多少条：太小则请求频繁，太大则单次请求过重且看不到进度。
 const ENCODE_CHUNK: usize = 32;
+
+/// 同时发出几批编码。云端一次往返要几秒，串行编码上千条要几十分钟；
+/// 并发发几路能接近线性加快，代价是更容易撞上限流（已在请求层做退避重试）。
+const ENCODE_WORKERS: usize = 4;
 const MAX_RESULTS: usize = 100;
 const MAX_TEXT_BYTES: usize = 8 * 1024;
 const LOCAL_BATCH: usize = 64;
@@ -223,7 +227,7 @@ impl From<&str> for EncoderFailure {
     }
 }
 
-pub(crate) trait Encoder: Send {
+pub(crate) trait Encoder: Send + Sync {
     fn space(&self) -> Space;
     fn embed_documents(
         &self,
@@ -398,19 +402,32 @@ impl CloudEncoder {
             ),
         );
         let started = std::time::Instant::now();
-        let response = client
-            .post(&self.endpoint)
-            .bearer_auth(&self.api_key)
-            .header("content-type", "application/json")
-            .body(payload.clone())
-            .send()
-            .map_err(|_| "云端编码请求失败；不会自动更换供应商".to_string())?;
+        // 并发编码更容易撞上限流：429 与 5xx 退避重试几次，其余状态直接报错。
+        let mut attempt = 0u32;
+        let (status, text) = loop {
+            attempt += 1;
+            let response = client
+                .post(&self.endpoint)
+                .bearer_auth(&self.api_key)
+                .header("content-type", "application/json")
+                .body(payload.clone())
+                .send()
+                .map_err(|_| "云端编码请求失败；不会自动更换供应商".to_string())?;
+            let status = response.status();
+            crate::log::done("编码", format!("返回 {status}"), started);
+            let text = response
+                .text()
+                .map_err(|_| "云端编码响应无法读取".to_string())?;
+            let retryable = status.as_u16() == 429 || status.is_server_error();
+            if retryable && attempt < 4 {
+                let wait = Duration::from_millis(600 * u64::from(attempt));
+                crate::log::note("编码", format!("{status}，{} ms 后重试", wait.as_millis()));
+                std::thread::sleep(wait);
+                continue;
+            }
+            break (status, text);
+        };
         *sent += payload.len() as u64;
-        let status = response.status();
-        crate::log::done("编码", format!("返回 {status}"), started);
-        let text = response
-            .text()
-            .map_err(|_| "云端编码响应无法读取".to_string())?;
         if !status.is_success() {
             // 供应商错误页可能回显密钥，因此先抹掉密钥再截断，只保留可判断原因的部分。
             let detail = redact(&text, &self.api_key);
@@ -466,7 +483,10 @@ impl CloudEncoder {
 
 /// 供应商响应只用来判断原因：抹掉密钥、压缩空白、截断到一小段。
 fn redact(text: &str, api_key: &str) -> String {
-    let mut cleaned = text.replace(api_key, "***");
+    let mut cleaned = match api_key.is_empty() {
+        true => text.to_owned(),
+        false => text.replace(api_key, "***"),
+    };
     if let Some(position) = cleaned.find("Bearer ") {
         let rest = &cleaned[position + 7..];
         let end = rest.find(['"', ' ', '\\']).unwrap_or(rest.len());
@@ -859,7 +879,7 @@ pub fn build_index_from_config(
     access: Access,
     config: &SemanticConfig,
 ) -> Result<Value> {
-    build_index_from_config_with_progress(vault, access, config, &mut |_, _| {})
+    build_index_from_config_with_progress(vault, access, config, &|_, _| {})
 }
 
 /// 带进度的重建入口：`on_progress(已编码, 总数)`，界面用它显示进度条。
@@ -867,7 +887,7 @@ pub fn build_index_from_config_with_progress(
     vault: &Vault,
     access: Access,
     config: &SemanticConfig,
-    on_progress: &mut dyn FnMut(usize, usize),
+    on_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Value> {
     config.provider.validate()?;
     let encoder = open_encoder(&config.provider)?;
@@ -917,7 +937,7 @@ pub(crate) fn build_index_with_encoder(
     parsed: &SemanticConfig,
     encoder: &dyn Encoder,
 ) -> Result<Value> {
-    build_index_with_progress(vault, access, parsed, encoder, &mut |_, _| {})
+    build_index_with_progress(vault, access, parsed, encoder, &|_, _| {})
 }
 
 /// 带进度的重建：`on_progress(已完成, 总数)`，供界面显示进度条。
@@ -926,7 +946,7 @@ pub(crate) fn build_index_with_progress(
     access: Access,
     parsed: &SemanticConfig,
     encoder: &dyn Encoder,
-    on_progress: &mut dyn FnMut(usize, usize),
+    on_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Value> {
     let index_path = if parsed.index_path.is_absolute() {
         parsed.index_path.clone()
@@ -1013,34 +1033,10 @@ pub(crate) fn build_index_with_progress(
     let encoded = if pending.is_empty() {
         0
     } else {
-        let mut done = total - pending.len();
-        let mut encoded = 0usize;
-        for chunk in pending.chunks(ENCODE_CHUNK) {
-            let texts: Vec<String> = chunk.iter().map(|(_, text)| text.clone()).collect();
-            let started = std::time::Instant::now();
-            // 编码失败不转发供应商正文原文：原因已由编码器脱敏，这里只补上下文。
-            let batch = encoder.embed_documents(&texts).map_err(|failure| {
-                format!("编码失败（索引未写入，正文未外泄）：{}", failure.public())
-            })?;
-            if batch.len() != texts.len() {
-                return Err("编码输出数量与待编码文档不符".into());
-            }
-            for ((position, _), vector) in chunk.iter().zip(batch) {
-                if vector.len() != space.dimensions {
-                    return Err("编码输出维度与空间不符".into());
-                }
-                vectors[*position] = vector;
-            }
-            done += chunk.len();
-            encoded += chunk.len();
-            crate::log::done(
-                "索引",
-                format!("编码 {done}/{total}（本批 {} 条）", chunk.len()),
-                started,
-            );
-            on_progress(done, total);
+        for (position, vector) in encode_pending(&pending, encoder, &space, total, on_progress)? {
+            vectors[position] = vector;
         }
-        encoded
+        pending.len()
     };
 
     if vectors
@@ -1142,6 +1138,92 @@ pub fn index_status(vault: &Vault) -> Result<Value> {
         "generation": meta.generation,
         "vectors_readable": vectors.is_ok(),
     }))
+}
+
+/// 并发编码待处理的文档，按原始位置回填向量。
+///
+/// 每批仍然走 `Encoder::embed_documents`，所以批大小、脱敏、维度校验都不变；
+/// 变的只是同时发出几批。任何一批失败都会让其余线程尽快停下并返回同一个错误。
+fn encode_pending(
+    pending: &[(usize, String)],
+    encoder: &dyn Encoder,
+    space: &Space,
+    total: usize,
+    on_progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<Vec<(usize, Vec<f32>)>> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let chunks: Vec<&[(usize, String)]> = pending.chunks(ENCODE_CHUNK).collect();
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(total - pending.len());
+    let failed = AtomicBool::new(false);
+    let results: Mutex<Vec<(usize, Vec<f32>)>> = Mutex::new(Vec::new());
+    let failure: Mutex<Option<String>> = Mutex::new(None);
+    let workers = ENCODE_WORKERS.min(chunks.len()).max(1);
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                if failed.load(Ordering::Relaxed) {
+                    break;
+                }
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(chunk) = chunks.get(index) else {
+                    break;
+                };
+                let texts: Vec<String> = chunk.iter().map(|(_, text)| text.clone()).collect();
+                let started = std::time::Instant::now();
+                let outcome = encoder.embed_documents(&texts).and_then(|batch| {
+                    if batch.len() != texts.len() {
+                        return Err(EncoderFailure::Redacted(
+                            "编码输出数量与待编码文档不符".into(),
+                        ));
+                    }
+                    if batch.iter().any(|vector| vector.len() != space.dimensions) {
+                        return Err(EncoderFailure::Redacted("编码输出维度与空间不符".into()));
+                    }
+                    Ok(batch)
+                });
+                match outcome {
+                    Ok(batch) => {
+                        if let Ok(mut guard) = results.lock() {
+                            guard.extend(
+                                chunk
+                                    .iter()
+                                    .zip(batch)
+                                    .map(|((position, _), vector)| (*position, vector)),
+                            );
+                        }
+                        let processed =
+                            done.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len();
+                        crate::log::done(
+                            "索引",
+                            format!("编码 {processed}/{total}（本批 {} 条）", chunk.len()),
+                            started,
+                        );
+                        on_progress(processed, total);
+                    }
+                    Err(error) => {
+                        if let Ok(mut guard) = failure.lock() {
+                            if guard.is_none() {
+                                *guard = Some(error.public().to_string());
+                            }
+                        }
+                        failed.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    if let Some(reason) = failure.into_inner().unwrap_or(None) {
+        return Err(format!("编码失败（索引未写入，正文未外泄）：{reason}"));
+    }
+    results
+        .into_inner()
+        .map_err(|_| "编码结果不可用".to_string())
 }
 
 #[cfg(test)]
@@ -1458,6 +1540,45 @@ mod tests {
     }
 
     #[test]
+    fn batches_are_encoded_concurrently() {
+        // 每批固定睡 100ms：串行 4 批要 400ms 以上，并发应该在一批的量级。
+        struct Slow;
+        impl Encoder for Slow {
+            fn space(&self) -> Space {
+                FakeEncoder.space()
+            }
+            fn embed_documents(
+                &self,
+                texts: &[String],
+            ) -> std::result::Result<Vec<Vec<f32>>, EncoderFailure> {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                Ok(texts.iter().map(|_| vec![0.1; FAKE_DIM]).collect())
+            }
+            fn embed_query(&self, _: &str) -> std::result::Result<Vec<f32>, EncoderFailure> {
+                Ok(vec![0.1; FAKE_DIM])
+            }
+            fn transmitted_bytes(&self) -> u64 {
+                0
+            }
+        }
+        let (_d, vault) = setup();
+        for index in 0..(ENCODE_CHUNK * 4) {
+            capture(&vault, &format!("第 {index} 条并发测试事实"));
+        }
+        let config = SemanticConfig {
+            provider: Provider::Local,
+            index_path: vault.root().join(".index/semantic"),
+        };
+        let started = std::time::Instant::now();
+        build_index_with_encoder(&vault, access(), &config, &Slow).expect("重建成功");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(150 + 100 * ENCODE_CHUNK as u64 * 4 / 1000),
+            "四批应当并发发出，实际用了 {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn rebuild_reports_progress_from_zero_to_total() {
         let (_d, vault) = setup();
         for text in ["第一条事实", "第二条事实", "第三条事实"] {
@@ -1467,17 +1588,12 @@ mod tests {
             provider: Provider::Local,
             index_path: vault.root().join(".index/semantic"),
         };
-        let mut seen: Vec<(usize, usize)> = Vec::new();
-        build_index_with_progress(
-            &vault,
-            access(),
-            &config,
-            &FakeEncoder,
-            &mut |done, total| {
-                seen.push((done, total));
-            },
-        )
+        let seen = std::sync::Mutex::new(Vec::<(usize, usize)>::new());
+        build_index_with_progress(&vault, access(), &config, &FakeEncoder, &|done, total| {
+            seen.lock().unwrap().push((done, total));
+        })
         .expect("重建成功");
+        let seen = seen.into_inner().unwrap();
         assert_eq!(seen.first(), Some(&(0, 3)), "起步就要报总数：{seen:?}");
         assert_eq!(seen.last(), Some(&(3, 3)), "结束时必须是满进度：{seen:?}");
     }

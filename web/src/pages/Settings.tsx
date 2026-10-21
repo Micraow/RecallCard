@@ -65,6 +65,56 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
   const [notice, setNotice] = useState('');
   const [mcp, setMcp] = useState('');
   const [progress, setProgress] = useState('');
+  const [llmModels, setLlmModels] = useState<string[]>([]);
+  const [embeddingModels, setEmbeddingModels] = useState<string[]>([]);
+  const [probing, setProbing] = useState('');
+
+  /// 地址补全交给后端，界面不重复实现一遍规则。
+  async function normalize(kind: 'chat' | 'embedding', value: string, apply: (v: string) => void) {
+    if (!value.trim()) return;
+    try {
+      const result = await api.normalizeUrl(kind, value);
+      if (result.value && result.value !== value) apply(result.value);
+    } catch {
+      // 补全失败不影响手填。
+    }
+  }
+
+  async function fetchModels(
+    kind: 'llm' | 'embedding',
+    payload: { base_url?: string; key?: string },
+  ) {
+    setProbing(kind);
+    onError('');
+    try {
+      const result = await api.providerModels(payload);
+      if (kind === 'llm') setLlmModels(result.models);
+      else setEmbeddingModels(result.models);
+      setNotice(`拿到 ${result.models.length} 个模型，点模型名可以直接选。`);
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      setProbing('');
+    }
+  }
+
+  async function probeDimensions() {
+    setProbing('dimensions');
+    onError('');
+    try {
+      const result = await api.embeddingDimensions({
+        endpoint,
+        model: embeddingModel,
+        key: embeddingKey,
+      });
+      setDimensions(result.dimensions);
+      setNotice(`该模型返回 ${result.dimensions} 维，已填好。`);
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      setProbing('');
+    }
+  }
 
   async function saveLlm() {
     setBusy('llm');
@@ -207,8 +257,9 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
               id="llm-url"
               type="text"
               value={baseUrl}
-              placeholder="https://api.deepseek.com/v1"
+              placeholder="api.deepseek.com（可只填域名，保存时自动补全）"
               onChange={event => setBaseUrl(event.target.value)}
+              onBlur={() => void normalize('chat', baseUrl, setBaseUrl)}
             />
           </div>
           <div className="field-row">
@@ -217,10 +268,23 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
               <input
                 id="llm-model"
                 type="text"
+                list="llm-model-options"
                 value={model}
                 placeholder="deepseek-chat"
                 onChange={event => setModel(event.target.value)}
               />
+              <datalist id="llm-model-options">
+                {llmModels.map(name => (
+                  <option key={name} value={name} />
+                ))}
+              </datalist>
+              <button
+                className="quiet"
+                onClick={() => void fetchModels('llm', { base_url: baseUrl, key: llmKey })}
+                disabled={probing !== ''}
+              >
+                {probing === 'llm' ? <span className="spin" /> : null} 从服务端取模型名
+              </button>
             </div>
             <div className="field">
               <label htmlFor="llm-tokens">单次上限 tokens</label>
@@ -303,8 +367,9 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
                   id="emb-url"
                   type="text"
                   value={endpoint}
-                  placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+                  placeholder="域名即可，保存时自动补成 /v1/embeddings"
                   onChange={event => setEndpoint(event.target.value)}
+                  onBlur={() => void normalize('embedding', endpoint, setEndpoint)}
                 />
               </div>
               <div className="field-row">
@@ -313,10 +378,25 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
                   <input
                     id="emb-model"
                     type="text"
+                    list="emb-model-options"
                     value={embeddingModel}
                     placeholder="text-embedding-v4"
                     onChange={event => setEmbeddingModel(event.target.value)}
                   />
+                  <datalist id="emb-model-options">
+                    {embeddingModels.map(name => (
+                      <option key={name} value={name} />
+                    ))}
+                  </datalist>
+                  <button
+                    className="quiet"
+                    onClick={() =>
+                      void fetchModels('embedding', { base_url: endpoint, key: embeddingKey })
+                    }
+                    disabled={probing !== ''}
+                  >
+                    {probing === 'embedding' ? <span className="spin" /> : null} 取模型名
+                  </button>
                 </div>
                 <div className="field">
                   <label htmlFor="emb-dim">维度</label>
@@ -328,6 +408,13 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
                     max={8192}
                     onChange={event => setDimensions(Number(event.target.value))}
                   />
+                  <button
+                    className="quiet"
+                    onClick={() => void probeDimensions()}
+                    disabled={probing !== ''}
+                  >
+                    {probing === 'dimensions' ? <span className="spin" /> : null} 探测维度
+                  </button>
                 </div>
               </div>
               <div className="field">

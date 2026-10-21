@@ -177,6 +177,12 @@ export const api = {
   settings: () => call<SettingsView>('/api/settings'),
   saveSettings: (patch: unknown) => call<SettingsView>('/api/settings', patch),
   resetSettings: () => call<SettingsView>('/api/settings/reset', {}),
+  normalizeUrl: (kind: 'chat' | 'embedding', value: string) =>
+    call<{ value: string }>('/api/providers/normalize', { kind, value }),
+  providerModels: (payload: { base_url?: string; key?: string }) =>
+    call<{ models: string[] }>('/api/providers/models', payload),
+  embeddingDimensions: (payload: { endpoint?: string; model?: string; key?: string }) =>
+    call<{ dimensions: number }>('/api/providers/dimensions', payload),
   buildIndex: () => call<Record<string, unknown>>('/api/index/build', {}),
   indexProgress: () =>
     call<{ running: boolean; done: number; total: number; phase: string }>(

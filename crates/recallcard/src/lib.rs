@@ -15,6 +15,7 @@ pub mod dream_task;
 pub mod http;
 pub mod llm;
 pub mod log;
+pub mod providers;
 pub mod semantic;
 pub mod settings;
 pub mod ui_state;
