@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 #[derive(Parser)]
@@ -228,33 +228,6 @@ fn value<T: serde::Serialize>(v: T) -> Result<Value> {
     serde_json::to_value(v).map_err(|e| e.to_string())
 }
 
-/// 接入片段只是文本输出；写入项目配置由用户或 Agent 自行完成。
-fn connect_snippet(vault: &Path, scopes: &[String], client: &str) -> Result<Value> {
-    let binary = std::env::current_exe().map_err(|e| e.to_string())?;
-    let args: Vec<String> = [
-        vec!["--vault".into(), vault.to_string_lossy().into_owned()],
-        scopes
-            .iter()
-            .flat_map(|scope| ["--scope".into(), scope.clone()])
-            .collect(),
-        vec!["mcp".into()],
-    ]
-    .concat();
-    let entry = json!({"command": binary, "args": args});
-    let config = match client {
-        "claude-code" => json!({"mcpServers": {"recallcard": entry}}),
-        "codex" => json!({"mcp_servers": {"recallcard": entry}}),
-        other => return Err(format!("未知客户端：{other}；支持 claude-code、codex")),
-    };
-    Ok(json!({
-        "client": client,
-        "config": config,
-        "scopes": scopes,
-        "tools": ["bootstrap", "search", "read", "sources", "knowledge_write"],
-        "note": "把 config 合并进客户端配置文件；范围与资料库路径已固定，Agent 不能扩大"
-    }))
-}
-
 fn run(cli: Cli) -> Result<Value> {
     if let Command::Init = cli.command {
         let vault = Vault::init(&cli.vault)?;
@@ -264,7 +237,10 @@ fn run(cli: Cli) -> Result<Value> {
     match cli.command {
         Command::Init => unreachable!(),
         Command::Capture { file } => value(vault.capture(input::<EventInput>(&file)?)?),
-        Command::Connect { scope, client } => connect_snippet(vault.root(), &scope, &client),
+        Command::Connect { scope, client } => {
+            let binary = std::env::current_exe().map_err(|e| e.to_string())?;
+            recallcard::transport::connect_config(&binary, vault.root(), &scope, &client)
+        }
         Command::Dream { action } => match action {
             DreamCommand::Export {
                 source,

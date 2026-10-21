@@ -22,15 +22,11 @@ export function memoryReviewKey(state) {
 }
 // 变更后立即废弃可能包含旧内容的阅读、交接、整理任务和来源选择。
 export function invalidateMemoryContent(state) {
-  state.contextSelection = null; state.resultQuery = '';
-  if (state.conversation?.session_ref) state.resumeConversation = { session_ref: state.conversation.session_ref, goal: state.continuationGoal || '', offset: state.conversationOffset || 0 };
+  state.resultQuery = '';
   state.results = []; state.resultNote = ''; state.selected = null; state.sources = [];
   state.selectedRefs = []; state.dreamPreview = null; state.dreamEvidence = {}; state.dreamTask = null; state.dreamResultText = '';
-  state.importPreview = null; state.importSelection = null; state.importSelectedIds = []; state.notePreview = null;
-  state.conversations = []; state.conversation = null; state.conversationRows = [];
-  state.conversationOffset = 0; state.conversationListOffset = 0; state.conversationListNext = null;
-  state.continuation = null; state.continuationGoal = ''; state.branchConversationRef = ''; state.conversationBranches = null; state.continuationBranchRef = ''; state.continuationBranchLabel = '';
-  state.background = newBackgroundState(); state.continuationOpen = false; state.importBatch = null; state.searchLoaded = false;
+  state.notePreview = null;
+  state.background = newBackgroundState(); state.searchLoaded = false;
   const includeHidden = state.memory.includeHidden;
   state.memory = { ...newMemoryState(), includeHidden };
 }
@@ -50,7 +46,6 @@ export function createMemoryManagement(ui) {
   }
   async function cancelServerPreviews() {
     clearReview();
-    state.importPreview = null; state.importSelection = null; state.importSelectedIds = [];
     state.dreamPreview = null; state.notePreview = null;
     await invoke('cancel_previews', { sessionId: state.vault.session_id });
   }
@@ -163,7 +158,6 @@ export function createMemoryManagement(ui) {
       $('div', { class: 'result-meta' }, $('strong', {}, source.conversation_title || source.metadata?.conversation_title || source.source?.conversation_title || '原始会话'), $('span', { class: 'tag' }, roleLabels[source.role] || source.role)),
       $('div', { class: 'muted' }, `${source.platform || source.source?.platform || '来源未知'} · ${displayDate(source.occurred_at)}`),
       $('div', { class: 'body-text' }, recordText(source) || '此来源没有文本正文'),
-      !memory().selectedRow.hidden ? button('定位到这条消息', () => ui.locateEvent(`event:${source.id}`), false, 'small') : null,
       ui.technicalDetails(line('引用', source.id), line('原始会话', source.source?.conversation_id), line('原始消息', source.source?.message_id), line('保存时间', displayDate(source.captured_at)), source.source?.url ? line('出处地址', source.source.url) : null)));
     return box;
   }
@@ -172,7 +166,6 @@ export function createMemoryManagement(ui) {
     if (!selected) return $('aside', { class: 'memory-detail empty' }, $('h3', {}, '选择一条记忆'), paragraph('核对原话与出处，纠正内容或选择每次接续带上的背景。'));
     const row = memory().selectedRow;
     const head = $('div', { class: 'reader-heading' }, ui.detailBack(), $('div', { class: 'reader-title' }, $('h2', {}, '记忆详情'), $('span', { class: 'muted' }, evidenceLabels[selected.evidence] || selected.evidence)));
-    if (!row.hidden && selected.source_refs?.length) head.append(ui.actionButton('带到另一个AI', () => ui.locateEvent(`event:${selected.source_refs[0]}`, true), 'open-continuation', true));
     const body = $('div', { class: 'reader-scroll', 'data-scroll': 'reader' }, $('div', { class: 'body-text memory-full-text' }, selected.content),
       $('div', { class: 'memory-status' }, $('span', { class: 'tag' }, `${row.hidden ? '已隐藏 · ' : ''}${displayState(selected.status)}`), $('span', { class: 'muted' }, selected.protected ? '已保护' : '未保护')),
       sourcePane(),

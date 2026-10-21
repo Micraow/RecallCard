@@ -5,8 +5,7 @@ export const vault = {
   session_id: 'synthetic-local-dom', root: '/synthetic/vault', display_name: '合成资料库',
   scopes: ['personal', 'work'], event_count: 2, memory_count: 1, health: { ok: true },
 };
-export const conversation = { session_ref: 'synthetic-conversation', title: '合成项目讨论', platform: 'chatgpt-export', message_count: 2, captured_at: '2026-10-06T08:00:00Z', coverage: 'partial' };
-export const conversationMessages = [
+export const searchMessages = [
   { ref: 'event:evt_synthetic', role: 'user', text: '决定先核对来源，再继续实现。', occurred_at: '2026-10-06T08:00:00Z' },
   { ref: 'event:evt_assistant', role: 'assistant', text: '建议先补充测试；这还不是用户决定。', occurred_at: null },
 ];
@@ -16,31 +15,6 @@ export const memory = {
   evidence: 'assistant_suggestion', source_refs: ['evt_synthetic'],
   recorded_at: '2026-10-06T08:00:00Z', updated_at: '2026-10-06T09:00:00Z',
   observed_at: null, time_note: '原文没有日期',
-};
-export const selection = {
-  selection_id: 'synthetic-archive', session_id: vault.session_id,
-  file_name: 'synthetic.zip', scope: 'personal', byte_count: 1024,
-  coverage: {
-    conversations_available: 2, events_available: 5, recognized_json_files: 2,
-    markdown_files_skipped: 1, other_files_skipped: 1,
-    messages: { hidden_reasoning_messages_skipped: 1 },
-    notes: ['只导入当前分支可见文本，附件原件不导入'],
-  },
-  conversations: [
-    { source_id: 'one', title: '合成第一会话', event_count: 3, user_messages: 1, assistant_messages: 1, tool_messages: 1 },
-    { source_id: 'two', title: hostile, event_count: 2, user_messages: 1, assistant_messages: 1, tool_messages: 0 },
-  ],
-};
-export const preview = {
-  preview_id: 'synthetic-preview', session_id: vault.session_id,
-  file_name: selection.file_name, scope: 'personal', byte_count: 1024,
-  event_count: 3, redacted_event_count: 0, truncated: false,
-  warning: '尚未写入，确认后仅处理已选会话', coverage: selection.coverage,
-  conversations: [selection.conversations[0]],
-  samples: ['user', 'assistant', 'tool'].map(role => ({
-    role, source: { platform: 'chatgpt-export', conversation_id: 'one' },
-    occurred_at: '2023-11-14T22:13:20Z', content: `合成${role}消息原文`,
-  })),
 };
 export const dreamPreview = {
   preview_id: 'synthetic-dream', session_id: vault.session_id,
@@ -118,7 +92,7 @@ export function syntheticBridge() {
   const queues = new Map();
   const unexpected = [];
   const data = { memory: structuredClone(memory), pending: null, pendingBackground: null,
-    backgroundMemories: structuredClone(backgroundMemories), conversations: [structuredClone(conversation)], messages: structuredClone(conversationMessages), hiddenRefs: [],
+    backgroundMemories: structuredClone(backgroundMemories), messages: structuredClone(searchMessages), hiddenRefs: [],
     selectedContextRecords: structuredClone(selectedContextRecords), searchResults: null };
   function defaults(command, payload) {
     switch (command) {
@@ -127,9 +101,6 @@ export function syntheticBridge() {
       case 'remember_workspace': return null;
       case 'choose_vault': case 'vault_status': return vault;
       case 'open_default_workspace': return { ...vault, event_count: 0 };
-      case 'open_deepseek': return null;
-      case 'list_import_jobs': return [];
-      case 'pick_import_files': return null;
       case 'cancel_previews': data.pending = null; data.pendingBackground = null; return null;
       case 'read_background': case 'read_background_page': return backgroundPage(data.backgroundMemories, payload.scope, payload.offset || 0);
       case 'review_background_change': {
@@ -167,13 +138,6 @@ export function syntheticBridge() {
           source: { platform: 'synthetic', conversation_id: 'synthetic-conversation' } };
       }
       case 'write_clipboard': return null;
-      case 'list_conversations': return { conversations: payload.scope === 'personal' ? data.conversations.slice(payload.offset || 0, (payload.offset || 0) + 50) : [], total: payload.scope === 'personal' ? data.conversations.length : 0, next_offset: data.conversations.length > (payload.offset || 0) + 50 ? (payload.offset || 0) + 50 : null };
-      case 'conversation_messages': {
-        if (!data.conversations.some(item => item.session_ref === payload.conversationRef) || payload.scope !== 'personal') throw new Error('会话已不可见');
-        const rows = data.messages.filter(item => !data.hiddenRefs.includes(item.ref));
-        return { title: data.conversations.find(item => item.session_ref === payload.conversationRef).title, platform: data.conversations.find(item => item.session_ref === payload.conversationRef).platform, session_ref: payload.conversationRef, messages: rows.slice(payload.offset || 0, (payload.offset || 0) + 20), total: rows.length, next_offset: rows.length > (payload.offset || 0) + 20 ? (payload.offset || 0) + 20 : null, offset: payload.offset || 0, order_known: true };
-      }
-      case 'prepare_continuation': return { text: `recallcard.context/1\n${payload.goal}\n${data.messages.filter(item => !data.hiddenRefs.includes(item.ref)).map(item => item.text).join('\n')}`, message_count: data.messages.length, available_messages: data.messages.length, truncated: false };
       case 'prepare_selected_context': {
         const records = payload.references.map(reference => {
           const record = data.selectedContextRecords.find(item => item.ref === reference);
@@ -183,21 +147,12 @@ export function syntheticBridge() {
         return selectedContextResponse({ records, goal: payload.goal, scope: payload.scope, budgetTokens: payload.budgetTokens,
           background: backgroundPage(data.backgroundMemories, payload.scope).background });
       }
-      case 'search_records': case 'browse_records': return { results: (data.searchResults || data.messages.map(item => ({ ...item, kind: 'event', conversation_ref: conversation.session_ref, conversation_title: conversation.title, platform: conversation.platform }))).filter(item => !data.hiddenRefs.includes(item.ref)), truncated: false };
+      case 'search_records': case 'browse_records': return { results: (data.searchResults || data.messages.map(item => ({ ...item, kind: 'event', conversation_title: '合成项目讨论', platform: 'synthetic' }))).filter(item => !data.hiddenRefs.includes(item.ref)), truncated: false };
       case 'read_record': {
         const row = (data.searchResults ? data.selectedContextRecords : data.messages).find(item => item.ref === payload.reference && !data.hiddenRefs.includes(item.ref));
-        return { results: row ? [{ ref: row.ref, conversation_ref: conversation.session_ref, conversation_title: conversation.title, platform: conversation.platform, role: row.role, record: { ...row, id: row.ref.slice(6), content: row.text } }] : [], truncated: false };
+        return { results: row ? [{ ref: row.ref, conversation_title: '合成项目讨论', platform: 'synthetic', role: row.role, record: { ...row, id: row.ref.slice(6), content: row.text } }] : [], truncated: false };
       }
       case 'read_sources': return { results: [], truncated: false };
-      case 'event_location': {
-        const index = data.messages.findIndex(item => item.ref === payload.reference && !data.hiddenRefs.includes(item.ref));
-        if (index < 0) throw new Error('原始消息已不可见');
-        return { ref: payload.reference, conversation_ref: conversation.session_ref, conversation_title: conversation.title, platform: conversation.platform, role: data.messages[index].role, message_index: index, offset: index, total: data.messages.length };
-      }
-      case 'pick_import': return selection;
-      case 'preview_import_selection': return preview;
-      case 'return_import_selection': return null;
-      case 'confirm_import': return { events_added: 3, events_seen: 3, events_duplicates: 0, conversation_refs: data.conversations.map(item => item.session_ref), conversations: data.conversations };
       case 'pick_dream': case 'review_dream_text': return dreamPreview;
       case 'apply_dream': return { changes: [{ id: memory.id, revision: 4 }] };
       case 'manage_memories': return {

@@ -1,19 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture } from './harness.mjs';
-import { hostile, memory, preview, selection, vault } from './fixtures.mjs';
+import { hostile, memory, vault } from './fixtures.mjs';
 
-async function chooseImport(ui, chosen) {
-  if (chosen) ui.native.next('pick_import', chosen);
-  await ui.openVault();
-  await ui.navigate('添加资料');
-  ui.one('#file-import-details > summary').click();
-  await ui.click('选择文件并预览');
-}
-async function previewFirst(ui) {
-  ui.check('[aria-label="选择会话：合成第一会话"]');
-  await ui.click('预览所选会话');
-}
 async function editMemory(ui) {
   await ui.openVault();
   await ui.navigate('记忆管理');
@@ -32,138 +21,11 @@ test('实际首页与资料入口存在，选择资料库以前没有原生写�
   const ui = await fixture(t);
   assert.equal(ui.one('#content h1').textContent, '把以前的对话接着用');
   ui.button('创建新资料库'); ui.button('打开已有资料库');
-  assert.equal(ui.one('#navigation').querySelectorAll('button').length, 2);
-  await ui.navigate('添加资料');
-  assert.equal(ui.modal().open, true);
-  ui.button('创建新资料库', ui.modal()); ui.button('打开已有资料库', ui.modal());
-  await ui.click('取消', ui.modal());
-  assert.equal(ui.modal().open, false);
+  assert.deepEqual(
+    [...ui.one('#navigation').querySelectorAll('button')].map(node => node.dataset.workspace),
+    ['search', 'memories']);
   assert.deepEqual(ui.native.calls, [{ command: 'restore_workspace', payload: {} }]);
   ui.noAutomaticWrites();
-});
-
-test('导入来源与时间增加段落后，恶意正文仍只有一个纯文本正文节点', async t => {
-  const ui = await fixture(t);
-  await chooseImport(ui, {
-    ...preview, file_name: hostile, warning: hostile,
-    samples: [{ ...preview.samples[0], content: hostile }],
-  });
-  assert.equal(ui.one('.file-name').textContent, hostile);
-  const sample = ui.one('.file-preview .sample');
-  assert.equal(sample.querySelectorAll('p').length, 3, '角色之外同时保留来源时间、来源会话和正文');
-  // 复现旧选择器的真实歧义；测试不能把 .sample p 静默取第一个当正文。
-  assert.throws(() => ui.one('.sample p'), /实际匹配到 3 个节点/);
-  const body = ui.one('.sample > p:last-child');
-  assert.equal(body.textContent, hostile);
-  assert.equal(body.childNodes.length, 1);
-  assert.equal(body.firstChild.nodeType, ui.window.Node.TEXT_NODE);
-  assert.equal(body.children.length, 0);
-  assert.match(sample.textContent, /chatgpt-export.*原始时间：.*2023/);
-  assert.match(sample.textContent, /来源会话：合成第一会话/);
-  assert.equal(ui.one('.sample .tag').textContent, '用户');
-  ui.button('确认导入 3 条记录'); ui.button('取消这次导入');
-  noExecutableMarkup(ui); ui.noWrites();
-});
-
-test('ZIP 会话默认全不选，显示角色计数及跳过范围，恶意标题不生成 HTML', async t => {
-  const ui = await fixture(t);
-  await chooseImport(ui);
-  const checks = [...ui.document.querySelectorAll('.archive-selection input[type="checkbox"]')];
-  assert.equal(checks.length, 2);
-  assert.ok(checks.every(node => node.checked === false));
-  const start = ui.button('预览所选会话');
-  assert.equal(start.disabled, true);
-  start.click(); await ui.idle();
-  assert.equal(ui.native.count('preview_import_selection'), 0);
-  const text = ui.one('.archive-selection').textContent;
-  for (const value of ['2 个会话 / 5 条消息', '用户 1 · 助手 1 · 工具 1',
-    'Markdown 文件已跳过：1', '隐藏推理消息未收集：1', '附件原件不导入', hostile]) {
-    assert.ok(text.includes(value), `应展示：${value}`);
-  }
-  noExecutableMarkup(ui); ui.noWrites();
-});
-
-test('仅提交所选会话，预览保留来源与目的地，一次确认直接写入且重复点击只写一次', async t => {
-  const ui = await fixture(t);
-  await chooseImport(ui); await previewFirst(ui);
-  assert.deepEqual(ui.native.matching('preview_import_selection')[0].payload, {
-    sessionId: vault.session_id, selectionId: selection.selection_id, sourceIds: ['one'],
-  });
-  const samples = [...ui.document.querySelectorAll('.file-preview .sample')];
-  assert.deepEqual(samples.map(node => node.querySelector('.tag').textContent), ['用户', '助手', '工具']);
-  for (const sample of samples) {
-    assert.match(sample.textContent, /chatgpt-export.*2023/);
-    assert.match(sample.textContent, /来源会话：合成第一会话/);
-    assert.equal(ui.one('p:last-child', sample).children.length, 0);
-  }
-  assert.match(ui.one('.file-preview').textContent, /写入资料库合成资料库.*写入范围personal/);
-  ui.noWrites();
-  const finish = ui.button('确认导入 3 条记录');
-  const release = ui.native.hold('confirm_import');
-  finish.click(); finish.click();
-  assert.equal(ui.native.count('confirm_import'), 1);
-  assert.equal(finish.disabled, true);
-  assert.equal(ui.modal().open, false, '预览按钮之后不再打开同义确认窗口');
-  release({ events_added: 3, events_seen: 3 }); await ui.idle();
-  finish.disabled = false; finish.click(); await ui.idle();
-  assert.equal(ui.native.count('confirm_import'), 1, '完成后保留的旧按钮也不能重放写入');
-  assert.deepEqual(ui.native.matching('confirm_import')[0].payload, {
-    sessionId: vault.session_id, previewId: preview.preview_id,
-  });
-  assert.equal(ui.modal().open, false);
-  assert.equal(ui.one('#content h1').textContent, '会话');
-  assert.equal(ui.document.querySelector('.archive-selection'), null);
-  await ui.navigate('添加资料'); await ui.click('选择文件并预览');
-  assert.ok([...ui.document.querySelectorAll('.archive-selection input')].every(node => !node.checked));
-  assert.equal(ui.button('预览所选会话').disabled, true);
-});
-
-test('ZIP 全选超限后禁止预览，缩小批次时只传余下所选会话', async t => {
-  const ui = await fixture(t);
-  const large = structuredClone(selection);
-  large.conversations.forEach(conversation => { conversation.event_count = 60000; });
-  large.coverage.events_available = 120000;
-  await chooseImport(ui, large);
-  await ui.click('选择全部可导入会话');
-  assert.equal(ui.button('预览所选会话').disabled, true);
-  assert.match(ui.one('.archive-selection').textContent, /超过 100000/);
-  ui.button('预览所选会话').click(); await ui.idle();
-  assert.equal(ui.native.count('preview_import_selection'), 0);
-  ui.one('.archive-selection label:nth-of-type(2) input').click();
-  await ui.click('预览所选会话');
-  assert.deepEqual(ui.native.matching('preview_import_selection')[0].payload.sourceIds, ['one']);
-  ui.noWrites();
-});
-
-test('ZIP 返回选择与改格式都会撤销旧确认界面，取消后不恢复清单', async t => {
-  const ui = await fixture(t);
-  await chooseImport(ui); await previewFirst(ui);
-  await ui.click('返回会话选择');
-  assert.deepEqual(ui.native.matching('return_import_selection')[0].payload, {
-    sessionId: vault.session_id, selectionId: selection.selection_id,
-  });
-  assert.equal(ui.document.querySelectorAll('.file-name').length, 1);
-  assert.equal(ui.document.querySelectorAll('.file-preview .sample .tag').length, 0);
-  ui.fill('#import-format', 'manual-jsonl', 'change'); await ui.idle();
-  assert.equal(ui.document.querySelector('.archive-selection'), null);
-  assert.equal(ui.document.querySelector('.file-preview'), null);
-  await ui.click('选择文件并预览');
-  await ui.click('取消这次导入');
-  await ui.navigate('概览'); await ui.navigate('添加资料');
-  assert.equal(ui.document.querySelector('.archive-selection'), null);
-  ui.noWrites();
-});
-
-test('ZIP 原文件改变时显示失败并撤销会话清单和确认入口', async t => {
-  const ui = await fixture(t);
-  await chooseImport(ui);
-  ui.check('[aria-label="选择会话：合成第一会话"]');
-  ui.native.fail('preview_import_selection', '文件已改变或被替换，请重新选择文件并审查');
-  await ui.click('预览所选会话');
-  assert.match(ui.one('#notice').textContent, /文件已改变/);
-  assert.equal(ui.document.querySelector('.archive-selection'), null);
-  assert.equal(ui.document.querySelector('.file-preview'), null);
-  ui.noWrites();
 });
 
 test('受保护记忆默认未批准，检查与取消不写入，最终确认只发送已审阅的可编辑字段', async t => {

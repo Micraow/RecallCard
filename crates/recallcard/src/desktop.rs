@@ -5,7 +5,6 @@
 //! 或替代内容。错误不转发解析器、操作系统或 Git 输出中的文件正文、秘密和路径。
 //! 多文件导入的后台线程不持桌面会话锁；宿主应轮询状态，不能持锁等待任务完成。
 mod background;
-mod handoff;
 mod memory;
 mod recent;
 mod records;

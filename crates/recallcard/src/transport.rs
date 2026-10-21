@@ -3,7 +3,7 @@
 use crate::{
     capture::redact_event,
     context::{BootstrapArgs, Context, ReadArgs, SearchArgs},
-    model::{hash, Origin, Result, Role},
+    model::{hash, validate_scope, Origin, Result, Role},
     policy::Access,
     semantic::SemanticIndex,
     EventInput, Vault,
@@ -11,7 +11,10 @@ use crate::{
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::io::{BufRead, Write};
+use std::{
+    io::{BufRead, Write},
+    path::Path,
+};
 
 /// 由可信启动配置绑定资料库与范围；MCP 参数不能扩大授权。
 pub struct Service<'a> {
@@ -157,6 +160,47 @@ fn user_role() -> String {
 
 fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T> {
     serde_json::from_value(args).map_err(|e| e.to_string())
+}
+
+/// 生成 Agent 接入配置。CLI 与桌面共用同一形状，避免两处各写一份 MCP 片段。
+/// 这里只产出文本；写入客户端配置文件由用户或 Agent 自行完成。
+pub fn connect_config(
+    binary: &Path,
+    vault_root: &Path,
+    scopes: &[String],
+    client: &str,
+) -> Result<Value> {
+    if scopes.is_empty() {
+        return Err("至少需要一个授权范围".into());
+    }
+    for scope in scopes {
+        validate_scope(scope)?;
+    }
+    let args: Vec<String> = [
+        vec![
+            "--vault".to_string(),
+            vault_root.to_string_lossy().into_owned(),
+        ],
+        scopes
+            .iter()
+            .flat_map(|scope| ["--scope".to_string(), scope.clone()])
+            .collect(),
+        vec!["mcp".to_string()],
+    ]
+    .concat();
+    let server = json!({"command": binary, "args": args});
+    let config = match client {
+        "claude-code" => json!({"mcpServers": {"recallcard": server}}),
+        "codex" => json!({"mcp_servers": {"recallcard": server}}),
+        other => return Err(format!("未知客户端：{other}；支持 claude-code、codex")),
+    };
+    Ok(json!({
+        "client": client,
+        "config": config,
+        "scopes": scopes,
+        "tools": ["bootstrap", "search", "read", "sources", "knowledge_write"],
+        "note": "把 config 合并进客户端配置文件；范围与资料库路径已固定，Agent 不能扩大"
+    }))
 }
 
 pub fn tool_definitions() -> Value {

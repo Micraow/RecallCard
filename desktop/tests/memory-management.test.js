@@ -29,20 +29,16 @@ test('预览绑定会话、范围、版本与完整表单，任何变化都需�
   }
 });
 
-test('记忆变更废弃旧检索、来源、交接正文和整理结果，仅保留主动的隐藏筛选', () => {
+test('记忆变更废弃旧检索、来源和整理结果，仅保留主动的隐藏筛选', () => {
   const state = newState();
   Object.assign(state, { results: ['旧检索'], selected: {}, sources: ['原文'], selectedRefs: ['source'],
-    dreamTask: { text: '旧任务' }, dreamPreview: {}, dreamResultText: '旧结果',
-    importPreview: {}, importSelection: {}, importSelectedIds: ['old'], notePreview: {},
-    conversations: [{}], conversation: {}, conversationRows: [{}], continuation: { text: '旧交接' },
-    continuationGoal: '旧目标', conversationListNext: 30 });
+    dreamTask: { text: '旧任务' }, dreamPreview: {}, dreamResultText: '旧结果', notePreview: {} });
   Object.assign(state.memory, { includeHidden: true, selected: {}, draft: {}, review: {}, source: {} });
   invalidateMemoryContent(state);
-  assert.deepEqual([state.results, state.sources, state.selectedRefs, state.conversationRows, state.conversations, state.importSelectedIds], [[], [], [], [], [], []]);
-  assert.deepEqual([state.selected, state.dreamTask, state.dreamPreview, state.importPreview, state.importSelection,
-    state.notePreview, state.conversation, state.continuation, state.memory.selected, state.memory.draft, state.memory.review, state.memory.source], Array(12).fill(null));
-  assert.equal(state.dreamResultText, ''); assert.equal(state.continuationGoal, '');
-  assert.equal(state.conversationListNext, null); assert.equal(state.memory.includeHidden, true);
+  assert.deepEqual([state.results, state.sources, state.selectedRefs], [[], [], []]);
+  assert.deepEqual([state.selected, state.dreamTask, state.dreamPreview,
+    state.notePreview, state.memory.selected, state.memory.draft, state.memory.review, state.memory.source], Array(8).fill(null));
+  assert.equal(state.dreamResultText, ''); assert.equal(state.memory.includeHidden, true);
 });
 
 test('切换资料库或范围不保留隐藏筛选、全文、来源、草稿或批准预览', () => {

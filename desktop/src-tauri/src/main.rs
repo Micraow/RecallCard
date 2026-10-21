@@ -133,145 +133,6 @@ async fn restore_workspace(
 }
 
 /// 固定公开网址，不能由网页或导入文件传入地址、参数或任意系统命令。
-#[tauri::command]
-fn open_deepseek(window: tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() != "main" {
-        return Err("此窗口不能打开外部网页".into());
-    }
-    #[cfg(target_os = "linux")]
-    let mut command = std::process::Command::new("xdg-open");
-    #[cfg(target_os = "macos")]
-    let mut command = std::process::Command::new("open");
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut cmd = std::process::Command::new("rundll32.exe");
-        cmd.arg("url.dll,FileProtocolHandler");
-        cmd
-    };
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    {
-        let mut child = command
-            .arg("https://chat.deepseek.com/")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|_| "无法请求浏览器打开，请手动打开 https://chat.deepseek.com/")?;
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-        Ok(())
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    Err("请在浏览器打开 https://chat.deepseek.com/".into())
-}
-
-#[tauri::command]
-async fn pick_import_files(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    session_id: String,
-    scope: String,
-    format: String,
-) -> Result<Option<recallcard::desktop::ImportJobPreview>, String> {
-    let guard = dialog_guard(&state)?;
-    let paths = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = guard;
-        app.dialog()
-            .file()
-            .set_title("选择导出文件（可多选）")
-            .add_filter("会话导出", &["json", "jsonl", "zip"])
-            .blocking_pick_files()
-    })
-    .await
-    .map_err(|_| "文件选择未完成")?;
-    let Some(paths) = paths else {
-        return Ok(None);
-    };
-    let paths = paths
-        .into_iter()
-        .map(|p| p.into_path().map_err(|_| "请选择本机文件"))
-        .collect::<Result<Vec<_>, _>>()?;
-    execute(state.service.clone(), move |s| {
-        s.prepare_import_job(&session_id, &format, &paths, &scope)
-            .map(Some)
-    })
-    .await
-}
-
-#[tauri::command]
-async fn start_import_job(
-    state: State<'_, AppState>,
-    session_id: String,
-    preview_id: String,
-    scope: String,
-) -> Result<recallcard::desktop::ImportJobStatus, String> {
-    execute(state.service.clone(), move |s| {
-        s.start_import_job(&session_id, &preview_id, &scope)
-    })
-    .await
-}
-#[tauri::command]
-async fn import_job_status(
-    state: State<'_, AppState>,
-    session_id: String,
-    job_id: String,
-    scope: String,
-) -> Result<recallcard::desktop::ImportJobStatus, String> {
-    execute(state.service.clone(), move |s| {
-        s.import_job_status(&session_id, &job_id, &scope)
-    })
-    .await
-}
-#[tauri::command]
-async fn cancel_import_job(
-    state: State<'_, AppState>,
-    session_id: String,
-    job_id: String,
-    scope: String,
-) -> Result<recallcard::desktop::ImportJobStatus, String> {
-    execute(state.service.clone(), move |s| {
-        s.cancel_import_job(&session_id, &job_id, &scope)
-    })
-    .await
-}
-#[tauri::command]
-async fn resume_import_job(
-    state: State<'_, AppState>,
-    session_id: String,
-    job_id: String,
-    scope: String,
-) -> Result<recallcard::desktop::ImportJobStatus, String> {
-    execute(state.service.clone(), move |s| {
-        s.resume_import_job(&session_id, &job_id, &scope)
-    })
-    .await
-}
-#[tauri::command]
-async fn list_import_jobs(
-    state: State<'_, AppState>,
-    session_id: String,
-    scope: String,
-) -> Result<Vec<recallcard::desktop::ImportJobStatus>, String> {
-    execute(state.service.clone(), move |s| {
-        s.list_import_jobs(&session_id, &scope)
-    })
-    .await
-}
-
-#[tauri::command]
-async fn import_job_conversations(
-    state: State<'_, AppState>,
-    session_id: String,
-    job_id: String,
-    scope: String,
-    offset: usize,
-) -> Result<Value, String> {
-    execute(state.service.clone(), move |s| {
-        s.import_job_conversations(&session_id, &job_id, &scope, offset)
-    })
-    .await
-}
 
 #[tauri::command]
 async fn vault_status(
@@ -333,18 +194,6 @@ async fn read_sources(
 ) -> Result<Value, String> {
     execute(state.service.clone(), move |s| {
         s.sources(&session_id, &scope, &reference)
-    })
-    .await
-}
-#[tauri::command]
-async fn event_location(
-    state: State<'_, AppState>,
-    session_id: String,
-    scope: String,
-    reference: String,
-) -> Result<Value, String> {
-    execute(state.service.clone(), move |s| {
-        s.event_location(&session_id, &scope, &reference)
     })
     .await
 }
@@ -501,66 +350,7 @@ async fn confirm_memory_change(
     })
     .await
 }
-#[tauri::command]
-async fn list_conversations(
-    state: State<'_, AppState>,
-    session_id: String,
-    scope: String,
-    offset: usize,
-) -> Result<Value, String> {
-    execute(state.service.clone(), move |s| {
-        s.conversations_page(&session_id, &scope, offset)
-    })
-    .await
-}
-#[tauri::command]
-async fn conversation_messages(
-    state: State<'_, AppState>,
-    session_id: String,
-    scope: String,
-    conversation_ref: String,
-    offset: usize,
-) -> Result<Value, String> {
-    execute(state.service.clone(), move |s| {
-        s.conversation_messages(&session_id, &scope, &conversation_ref, offset)
-    })
-    .await
-}
-#[tauri::command]
-async fn prepare_continuation(
-    state: State<'_, AppState>,
-    session_id: String,
-    scope: String,
-    conversation_ref: String,
-    goal: String,
-    branch_ref: Option<String>,
-) -> Result<Value, String> {
-    execute(state.service.clone(), move |s| {
-        s.continuation_branch(
-            &session_id,
-            &scope,
-            &conversation_ref,
-            &goal,
-            branch_ref.as_deref(),
-        )
-    })
-    .await
-}
 
-#[tauri::command]
-async fn prepare_selected_context(
-    state: State<'_, AppState>,
-    session_id: String,
-    scope: String,
-    references: Vec<String>,
-    goal: String,
-    budget_tokens: usize,
-) -> Result<Value, String> {
-    execute(state.service.clone(), move |service| {
-        service.prepare_selected_context(&session_id, &scope, &references, &goal, budget_tokens)
-    })
-    .await
-}
 
 fn packaged_cli(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let executable = std::env::current_exe().map_err(|_| "无法确定程序位置")?;
@@ -639,100 +429,18 @@ async fn prepare_client_config(
                 .map_err(|_| "无法恢复组件执行权限")?;
         }
     }
-    execute(state.service.clone(),move|s|{
-        let info=s.status(&session_id)?;
+    execute(state.service.clone(), move |s| {
+        let info = s.status(&session_id)?;
+        // 与 CLI connect 共用同一生成器；此处额外校验范围在当前会话内可用。
         recallcard::policy::Access::new(vec![scope.clone()])?;
-        Ok(serde_json::json!({"mcpServers":{"recallcard":{"command":binary,"args":["--vault",info.root,"mcp","--scope",scope]}}}))
-    }).await
-}
-#[tauri::command]
-async fn install_browser_connection(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    session_id: String,
-    scope: String,
-    extension_id: String,
-    browser: String,
-    allow_capture: bool,
-) -> Result<Option<Value>, String> {
-    recallcard::native::extension_origin(&extension_id)?;
-    let browser_dir = match browser.as_str() {
-        "chromium" => "chromium",
-        "chrome" => "google-chrome",
-        "brave" => "BraveSoftware/Brave-Browser",
-        _ => return Err("请选择 Chromium、Chrome 或 Brave".into()),
-    };
-    if !cfg!(target_os = "linux") {
-        return Err("当前图形化注册先支持 Linux，其他平台仍可使用随包说明".into());
-    }
-    let binary = packaged_cli(&app)?;
-    let config_dir = app
-        .path()
-        .config_dir()
-        .map_err(|_| "无法确定本机配置目录")?;
-    let target = config_dir
-        .join(browser_dir)
-        .join("NativeMessagingHosts/com.recallcard.host.json");
-    let previous = match std::fs::symlink_metadata(&target) {
-        Ok(metadata) => {
-            if !metadata.is_file() || metadata.is_symlink() || metadata.len() > 16 * 1024 {
-                return Err("已有连接文件不是可更新的普通配置，本次停止".into());
-            }
-            let bytes = std::fs::read(&target).map_err(|_| "无法检查已有连接")?;
-            let value: Value =
-                serde_json::from_slice(&bytes).map_err(|_| "已有连接配置损坏，请先修复")?;
-            if value["name"] != "com.recallcard.host" {
-                return Err("已有文件不属于 RecallCard，本次不会覆盖".into());
-            }
-            Some(bytes)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err("无法检查已有浏览器连接".into()),
-    };
-    let replacing = previous.is_some();
-    let data_dir = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|_| "无法确定应用数据目录")?;
-    let output = data_dir.join("browser-connections").join(format!(
-        "{}-{}",
-        browser,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| "系统时间无效")?
-            .as_nanos()
-    ));
-    let guard = dialog_guard(&state)?;
-    let confirm_path = target.clone();
-    let confirm_scope = scope.clone();
-    let confirm_extension = extension_id.clone();
-    let confirmed=tauri::async_runtime::spawn_blocking(move||{
-        let _guard=guard;
-        app.dialog().message(format!("允许此浏览器扩展连接当前资料库？\n\n扩展 ID：{}\n资料范围：{}\n允许保存预览后的对话：{}\n\n将注册：{}\n{}\n请仅填写你安装的 RecallCard 扩展 ID。",confirm_extension,confirm_scope,if allow_capture{"是"}else{"否"},confirm_path.display(),if replacing{"已有 RecallCard 连接会先备份，再更新到本次资料库和权限。"}else{"新建本机连接，不修改其他扩展。"})).title("连接浏览器扩展").buttons(MessageDialogButtons::OkCancelCustom("允许并连接".into(),"取消".into())).blocking_show()
-    }).await.map_err(|_|"连接确认未完成")?;
-    if !confirmed {
-        return Ok(None);
-    }
-    execute(state.service.clone(),move|s|{
-        let parent=target.parent().ok_or("注册目录无效")?;
-        for path in parent.ancestors(){
-            if let Ok(m)=std::fs::symlink_metadata(path){if m.is_symlink(){return Err("浏览器配置目录包含链接，本次未注册".into());}}
-        }
-        std::fs::create_dir_all(parent).map_err(|_|"无法建立此浏览器的本机连接目录")?;
-        let result=s.prepare_browser_connection(&session_id,&scope,&extension_id,&output,&binary,allow_capture)?;
-        let manifest=std::fs::read(output.join("com.recallcard.host.json")).map_err(|_|"无法读取生成的连接文件")?;
-        let current=std::fs::read(&target).ok();
-        if current!=previous || std::fs::symlink_metadata(&target).is_ok_and(|m|m.is_symlink()) {return Err("确认后原连接发生变化，请重新检查再连接".into());}
-        if let Some(bytes)=previous {
-            let backup=parent.join(format!("com.recallcard.host.{}.backup",&recallcard::hash(&bytes)[..16]));
-            if backup.exists(){if std::fs::symlink_metadata(&backup).map_err(|_|"无法检查备份")?.is_symlink() || std::fs::read(&backup).map_err(|_|"无法读取备份")?!=bytes{return Err("连接备份文件发生冲突，原连接保持不变".into());}}
-            else{let mut file=OpenOptions::new().write(true).create_new(true).open(backup).map_err(|_|"无法备份原连接")?;file.write_all(&bytes).and_then(|_|file.sync_all()).map_err(|_|"原连接备份未完成")?;}
-        }
-        let mut temporary=tempfile::NamedTempFile::new_in(parent).map_err(|_|"无法暂存本机连接")?;
-        temporary.write_all(&manifest).and_then(|_|temporary.as_file().sync_all()).map_err(|_|"连接暂存未完成")?;
-        temporary.persist(&target).map_err(|_|"连接替换失败，原配置备份已保留")?;
-        Ok(Some(serde_json::json!({"registered":true,"registration":target,"capture_enabled":allow_capture,"capture_scope":scope,"files":result,"note":"本机文件已注册；请回到扩展点击检查连接，才能确认浏览器实际连通"})))
-    }).await
+        recallcard::transport::connect_config(
+            &binary,
+            std::path::Path::new(&info.root),
+            &[scope],
+            "claude-code",
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -755,69 +463,6 @@ async fn confirm_note(
 ) -> Result<Value, String> {
     execute(state.service.clone(), move |s| {
         s.confirm_note(&session_id, &preview_id)
-    })
-    .await
-}
-#[tauri::command]
-async fn pick_import(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    session_id: String,
-    scope: String,
-    format: String,
-) -> Result<Option<recallcard::desktop::ImportFilePreview>, String> {
-    let guard = dialog_guard(&state)?;
-    let path = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = guard;
-        app.dialog()
-            .file()
-            .set_title("选择要导入的对话文件")
-            .add_filter("对话导出或备份", &["json", "jsonl", "zip"])
-            .blocking_pick_file()
-    })
-    .await
-    .map_err(|_| "文件选择未完成")?;
-    let Some(path) = path else {
-        return Ok(None);
-    };
-    let path = path.into_path().map_err(|_| "请选择本机文件")?;
-    execute(state.service.clone(), move |s| {
-        s.select_import_file(&session_id, &format, &path, &scope)
-            .map(Some)
-    })
-    .await
-}
-#[tauri::command]
-async fn preview_import_selection(
-    state: State<'_, AppState>,
-    session_id: String,
-    selection_id: String,
-    source_ids: Vec<String>,
-) -> Result<recallcard::desktop::ImportPreview, String> {
-    execute(state.service.clone(), move |s| {
-        s.preview_import_selection(&session_id, &selection_id, &source_ids)
-    })
-    .await
-}
-#[tauri::command]
-async fn return_import_selection(
-    state: State<'_, AppState>,
-    session_id: String,
-    selection_id: String,
-) -> Result<(), String> {
-    execute(state.service.clone(), move |s| {
-        s.return_import_selection(&session_id, &selection_id)
-    })
-    .await
-}
-#[tauri::command]
-async fn confirm_import(
-    state: State<'_, AppState>,
-    session_id: String,
-    preview_id: String,
-) -> Result<Value, String> {
-    execute(state.service.clone(), move |s| {
-        s.confirm_import(&session_id, &preview_id)
     })
     .await
 }
@@ -943,28 +588,14 @@ fn main() {
             open_default_workspace,
             remember_workspace,
             restore_workspace,
-            open_deepseek,
-            pick_import_files,
-            start_import_job,
-            import_job_status,
-            cancel_import_job,
-            resume_import_job,
-            list_import_jobs,
-            import_job_conversations,
             write_clipboard,
             cancel_previews,
             vault_status,
             browse_records,
-            list_conversations,
-            conversation_messages,
-            prepare_continuation,
-            prepare_selected_context,
             prepare_client_config,
-            install_browser_connection,
             search_records,
             read_record,
             read_sources,
-            event_location,
             read_background,
             read_background_page,
             background_memory,
@@ -977,12 +608,8 @@ fn main() {
             review_memory_edit,
             review_memory_visibility,
             confirm_memory_change,
-            pick_import,
-            preview_import_selection,
-            return_import_selection,
             preview_note,
             confirm_note,
-            confirm_import,
             pick_dream,
             prepare_dream_task,
             review_dream_text,

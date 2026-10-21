@@ -31,7 +31,6 @@ export function createBackground(ui) {
   async function cancelServerPreviews() {
     clearReview();
     state.memory.review = null; state.memory.reviewKey = '';
-    state.importPreview = null; state.importSelection = null; state.importSelectedIds = [];
     state.dreamPreview = null; state.notePreview = null;
     await invoke('cancel_previews', { sessionId: state.vault.session_id });
   }
@@ -106,7 +105,7 @@ export function createBackground(ui) {
     if (background().selected?.id !== row.id) background().selected = null;
     background().selectedRow = row;
     background().draft = { id: row.id, revision: row.revision, include };
-    state.continuation = null; state.mobileDetail = true;
+    state.mobileDetail = true;
     render();
   }
   async function review() {
@@ -191,7 +190,7 @@ export function createBackground(ui) {
     box.addEventListener('toggle', () => { if (box.isConnected) background().actualOpen = box.open; });
     if (background().draft || background().review) box.append(hint('选择尚未保存。请先检查并保存，或取消本次选择后再复制。'));
     else box.append($('div', { class: 'button-row' }, button('复制当前随身背景', copy, true),
-      button('带上背景继续会话', () => navigate('conversations'))));
+      button('搜索并带走资料', () => navigate('search'))));
     return box;
   }
   function sources(memory) {
@@ -201,7 +200,7 @@ export function createBackground(ui) {
     if (source) box.append($('article', { class: 'sample background-source' },
       $('div', { class: 'result-meta' }, $('strong', {}, source.conversation_title || source.metadata?.conversation_title || source.source?.conversation_title || '原始会话'), $('span', { class: 'tag' }, roleLabels[source.role] || source.role)),
       $('div', { class: 'muted' }, `${source.platform || source.source?.platform || '来源未知'} · ${displayDate(source.occurred_at)}`),
-      $('div', { class: 'body-text' }, recordText(source) || '此来源没有文本正文'), button('定位到这条消息', () => ui.locateEvent(`event:${source.id}`), false, 'small'),
+      $('div', { class: 'body-text' }, recordText(source) || '此来源没有文本正文'),
       ui.technicalDetails(line('引用', source.id), line('会话引用', source.source?.conversation_id), line('保存时间', displayDate(source.captured_at)), source.source?.url ? line('出处地址', source.source.url) : null)));
     return box;
   }

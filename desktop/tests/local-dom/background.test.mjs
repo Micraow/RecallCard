@@ -267,15 +267,14 @@ test('保存失败立即撤销旧批准和复制入口，返回后必须重新�
   assert.equal(ui.one('#background-protected-approval').checked, false);
 });
 
-test('继续会话入口先撤销未使用的背景审阅，再进入已有会话流程', async t => {
+test('离开背景页先撤销未使用的背景审阅，再进入搜索工作区', async t => {
   const ui = await fixture(t);
   await openBackground(ui);
   const cancellations = ui.native.count('cancel_previews');
-  await ui.click('带上背景继续会话');
-  assert.equal(ui.one('#content h1').textContent, '会话');
+  await ui.click('搜索并带走资料');
+  assert.equal(ui.one('#content h1').textContent, '搜索结果');
   assert.equal(ui.native.count('cancel_previews'), cancellations + 1);
   assert.equal(ui.document.querySelector('#background-current'), null);
-  assert.equal(ui.native.count('list_conversations'), 2);
   ui.noWrites();
 });
 
