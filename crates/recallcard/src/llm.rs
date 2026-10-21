@@ -43,6 +43,16 @@ pub fn complete(settings: &LlmSettings, system: &str, user: &str) -> Result<Stri
         .timeout(Duration::from_secs(TIMEOUT_SECONDS))
         .build()
         .map_err(|_| "无法初始化网络客户端".to_owned())?;
+    crate::log::note(
+        "模型",
+        format!(
+            "请求 {} · 输入 {} 字符 · 上限 {} tokens",
+            settings.model,
+            user.chars().count(),
+            max_tokens
+        ),
+    );
+    let started = std::time::Instant::now();
     let response = client
         .post(&url)
         .bearer_auth(&settings.key)
@@ -53,6 +63,7 @@ pub fn complete(settings: &LlmSettings, system: &str, user: &str) -> Result<Stri
             false => "无法连接模型服务；请检查地址与网络".to_owned(),
         })?;
     let status = response.status();
+    crate::log::done("模型", format!("返回 {status}"), started);
     let mut buffer = Vec::new();
     response
         .take(MAX_RESPONSE_BYTES)

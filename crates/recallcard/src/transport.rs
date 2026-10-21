@@ -40,6 +40,17 @@ impl<'a> Service<'a> {
     }
 
     pub fn invoke(&self, name: &str, args: Value) -> Result<Value> {
+        // Agent 调了哪个工具、成没成，终端里必须看得见。
+        let started = std::time::Instant::now();
+        let result = self.dispatch(name, args);
+        match &result {
+            Ok(_) => crate::log::done("Agent", format!("{name} 成功"), started),
+            Err(error) => crate::log::done("Agent", format!("{name} 失败：{error}"), started),
+        }
+        result
+    }
+
+    fn dispatch(&self, name: &str, args: Value) -> Result<Value> {
         match name {
             "bootstrap" | "search" | "read" | "sources" => {
                 let context = match self.semantic {

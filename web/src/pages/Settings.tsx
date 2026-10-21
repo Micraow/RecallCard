@@ -64,6 +64,7 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
   const [mcp, setMcp] = useState('');
+  const [progress, setProgress] = useState('');
 
   async function saveLlm() {
     setBusy('llm');
@@ -104,7 +105,7 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
       });
       setEmbeddingKey('');
       if (rebuild) {
-        await api.buildIndex();
+        await withProgress(() => api.buildIndex());
         setNotice('编码设置已保存，索引已重建。');
       } else {
         setNotice('编码设置已保存。改过模型或维度后需要重建索引。');
@@ -117,12 +118,34 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
     }
   }
 
+  /// 重建是一次长请求，边跑边把进度显示出来，否则只能干等。
+  async function withProgress<T>(action: () => Promise<T>): Promise<T> {
+    setProgress('开始…');
+    const timer = window.setInterval(async () => {
+      try {
+        const state = await api.indexProgress();
+        if (state.running && state.total > 0) {
+          const percent = Math.round((state.done / state.total) * 100);
+          setProgress(`${state.phase} ${state.done}/${state.total}（${percent}%）`);
+        }
+      } catch {
+        // 进度是锦上添花，取不到就不显示。
+      }
+    }, 700);
+    try {
+      return await action();
+    } finally {
+      window.clearInterval(timer);
+      setProgress('');
+    }
+  }
+
   async function buildIndex() {
     setBusy('index');
     setNotice('');
     onError('');
     try {
-      await api.buildIndex();
+      await withProgress(() => api.buildIndex());
       setNotice('索引已重建。');
       onReload();
     } catch (cause) {
@@ -326,7 +349,8 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
               保存
             </button>
             <button className="primary" onClick={() => void saveEmbedding(true)} disabled={busy !== ''}>
-              {busy === 'index' ? <span className="spin" /> : null} 保存并重建索引
+              {busy === 'index' ? <span className="spin" /> : null}{' '}
+              {busy === 'index' && progress ? progress : '保存并重建索引'}
             </button>
           </div>
         </section>
@@ -352,7 +376,8 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
           </dl>
           <div className="row" style={{ marginTop: 14 }}>
             <button onClick={() => void buildIndex()} disabled={busy !== ''}>
-              {busy === 'index' ? <span className="spin" /> : null} 重建索引
+              {busy === 'index' ? <span className="spin" /> : null}{' '}
+              {busy === 'index' && progress ? progress : '重建索引'}
             </button>
           </div>
         </section>

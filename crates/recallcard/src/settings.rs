@@ -51,6 +51,12 @@ fn copy_tree(from: &Path, to: &Path) {
     for entry in entries.flatten() {
         let source = entry.path();
         let target = to.join(entry.file_name());
+        // 模型缓存里 blobs 与 snapshots 之间是软链；照抄实体文件会让缓存翻倍，
+        // 所以这里保留链接本身。
+        if let Ok(link) = fs::read_link(&source) {
+            let _ = std::os::unix::fs::symlink(link, &target);
+            continue;
+        }
         if source.is_dir() {
             if fs::create_dir_all(&target).is_ok() {
                 copy_tree(&source, &target);

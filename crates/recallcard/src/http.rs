@@ -39,6 +39,16 @@ struct Shared {
     state: Mutex<State>,
     token: String,
     web_dir: PathBuf,
+    progress: Mutex<Progress>,
+}
+
+/// 索引重建的进度：界面轮询它画进度条，终端同时打日志。
+#[derive(Default)]
+struct Progress {
+    running: bool,
+    done: usize,
+    total: usize,
+    phase: String,
 }
 
 struct State {
@@ -84,6 +94,7 @@ pub fn bind(options: UiOptions) -> Result<Bound> {
         uuid::Uuid::new_v4().simple()
     );
     let shared = Arc::new(Shared {
+        progress: Mutex::new(Progress::default()),
         state: Mutex::new(State {
             session,
             session_id: info.session_id,
@@ -194,14 +205,21 @@ fn handle(shared: Arc<Shared>, mut request: Request) {
         }
     };
     let readable = matches!(method, Method::Get | Method::Post);
+    let started = std::time::Instant::now();
     let result = if readable {
         dispatch(&shared, &path, &body)
     } else {
         Err("不支持的请求方法".to_string())
     };
     match result {
-        Ok(value) => respond(request, 200, value),
-        Err(error) => respond(request, 400, json!({ "error": error })),
+        Ok(value) => {
+            crate::log::done("界面", format!("{path} 成功"), started);
+            respond(request, 200, value)
+        }
+        Err(error) => {
+            crate::log::done("界面", format!("{path} 失败：{error}"), started);
+            respond(request, 400, json!({ "error": error }))
+        }
     }
 }
 
@@ -251,6 +269,7 @@ fn dispatch(shared: &Shared, path: &str, body: &Value) -> Result<Value> {
         "/api/settings/reset" => reset_settings(shared),
         "/api/vault/open" => open_vault(shared, body),
         "/api/index/build" => build_index(shared),
+        "/api/index/progress" => index_progress(shared),
         "/api/dream/sources" => dream_sources(shared, body),
         "/api/dream/preview" => dream_preview(shared, body),
         "/api/dream/apply" => dream_apply(shared, body),
@@ -318,6 +337,25 @@ fn open_vault(shared: &Shared, body: &Value) -> Result<Value> {
     Ok(json!({"vault": info, "scope": guard.scope}))
 }
 
+fn index_progress(shared: &Shared) -> Result<Value> {
+    let progress = shared.progress.lock().map_err(|_| "进度状态异常")?;
+    Ok(json!({
+        "running": progress.running,
+        "done": progress.done,
+        "total": progress.total,
+        "phase": progress.phase,
+    }))
+}
+
+fn set_progress(shared: &Shared, running: bool, done: usize, total: usize, phase: &str) {
+    if let Ok(mut progress) = shared.progress.lock() {
+        progress.running = running;
+        progress.done = done;
+        progress.total = total;
+        progress.phase = phase.to_owned();
+    }
+}
+
 fn build_index(shared: &Shared) -> Result<Value> {
     let (vault, config, scope) = with_state(shared, |state| {
         let info = state.session.status(&state.session_id)?;
@@ -327,7 +365,24 @@ fn build_index(shared: &Shared) -> Result<Value> {
         Ok((vault, config, state.scope.clone()))
     })?;
     let access = Access::new(vec![scope])?;
-    let result = semantic::build_index_from_config(&vault, access, &config)?;
+    let started = std::time::Instant::now();
+    set_progress(shared, true, 0, 0, "读取语料");
+    crate::log::note("索引", "开始重建");
+    let mut on_progress = |done: usize, total: usize| {
+        set_progress(shared, true, done, total, "编码");
+    };
+    let result =
+        semantic::build_index_from_config_with_progress(&vault, access, &config, &mut on_progress);
+    set_progress(shared, false, 0, 0, "");
+    let result = result?;
+    crate::log::done(
+        "索引",
+        format!(
+            "重建完成：{} 条文档，新编码 {} 条",
+            result["documents"], result["encoded"]
+        ),
+        started,
+    );
     with_state(shared, |state| {
         let id = state.session_id.clone();
         state.session.reload_semantic_index(&id);

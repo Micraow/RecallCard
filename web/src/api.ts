@@ -178,6 +178,11 @@ export const api = {
   saveSettings: (patch: unknown) => call<SettingsView>('/api/settings', patch),
   resetSettings: () => call<SettingsView>('/api/settings/reset', {}),
   buildIndex: () => call<Record<string, unknown>>('/api/index/build', {}),
+  indexProgress: () =>
+    call<{ running: boolean; done: number; total: number; phase: string }>(
+      '/api/index/progress',
+      {},
+    ),
   openVault: (path: string, create: boolean) =>
     call<{ vault: VaultInfo; scope: string }>('/api/vault/open', { path, create }),
   connect: () => call<{ config: unknown; binary: string }>('/api/connect'),

@@ -32,6 +32,9 @@ pub const QUERY_INSTRUCTION: &str = "为这个句子生成表示以用于检索�
 
 const MAX_INDEX_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_DOCUMENTS: usize = 200_000;
+
+/// 一批编码多少条：太小则请求频繁，太大则单次请求过重且看不到进度。
+const ENCODE_CHUNK: usize = 32;
 const MAX_RESULTS: usize = 100;
 const MAX_TEXT_BYTES: usize = 8 * 1024;
 const LOCAL_BATCH: usize = 64;
@@ -263,8 +266,10 @@ impl LocalEncoder {
         // 缓存目录固定到本机状态目录：fastembed 默认相对当前目录，换个目录启动就找不到模型。
         let mut options = fastembed::TextInitOptions::new(fastembed::EmbeddingModel::BGESmallZHV15);
         options.cache_dir = crate::settings::model_cache_dir()?;
-        let model = fastembed::TextEmbedding::try_new(options)
-            .map_err(|_| "本机编码模型不可用；首次使用需要联网下载模型文件".to_string())?;
+        let model = fastembed::TextEmbedding::try_new(options).map_err(|error| {
+            // 原因必须留下：是没下载、还是缓存损坏，处理方式完全不同。
+            format!("本机编码模型不可用；首次使用需要联网下载模型文件（{error}）")
+        })?;
         Ok(Self {
             space: provider.space(),
             model: Mutex::new(model),
@@ -383,6 +388,16 @@ impl CloudEncoder {
             .timeout(self.timeout)
             .build()
             .map_err(|_| "无法创建云端编码客户端".to_string())?;
+        crate::log::note(
+            "编码",
+            format!(
+                "发送 {} 条（{} 字节）到 {}",
+                texts.len(),
+                payload.len(),
+                self.endpoint
+            ),
+        );
+        let started = std::time::Instant::now();
         let response = client
             .post(&self.endpoint)
             .bearer_auth(&self.api_key)
@@ -392,6 +407,7 @@ impl CloudEncoder {
             .map_err(|_| "云端编码请求失败；不会自动更换供应商".to_string())?;
         *sent += payload.len() as u64;
         let status = response.status();
+        crate::log::done("编码", format!("返回 {status}"), started);
         let text = response
             .text()
             .map_err(|_| "云端编码响应无法读取".to_string())?;
@@ -517,16 +533,21 @@ pub(crate) fn corpus_documents(
             scopes.contains(&document.scope)
                 && (document.kind == "event" || document.current_memory_at(time))
         })
-        .map(|document| {
+        .filter_map(|document| {
             let text = corpus_text(document);
-            json!({
+            // 只有元数据、没有正文的记录不参与语义检索：无可编码内容，
+            // 而且部分供应商会直接以「input 不能包含空字符串」拒绝整批。
+            if text.trim().is_empty() {
+                return None;
+            }
+            Some(json!({
                 "ref": document.reference,
                 "kind": document.kind,
                 "scope": document.scope,
                 "content_hash": hash(document.text.as_bytes()),
                 "input_hash": prepared_hash(instruction, &text),
                 "text": text,
-            })
+            }))
         })
         .collect()
 }
@@ -838,9 +859,19 @@ pub fn build_index_from_config(
     access: Access,
     config: &SemanticConfig,
 ) -> Result<Value> {
+    build_index_from_config_with_progress(vault, access, config, &mut |_, _| {})
+}
+
+/// 带进度的重建入口：`on_progress(已编码, 总数)`，界面用它显示进度条。
+pub fn build_index_from_config_with_progress(
+    vault: &Vault,
+    access: Access,
+    config: &SemanticConfig,
+    on_progress: &mut dyn FnMut(usize, usize),
+) -> Result<Value> {
     config.provider.validate()?;
     let encoder = open_encoder(&config.provider)?;
-    build_index_with_encoder(vault, access, config, encoder.as_ref())
+    build_index_with_progress(vault, access, config, encoder.as_ref(), on_progress)
 }
 
 /// 库里已经有索引时，把新增的记录补进去；没有索引就不建。
@@ -885,6 +916,17 @@ pub(crate) fn build_index_with_encoder(
     access: Access,
     parsed: &SemanticConfig,
     encoder: &dyn Encoder,
+) -> Result<Value> {
+    build_index_with_progress(vault, access, parsed, encoder, &mut |_, _| {})
+}
+
+/// 带进度的重建：`on_progress(已完成, 总数)`，供界面显示进度条。
+pub(crate) fn build_index_with_progress(
+    vault: &Vault,
+    access: Access,
+    parsed: &SemanticConfig,
+    encoder: &dyn Encoder,
+    on_progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Value> {
     let index_path = if parsed.index_path.is_absolute() {
         parsed.index_path.clone()
@@ -966,24 +1008,39 @@ pub(crate) fn build_index_with_encoder(
         output_documents.push(document);
     }
 
+    let total = corpus.len();
+    on_progress(total - pending.len(), total);
     let encoded = if pending.is_empty() {
         0
     } else {
-        let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
-        // 编码失败不转发供应商正文原文：原因已由编码器脱敏，这里只补上下文。
-        let encoded = encoder.embed_documents(&texts).map_err(|failure| {
-            format!("编码失败（索引未写入，正文未外泄）：{}", failure.public())
-        })?;
-        if encoded.len() != texts.len() {
-            return Err("编码输出数量与待编码文档不符".into());
-        }
-        for ((position, _), vector) in pending.iter().zip(encoded) {
-            if vector.len() != space.dimensions {
-                return Err("编码输出维度与空间不符".into());
+        let mut done = total - pending.len();
+        let mut encoded = 0usize;
+        for chunk in pending.chunks(ENCODE_CHUNK) {
+            let texts: Vec<String> = chunk.iter().map(|(_, text)| text.clone()).collect();
+            let started = std::time::Instant::now();
+            // 编码失败不转发供应商正文原文：原因已由编码器脱敏，这里只补上下文。
+            let batch = encoder.embed_documents(&texts).map_err(|failure| {
+                format!("编码失败（索引未写入，正文未外泄）：{}", failure.public())
+            })?;
+            if batch.len() != texts.len() {
+                return Err("编码输出数量与待编码文档不符".into());
             }
-            vectors[*position] = vector;
+            for ((position, _), vector) in chunk.iter().zip(batch) {
+                if vector.len() != space.dimensions {
+                    return Err("编码输出维度与空间不符".into());
+                }
+                vectors[*position] = vector;
+            }
+            done += chunk.len();
+            encoded += chunk.len();
+            crate::log::done(
+                "索引",
+                format!("编码 {done}/{total}（本批 {} 条）", chunk.len()),
+                started,
+            );
+            on_progress(done, total);
         }
-        texts.len()
+        encoded
     };
 
     if vectors
@@ -1398,6 +1455,64 @@ mod tests {
             !error.contains("secret") && !error.contains("sk-abc"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn rebuild_reports_progress_from_zero_to_total() {
+        let (_d, vault) = setup();
+        for text in ["第一条事实", "第二条事实", "第三条事实"] {
+            capture(&vault, text);
+        }
+        let config = SemanticConfig {
+            provider: Provider::Local,
+            index_path: vault.root().join(".index/semantic"),
+        };
+        let mut seen: Vec<(usize, usize)> = Vec::new();
+        build_index_with_progress(
+            &vault,
+            access(),
+            &config,
+            &FakeEncoder,
+            &mut |done, total| {
+                seen.push((done, total));
+            },
+        )
+        .expect("重建成功");
+        assert_eq!(seen.first(), Some(&(0, 3)), "起步就要报总数：{seen:?}");
+        assert_eq!(seen.last(), Some(&(3, 3)), "结束时必须是满进度：{seen:?}");
+    }
+
+    #[test]
+    fn documents_without_text_never_reach_the_encoder() {
+        let document = |reference: &str, text: &str| crate::context::Document {
+            reference: reference.into(),
+            text: text.into(),
+            scope: "personal".into(),
+            kind: "event".into(),
+            evidence_refs: Vec::new(),
+            session_ref: None,
+            state: "active".into(),
+            occurred_at: None,
+            valid_from: None,
+            valid_to: None,
+            time_note: String::new(),
+            evidence: String::new(),
+            labels: Vec::new(),
+            entities: Vec::new(),
+            protected: false,
+        };
+        let corpus = corpus_documents(
+            &[
+                document("event:空", ""),
+                document("event:只有空白", "   \n\t "),
+                document("event:有正文", "周末想去爬山"),
+            ],
+            &["personal".to_string()],
+            Utc::now(),
+            "",
+        );
+        assert_eq!(corpus.len(), 1, "只有带正文的记录该进语料：{corpus:?}");
+        assert_eq!(corpus[0]["ref"], "event:有正文");
     }
 
     #[test]
