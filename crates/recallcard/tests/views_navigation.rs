@@ -36,20 +36,27 @@ fn a_memory_reaches_every_topic_but_keeps_one_body() {
         .unwrap();
 
     vault.rebuild_views().unwrap();
-    let nav = std::fs::read_to_string(vault.root().join("generated/views/nav.md")).unwrap();
+    let views = vault.root().join("generated/views");
+    let nav = std::fs::read_to_string(views.join("nav.md")).unwrap();
 
-    for topic in ["## 环境/操作系统", "## 工具/终端"] {
+    // 第一屏只有主题和条数：一条记忆都不出现，几千条时它也不会变长。
+    for topic in ["环境/操作系统", "工具/终端"] {
         assert!(nav.contains(topic), "两处主题都要有入口：{nav}");
     }
-    assert_eq!(
-        nav.matches(&memory.id).count(),
-        2,
-        "两个入口各引用一次记忆编号：{nav}"
-    );
     assert!(
-        !nav.contains("包管理用 pacman"),
-        "导航只给首行一句话，其余正文不该被复制进来：{nav}"
+        !nav.contains(&memory.id),
+        "第一屏不该列记忆，展开交给 topics/：{nav}"
     );
+
+    // 展开到叶子主题，两个入口都能到达同一条记忆。
+    for topic in ["环境/操作系统", "工具/终端"] {
+        let page = std::fs::read_to_string(views.join(format!("topics/{topic}.md"))).unwrap();
+        assert!(page.contains(&memory.id), "主题页要列出这条记忆：{page}");
+        assert!(
+            !page.contains("包管理用 pacman"),
+            "主题页只给首行一句话，其余正文不该被复制进来：{page}"
+        );
+    }
 
     // 正文只有一份，仍然在 memories/ 里。
     let body = vault.root().join(format!("memories/{}.md", memory.id));

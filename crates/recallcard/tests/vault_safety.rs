@@ -178,7 +178,17 @@ fn memory_file_name_must_match_embedded_identifier() {
         v["id"] = format!("mem_{}", replacement.repeat(32)).into()
     });
     assert!(vault.memory(&memory.id).is_err());
-    assert!(vault.doctor().is_err());
+    // doctor 现在一次列出所有问题，而不是遇到第一个就报错。
+    let report = vault.doctor().unwrap();
+    assert_eq!(report["ok"], false);
+    assert!(
+        report["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["file"].as_str().unwrap().ends_with(".md")),
+        "要指出是哪个文件：{report}"
+    );
 }
 
 #[test]
@@ -271,7 +281,16 @@ fn sources_and_doctor_report_deleted_evidence() {
     let memory = user_memory(&vault);
     fs::remove_file(record_path(&vault, "events", &memory.data.source_refs[0])).unwrap();
     assert!(vault.sources(&memory.id).is_err());
-    assert!(vault.doctor().is_err());
+    let report = vault.doctor().unwrap();
+    assert_eq!(report["ok"], false);
+    assert!(
+        report["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["problem"].as_str().unwrap().contains("找不到原始事件")),
+        "要说明是来源没了：{report}"
+    );
 }
 
 #[test]
@@ -375,7 +394,7 @@ fn malformed_json_and_git_conflicts_fail_closed_without_rewriting_views() {
         let original_view = fs::read(&view_path).unwrap();
         fs::write(record_path(&vault, "memories", &memory.id), invalid).unwrap();
         assert!(vault.memory(&memory.id).is_err());
-        assert!(vault.doctor().is_err());
+        assert_eq!(vault.doctor().unwrap()["ok"], false);
         assert!(vault.rebuild_views().is_err());
         assert_eq!(fs::read(view_path).unwrap(), original_view);
     }

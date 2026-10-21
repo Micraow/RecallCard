@@ -64,4 +64,14 @@ fn reading_a_parent_topic_reaches_its_children() {
         1,
         "子主题只给出自己那一条：{child}"
     );
+
+    // compact：这一层只给编号、标题和子主题，正文要单独 read。
+    let record = &child["results"][0]["records"][0];
+    assert!(record.get("text").is_none(), "compact 不带正文：{record}");
+    assert!(record["title"].as_str().unwrap().starts_with("Arch"));
+    assert_eq!(
+        parent["results"][0]["children"].as_array().unwrap().len(),
+        1,
+        "父主题要列出子主题：{parent}"
+    );
 }

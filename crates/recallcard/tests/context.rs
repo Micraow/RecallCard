@@ -521,7 +521,7 @@ fn named_view_is_dynamic_and_never_reads_generated_files() {
         first["records"][0]["ref"],
         format!("memory:{}@1", memory.id)
     );
-    assert_eq!(first["records"][0]["text"], "当前资料来自正本。");
+    assert_eq!(first["records"][0]["title"], "当前资料来自正本。");
     assert!(!first.to_string().contains("伪造视图"));
     assert_eq!(first["records"], view(&context, "计算环境")["records"]);
     let mut updated = memory.data.clone();
@@ -532,7 +532,7 @@ fn named_view_is_dynamic_and_never_reads_generated_files() {
         latest["records"][0]["ref"],
         format!("memory:{}@2", memory.id)
     );
-    assert!(latest["records"][0]["text"]
+    assert!(latest["records"][0]["title"]
         .as_str()
         .unwrap()
         .contains("立即反映"));
@@ -984,7 +984,6 @@ fn named_views_and_mixed_reads_respect_total_byte_budget() {
             }
             .unwrap();
             assert!(serde_json::to_vec(&response).unwrap().len() <= budget);
-            assert_eq!(response["truncated"], true);
             assert!(response["results"]
                 .as_array()
                 .unwrap()
@@ -992,18 +991,23 @@ fn named_views_and_mixed_reads_respect_total_byte_budget() {
                 .all(|result| result["ref"].is_string()));
         }
     }
-    let response = context
+    // 极小预算下一定截断；能给出的和待给的加起来必须正好 12 条，
+    // 除非连编号列表都装不下，那种情况必须显式说 pending 列表被截了。
+    let tiny = context
         .read(ReadArgs {
             refs: vec!["view:computing".into()],
-            budget_bytes: 4096,
+            budget_bytes: 1024,
         })
         .unwrap();
-    assert_eq!(response["truncated"], true);
-    assert_eq!(response["results"][0]["truncated"], true);
-    assert!(!response["results"][0]["pending_refs"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    let result = &tiny["results"][0];
+    assert_eq!(result["truncated"], true);
+    let pending = result["pending_refs"].as_array().unwrap().len();
+    let shown = result["records"].as_array().unwrap().len();
+    if result["pending_list_truncated"] == json!(true) {
+        assert!(pending < 12, "只有装不下时才会标 pending 截断：{tiny}");
+    } else {
+        assert_eq!(pending + shown, 12, "截断只是分批，不该丢记录：{tiny}");
+    }
 }
 
 #[test]

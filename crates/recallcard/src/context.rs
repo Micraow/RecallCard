@@ -382,20 +382,48 @@ impl<'a> Context<'a> {
                     .strip_prefix(label)
                     .is_some_and(|rest| rest.starts_with('/'))
         };
-        let records = self
+        let matched = self
             .documents()?
             .into_iter()
             .filter(|doc| {
                 doc.current_memory_at(time) && doc.labels.iter().any(|l| under(l.as_str()))
             })
+            .collect::<Vec<_>>();
+        // 这一层的子主题：把每个标签多余的后缀切掉，去重。
+        let mut children = std::collections::BTreeSet::new();
+        for doc in &matched {
+            for label_path in &doc.labels {
+                if let Some(rest) = label_path.strip_prefix(&format!("{label}/")) {
+                    let head = rest.split('/').next().unwrap_or(rest);
+                    if !head.is_empty() {
+                        children.insert(format!("{label}/{head}"));
+                    }
+                }
+            }
+        }
+        // compact：编号、标题（正文首行）、状态、证据性质和所在主题。
+        // 正文让调用方自己按需读——一屏能装下多少条，取决于这个投影有多小。
+        let records = matched
+            .iter()
             .map(|doc| {
-                let mut value = serde_json::to_value(doc).map_err(|e| e.to_string())?;
-                value["ref"] = value["reference"].take();
-                value.as_object_mut().unwrap().remove("reference");
-                Ok(value)
+                json!({
+                    "ref": doc.reference,
+                    "title": crate::vault::summary_line(&doc.text),
+                    "state": doc.state,
+                    "evidence": doc.evidence,
+                    "labels": doc.labels,
+                })
             })
-            .collect::<Result<Vec<_>>>()?;
-        let mut response = json!({"ref":format!("view:{label}"),"label":label,"reference_data":true,"records":records,"truncated":false,"pending_refs":[]});
+            .collect::<Vec<_>>();
+        let mut response = json!({
+            "ref": format!("view:{label}"),
+            "label": label,
+            "detail": "compact",
+            "children": children,
+            "records": records,
+            "truncated": false,
+            "pending_refs": [],
+        });
         while json_size(&response)? > budget {
             response["truncated"] = json!(true);
             if let Some(record) = response["records"].as_array_mut().unwrap().pop() {
@@ -509,7 +537,7 @@ pub(crate) fn bootstrap_projection(
     let mut reference_ends = Vec::new();
     for doc in docs.iter().filter(|doc| doc.current_memory_at(now)) {
         for label in &doc.labels {
-            if label != "bootstrap" && valid_view_label(label) {
+            if label != "bootstrap" && crate::model::valid_label(label) {
                 labels.insert(format!("view:{label}"));
             }
         }
@@ -575,7 +603,7 @@ pub fn parse_ref(reference: &str) -> Result<(&str, &str, Option<u64>)> {
         return Err("无效的 RecallCard 引用".into());
     };
     if kind == "view" {
-        if !valid_view_label(rest) {
+        if !crate::model::valid_label(rest) {
             return Err("无效的 View 引用".into());
         }
         return Ok((kind, rest, None));
@@ -596,25 +624,6 @@ pub fn parse_ref(reference: &str) -> Result<(&str, &str, Option<u64>)> {
         _ => return Err("不支持的引用种类".into()),
     }
     Ok((kind, id, revision))
-}
-/// 标签即目录位置：`环境/操作系统` 这样用 `/` 分层。
-///
-/// 它会被当成路径看待，所以每一段都按单段老规矩检查：不许空、不许 `.`/`..`、
-/// 不许出现别的分隔符或控制字符。
-fn valid_view_label(label: &str) -> bool {
-    !label.is_empty()
-        && label.len() <= 128
-        && !label.starts_with('/')
-        && !label.ends_with('/')
-        && !label.contains("//")
-        && label.split('/').all(|segment| {
-            !segment.is_empty()
-                && segment != "."
-                && !segment.contains("..")
-                && segment
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        })
 }
 pub fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();

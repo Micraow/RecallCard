@@ -364,6 +364,25 @@ pub fn validate_id(id: &str, prefix: &str) -> Result<()> {
     }
     Ok(())
 }
+/// 标签就是记忆在目录里的位置：`环境/操作系统` 这样分层。
+///
+/// 写库时按它校验，读的时候按它拼路径，所以两处必须是同一条规则。
+pub fn valid_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 128
+        && !label.starts_with('/')
+        && !label.ends_with('/')
+        && !label.contains("//")
+        && label.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && !segment.contains("..")
+                && segment
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+}
+
 pub fn nonempty(value: &str, label: &str) -> Result<()> {
     if value.trim().is_empty() {
         Err(format!("{label}不能为空"))

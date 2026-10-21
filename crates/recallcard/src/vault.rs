@@ -482,12 +482,29 @@ impl Vault {
             &self.root.join("generated/views/memories.md"),
             out.as_bytes(),
         )?;
-        // 主题导航：记忆的 labels 就是它在目录里的位置，一条可以有多个。
-        // 这里只出标题与一句话，正文永远只在 memories/ 里存一份。
+        // 主题导航：记忆的 labels 就是它在目录里的位置，一条可以挂多处。
+        // 第一屏只给树和条数；展开靠 topics/ 下每个主题一页；正文永远只在
+        // memories/ 里存一份。
+        let direct = topic_index(&memories);
         self.write_bytes(
             &self.root.join("generated/views/nav.md"),
-            navigation_view(&memories).as_bytes(),
+            navigation_index(&direct).as_bytes(),
         )?;
+        let topics = self.root.join("generated/views/topics");
+        if topics.exists() {
+            // 目录结构可能随标签变化，旧页留着会骗人，整体重建。
+            fs::remove_dir_all(&topics).map_err(err)?;
+        }
+        for node in topic_nodes(&direct) {
+            if !crate::model::valid_label(&node) {
+                continue;
+            }
+            let path = topics.join(format!("{node}.md"));
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(err)?;
+            }
+            self.write_bytes(&path, topic_page(&direct, &node).as_bytes())?;
+        }
         Ok(memories.len())
     }
     pub fn ensure_derived(&self) -> Result<()> {
@@ -525,10 +542,22 @@ impl Vault {
                 continue;
             }
             match self.memory(&id) {
-                Ok(memory) => match self.validate_evidence(&memory.data) {
-                    Ok(()) => memories.push(memory),
-                    Err(error) => problems.push(json!({"file": name, "problem": error})),
-                },
+                Ok(memory) => {
+                    for tag in &memory.data.tags {
+                        if !crate::model::valid_label(tag) {
+                            problems.push(json!({
+                                "file": name,
+                                "problem": format!(
+                                    "标签 `{tag}` 不是合法的主题路径：用 / 分层，每段只能是字母、数字、-、_、.，不能有 .. 或空段；这条记忆不会出现在目录里"
+                                ),
+                            }));
+                        }
+                    }
+                    match self.validate_evidence(&memory.data) {
+                        Ok(()) => memories.push(memory),
+                        Err(error) => problems.push(json!({"file": name, "problem": error})),
+                    }
+                }
                 Err(error) => problems.push(json!({"file": name, "problem": error})),
             }
         }
@@ -694,69 +723,113 @@ pub fn render_memory(memory: &Memory) -> Result<String> {
         memory.data.content
     ))
 }
-/// 由 labels 生成的分层导航：`环境/操作系统` 逐级成一个节点，一条记忆可挂多处。
-///
-/// 第一层是主题，第二层是主题下的记忆，第三层是 `memories/<id>.md` 正文，
-/// 第四层是它引用的原始事件——读的顺序就是这样往下走。父节点给出整棵子树的条数，
-/// 所以不必展开就能知道哪块内容多。
-fn navigation_view(memories: &[Memory]) -> String {
-    let mut direct: std::collections::BTreeMap<String, Vec<&Memory>> =
-        std::collections::BTreeMap::new();
+/// 标签 → 直接挂在这个主题下的记忆。未打标签的单独归一类。
+fn topic_index(memories: &[Memory]) -> std::collections::BTreeMap<String, Vec<&Memory>> {
+    let mut direct: std::collections::BTreeMap<String, Vec<&Memory>> = Default::default();
     for memory in memories {
         if memory.data.tags.is_empty() {
             direct.entry("未分类".into()).or_default().push(memory);
             continue;
         }
         for label in &memory.data.tags {
-            direct
-                .entry(label.trim().to_owned())
-                .or_default()
-                .push(memory);
+            direct.entry(label.clone()).or_default().push(memory);
         }
     }
-    let mut out = String::from(
-        "# 主题导航\n\n由记忆的 labels 确定性生成。这里只给入口和一句话；\
-正文只存在 memories/ 里，一条记忆可以从多个主题到达。\n",
-    );
-    if direct.is_empty() {
-        out.push_str("\n_还没有记忆。_\n");
-        return out;
-    }
-    // 节点 = 每条标签以及它的所有上层路径，这样 `环境` 会作为 `环境/桌面` 的父节点出现。
-    let mut nodes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    direct
+}
+
+/// 所有主题节点：每条标签加上它的各级上层，`环境` 于是成为 `环境/桌面` 的父节点。
+fn topic_nodes(direct: &std::collections::BTreeMap<String, Vec<&Memory>>) -> Vec<String> {
+    let mut nodes = std::collections::BTreeSet::new();
     for label in direct.keys() {
         for (index, _) in label.match_indices('/') {
             nodes.insert(label[..index].to_owned());
         }
         nodes.insert(label.clone());
     }
-    for node in &nodes {
-        let prefix = format!("{node}/");
-        let total: usize = direct
-            .iter()
-            .filter(|(path, _)| *path == node || path.starts_with(&prefix))
-            .map(|(_, entries)| entries.len())
-            .sum();
-        let depth = node.matches('/').count() + 1;
-        out.push_str(&format!("\n{} {node}（{total} 条）\n", "#".repeat(depth)));
-        let entries = direct.get(node).map(Vec::as_slice).unwrap_or_default();
-        if entries.is_empty() {
-            continue;
-        }
-        out.push('\n');
-        for memory in entries {
-            out.push_str(&format!(
-                "- `{}`：{}\n",
-                memory.id,
-                summary(&memory.data.content)
-            ));
-        }
+    nodes.into_iter().collect()
+}
+
+fn subtree_count(direct: &std::collections::BTreeMap<String, Vec<&Memory>>, node: &str) -> usize {
+    let prefix = format!("{node}/");
+    direct
+        .iter()
+        .filter(|(path, _)| path.as_str() == node || path.starts_with(&prefix))
+        .map(|(_, entries)| entries.len())
+        .sum()
+}
+
+/// 第一屏：只有主题树和条数，没有一条记忆的正文或标题。
+///
+/// 这就是"精炼数据"那一层——几千条记忆时它仍然只有几十行，agent 看完就知道
+/// 该展开哪一支，而不是先吞下整份清单。
+fn navigation_index(direct: &std::collections::BTreeMap<String, Vec<&Memory>>) -> String {
+    let mut out = String::from(
+        "# 主题导航\n\n每行是「主题路径（该子树下记忆条数）」。\n\
+展开某个主题看该主题下的记忆清单：`generated/views/topics/<主题路径>.md`；\
+正文在 `memories/<编号>.md`；再往下是它引用的原始事件。\n",
+    );
+    let nodes = topic_nodes(direct);
+    if nodes.is_empty() {
+        out.push_str("\n_还没有记忆。_\n");
+        return out;
+    }
+    out.push('\n');
+    // BTreeMap 的顺序天然是字典序，父节点总在子节点前面，缩进即可成树。
+    for node in nodes {
+        let depth = node.matches('/').count();
+        out.push_str(&format!(
+            "{}- {}（{} 条）\n",
+            "  ".repeat(depth),
+            node,
+            subtree_count(direct, &node)
+        ));
     }
     out
 }
 
-/// 一句话概览：取正文首行，截断在 UTF-8 边界。
-fn summary(content: &str) -> String {
+/// 某一层的展开页：先给直接子主题，再给挂在这一层上的记忆（编号 + 首行）。
+fn topic_page(direct: &std::collections::BTreeMap<String, Vec<&Memory>>, node: &str) -> String {
+    let prefix = format!("{node}/");
+    let mut children: std::collections::BTreeSet<String> = Default::default();
+    for path in direct.keys() {
+        if let Some(rest) = path.strip_prefix(&prefix) {
+            let head = rest.split('/').next().unwrap_or(rest);
+            if !head.is_empty() {
+                children.insert(format!("{node}/{head}"));
+            }
+        }
+    }
+    let mut out = format!("# {node}\n\n");
+    if !children.is_empty() {
+        out.push_str("子主题：\n\n");
+        for child in children {
+            out.push_str(&format!(
+                "- {}（{} 条）\n",
+                child,
+                subtree_count(direct, &child)
+            ));
+        }
+        out.push('\n');
+    }
+    let entries = direct.get(node).map(Vec::as_slice).unwrap_or_default();
+    if entries.is_empty() {
+        out.push_str("_这一层没有直接挂记忆，展开子主题。_\n");
+        return out;
+    }
+    out.push_str("记忆：\n\n");
+    for memory in entries {
+        out.push_str(&format!(
+            "- `{}`：{}\n",
+            memory.id,
+            summary_line(&memory.data.content)
+        ));
+    }
+    out
+}
+
+/// 一句话概览：取正文首行，截断在 UTF-8 边界。导航与 compact 视图共用。
+pub fn summary_line(content: &str) -> String {
     let line = content.lines().next().unwrap_or_default().trim();
     let clipped = crate::context::truncate_utf8(line, 80);
     match clipped.len() < line.len() {
