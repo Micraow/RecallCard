@@ -20,11 +20,13 @@
   --danger: #9c2b23;
   --danger-soft: #faeceb;
   --code-bg: #f5f1e9;
-  --sans: "Avenir Next", "Helvetica Neue", "PingFang SC", "Hiragino Sans GB",
-    "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
-  --serif: "Songti SC", "Source Han Serif SC", "Noto Serif CJK SC", "Georgia", "Times New Roman",
-    serif;
-  --mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  /* 字体名必须是本机真实存在的族名；写错会静默落到 DejaVu 上，排版立刻垮掉 */
+  --sans: "Inter", "思源黑体 CN", "Source Han Sans CN", "Noto Sans CJK SC", system-ui, sans-serif;
+  --sans-display: "Inter Display", "Inter", "思源黑体 CN", "Source Han Sans CN", system-ui, sans-serif;
+  /* 思源宋体的西文是 Source Serif，与中文同源，混排不会互相打架 */
+  --serif: "思源宋体 CN", "Source Han Serif CN", "Noto Serif CJK SC", Georgia, serif;
+  --mono: "JetBrainsMono Nerd Font Mono", "JetBrainsMono NFM", "DejaVu Sans Mono", ui-monospace,
+    monospace;
   --read: 40rem;
 }
 
@@ -164,8 +166,9 @@ textarea {
 }
 
 .brand-name {
-  font-family: var(--serif);
+  font-family: var(--sans-display);
   font-size: 16px;
+  font-weight: 600;
   letter-spacing: 0.02em;
 }
 
@@ -294,7 +297,7 @@ textarea {
 }
 
 .page-head h1 {
-  font-family: var(--serif);
+  font-family: var(--sans-display);
   font-size: 22px;
   margin: 0;
   font-weight: 500;
@@ -412,7 +415,7 @@ textarea {
 }
 
 .empty strong {
-  font-family: var(--serif);
+  font-family: var(--sans-display);
   font-size: 15.5px;
   font-weight: 500;
   color: var(--ink-soft);
@@ -480,8 +483,8 @@ textarea {
 
 .markdown {
   font-family: var(--serif);
-  font-size: 16px;
-  line-height: 1.78;
+  font-size: 16.5px;
+  line-height: 1.82;
   color: var(--ink);
   overflow-wrap: anywhere;
   max-width: var(--read);
@@ -764,7 +767,7 @@ textarea {
 }
 
 .panel h2 {
-  font-family: var(--serif);
+  font-family: var(--sans-display);
   font-size: 16px;
   margin: 0 0 5px;
   font-weight: 600;
