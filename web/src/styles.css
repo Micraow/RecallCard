@@ -502,22 +502,30 @@ textarea {
   font-family: var(--serif);
   line-height: 1.4;
   margin: 1.5em 0 0.6em;
-  font-weight: 600;
+  font-weight: 650;
   letter-spacing: 0.01em;
 }
 
+/* 中文标题在衬线里层级容易糊在一起，标题单独用无衬线加粗更清楚 */
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  font-family: var(--sans);
+  letter-spacing: 0.005em;
+}
+
 .markdown h1 {
-  font-size: 1.42em;
+  font-size: 1.5em;
   margin-top: 1.7em;
 }
 
 .markdown h2 {
-  font-size: 1.26em;
+  font-size: 1.32em;
   margin-top: 1.6em;
 }
 
 .markdown h3 {
-  font-size: 1.12em;
+  font-size: 1.18em;
   margin-top: 1.5em;
 }
 
