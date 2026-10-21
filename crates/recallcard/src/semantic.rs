@@ -36,6 +36,9 @@ const MAX_DOCUMENTS: usize = 200_000;
 /// 一批编码多少条：太小则请求频繁，太大则单次请求过重且看不到进度。
 const ENCODE_CHUNK: usize = 32;
 
+/// 查询向量缓存条数：同一条查询反复搜时省掉一次云端往返（云端一次要几秒）。
+const QUERY_CACHE_ENTRIES: usize = 256;
+
 /// 同时发出几批编码。云端一次往返要几秒，串行编码上千条要几十分钟；
 /// 并发发几路能接近线性加快，代价是更容易撞上限流（已在请求层做退避重试）。
 const ENCODE_WORKERS: usize = 4;
@@ -633,6 +636,8 @@ pub struct SemanticIndex {
     meta: IndexMeta,
     vectors: Vec<Vec<f32>>,
     encoder: Mutex<Option<Box<dyn Encoder>>>,
+    /// 查询向量按「编码空间 + 原文」缓存；索引重建会换空间签名，旧条目自然不再命中。
+    cache: Mutex<std::collections::VecDeque<(u64, Vec<f32>)>>,
 }
 
 impl SemanticIndex {
@@ -713,6 +718,7 @@ impl SemanticIndex {
             meta,
             vectors,
             encoder: Mutex::new(None),
+            cache: Mutex::new(std::collections::VecDeque::new()),
         })
     }
 
@@ -723,6 +729,38 @@ impl SemanticIndex {
     /// 编码查询。不访问正本、不持有 Vault 锁，因此不会阻塞写入。
     /// 编码器在首次调用时构造；构造失败只降级为词法检索，不中断请求。
     pub(crate) fn query_vector(&self, query: &str) -> SResult<Vec<f32>> {
+        let key = cache_key(&self.meta.space_signature, query);
+        if let Some(vector) = self.cache_get(key) {
+            crate::log::note("索引", "查询向量命中缓存");
+            return Ok(vector);
+        }
+        let vector = self.encode_query(query)?;
+        self.cache_put(key, &vector);
+        Ok(vector)
+    }
+
+    fn cache_get(&self, key: u64) -> Option<Vec<f32>> {
+        let cache = self.cache.lock().ok()?;
+        cache
+            .iter()
+            .find(|(cached, _)| *cached == key)
+            .map(|(_, vector)| vector.clone())
+    }
+
+    fn cache_put(&self, key: u64, vector: &[f32]) {
+        let Ok(mut cache) = self.cache.lock() else {
+            return;
+        };
+        if cache.iter().any(|(cached, _)| *cached == key) {
+            return;
+        }
+        if cache.len() >= QUERY_CACHE_ENTRIES {
+            cache.pop_front();
+        }
+        cache.push_back((key, vector.to_vec()));
+    }
+
+    fn encode_query(&self, query: &str) -> SResult<Vec<f32>> {
         let mut slot = self
             .encoder
             .lock()
@@ -1164,6 +1202,12 @@ pub fn index_status(vault: &Vault) -> Result<Value> {
     }))
 }
 
+fn cache_key(space: &str, query: &str) -> u64 {
+    // 只需要区分不同查询，不需要抗碰撞强度。
+    let digest = crate::model::hash(format!("{space}\u{1}{query}").as_bytes());
+    u64::from_str_radix(&digest[..16], 16).unwrap_or_default()
+}
+
 /// 并发编码待处理的文档，按原始位置回填向量。
 ///
 /// 每批仍然走 `Encoder::embed_documents`，所以批大小、脱敏、维度校验都不变；
@@ -1369,6 +1413,7 @@ mod tests {
             meta,
             vectors,
             encoder: Mutex::new(Some(Box::new(FakeEncoder))),
+            cache: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -1561,6 +1606,47 @@ mod tests {
             !error.contains("secret") && !error.contains("sk-abc"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn the_same_query_is_encoded_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct Counting(Arc<AtomicUsize>);
+        impl Encoder for Counting {
+            fn space(&self) -> Space {
+                FakeEncoder.space()
+            }
+            fn embed_documents(
+                &self,
+                texts: &[String],
+            ) -> std::result::Result<Vec<Vec<f32>>, EncoderFailure> {
+                Ok(texts.iter().map(|_| vec![0.1; FAKE_DIM]).collect())
+            }
+            fn embed_query(&self, _: &str) -> std::result::Result<Vec<f32>, EncoderFailure> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![0.1; FAKE_DIM])
+            }
+            fn transmitted_bytes(&self) -> u64 {
+                0
+            }
+        }
+
+        let (_d, vault) = setup();
+        capture(&vault, "一条用来建索引的事实");
+        build(&vault);
+        let mut index = open_index(&vault);
+        let calls = Arc::new(AtomicUsize::new(0));
+        index.encoder = Mutex::new(Some(Box::new(Counting(calls.clone()))));
+
+        index.query_vector("显卡驱动").expect("第一次编码");
+        index.query_vector("显卡驱动").expect("第二次应当命中缓存");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "同一条查询只该编码一次");
+        index
+            .query_vector("另一条查询")
+            .expect("不同查询要真的编码");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

@@ -193,7 +193,14 @@ export const api = {
     call<{ vault: VaultInfo; scope: string }>('/api/vault/open', { path, create }),
   connect: () => call<{ config: unknown; binary: string }>('/api/connect'),
   dreamSources: (since: string, until: string) =>
-    call<{ count: number; total_bytes: number; samples: RecordRow[]; llm_ready: { base_url: boolean } }>(
+    call<{
+      count: number;
+      pending: number;
+      source_limit: number;
+      total_bytes: number;
+      samples: RecordRow[];
+      llm_ready: { base_url: boolean };
+    }>(
       '/api/dream/sources',
       { since, until },
     ),

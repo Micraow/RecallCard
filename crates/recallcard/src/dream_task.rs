@@ -283,20 +283,29 @@ impl Write for BoundedBytes {
     }
 }
 
-/// 自动挑选整理来源：范围内尚未被任何记忆引用的原始记录，新的优先。
-pub fn select_sources(
+/// 范围内还没被任何记忆引用过的原始记录总数：用来告诉人「这次只整理了 61 条，
+/// 还剩多少」，而不是让人对着一个莫名的数字猜。
+pub fn pending_count(
     vault: &Vault,
     scope: &str,
     since: Option<chrono::DateTime<chrono::Utc>>,
     until: Option<chrono::DateTime<chrono::Utc>>,
-    limit: usize,
-) -> Result<Vec<Event>> {
+) -> Result<usize> {
+    Ok(pending_events(vault, scope, since, until)?.len())
+}
+
+fn pending_events(
+    vault: &Vault,
+    scope: &str,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Vec<crate::model::Event>> {
     let covered: std::collections::BTreeSet<String> = vault
         .memories()?
         .into_iter()
         .flat_map(|memory| memory.data.source_refs.clone())
         .collect();
-    let mut events: Vec<crate::model::Event> = vault
+    Ok(vault
         .events()?
         .into_iter()
         .filter(|event| event.data.scope == scope && event.data.has_original_evidence())
@@ -306,7 +315,18 @@ pub fn select_sources(
             (_, Some(until)) if event.data.occurred_at.is_none_or(|at| at > until) => false,
             _ => true,
         })
-        .collect();
+        .collect())
+}
+
+/// 自动挑选整理来源：范围内尚未被任何记忆引用的原始记录，新的优先。
+pub fn select_sources(
+    vault: &Vault,
+    scope: &str,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    limit: usize,
+) -> Result<Vec<Event>> {
+    let mut events = pending_events(vault, scope, since, until)?;
     events.sort_by_key(|event| std::cmp::Reverse(event.data.occurred_at));
     let mut total = 0;
     let mut picked = Vec::new();

@@ -66,6 +66,9 @@ export function MemoriesPage({ scope, onError, onChanged }: Props) {
     return { since: start.toISOString(), until };
   }
 
+  const [pending, setPending] = useState(0);
+  const [sourceLimit, setSourceLimit] = useState(0);
+
   async function count(ranged: string) {
     setWorking('counting');
     setNotice('');
@@ -74,6 +77,8 @@ export function MemoriesPage({ scope, onError, onChanged }: Props) {
       const window = since(ranged);
       const result = await api.dreamSources(window.since, window.until);
       setCandidates(result.count);
+      setPending(result.pending);
+      setSourceLimit(result.source_limit);
       setSamples(result.samples);
       setLlmReady(result.llm_ready.base_url);
       setPreview(null);
@@ -182,7 +187,10 @@ export function MemoriesPage({ scope, onError, onChanged }: Props) {
               ) : candidates === 0 ? (
                 '这个范围内没有待整理的记录'
               ) : (
-                `将整理 ${candidates} 条原始记录`
+                `将整理 ${candidates} 条原始记录` +
+                (pending > candidates
+                  ? `（共 ${pending.toLocaleString('zh-CN')} 条待整理，一次最多 ${sourceLimit} 条，其余下次再整理）`
+                  : '')
               )}
             </span>
           </div>

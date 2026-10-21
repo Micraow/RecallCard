@@ -467,8 +467,11 @@ fn dream_sources(shared: &Shared, body: &Value) -> Result<Value> {
         let vault = Vault::open(&PathBuf::from(&info.root))?;
         let picked =
             dream_task::select_sources(&vault, &state.scope, since, until, DREAM_SOURCE_LIMIT)?;
+        let pending = dream_task::pending_count(&vault, &state.scope, since, until)?;
         Ok(json!({
             "count": picked.len(),
+            "pending": pending,
+            "source_limit": DREAM_SOURCE_LIMIT,
             "total_bytes": picked.iter().map(|e| e.data.text().len()).sum::<usize>(),
             "samples": picked.iter().take(5).map(|e| json!({
                 "ref": format!("event:{}", e.id),
