@@ -6,11 +6,9 @@ use crate::{
     Vault,
 };
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 
 pub(super) struct WorkspaceRecords {
-    documents: BTreeMap<String, Document>,
-    events: BTreeMap<String, Event>,
+    snapshot: std::sync::Arc<crate::context::Snapshot>,
 }
 
 pub(super) fn conversation_title(event: &Event) -> String {
@@ -43,38 +41,41 @@ fn response_size(value: &Value) -> Result<usize> {
 }
 
 impl WorkspaceRecords {
-    /// 调用方在构造原响应之前持读锁；补充字段与原响应来自同一授权快照。
-    pub(super) fn load(vault: &Vault, context: &Context<'_>) -> Result<Self> {
-        let documents: BTreeMap<_, _> = context
-            .documents_locked()
-            .map_err(|_| health_error())?
-            .into_iter()
-            .map(|d| (d.reference.clone(), d))
-            .collect();
-        let events = vault
-            .events()
-            .map_err(|_| health_error())?
-            .into_iter()
-            .filter_map(|event| {
-                let reference = format!("event:{}", event.id);
-                documents
-                    .get(&reference)
-                    .filter(|d| d.kind == "event")
-                    .map(|_| (reference, event))
-            })
-            .collect();
-        Ok(Self { documents, events })
+    /// 直接用 Context 已经读好的快照：界面补字段时不再把正本重读一遍。
+    pub(super) fn load(_vault: &Vault, context: &Context<'_>) -> Result<Self> {
+        Ok(Self {
+            snapshot: context.snapshot().map_err(|_| health_error())?,
+        })
+    }
+
+    fn document(&self, reference: &str) -> Option<&Document> {
+        self.snapshot
+            .by_reference
+            .get(reference)
+            .map(|index| &self.snapshot.documents[*index])
+    }
+
+    /// 只给当前可见的事件：被修订或被抑制的旧事件不能借补字段透出去。
+    fn event(&self, reference: &str) -> Option<&Event> {
+        let document = self.snapshot.by_reference.get(reference)?;
+        if self.snapshot.documents[*document].kind != "event" {
+            return None;
+        }
+        self.snapshot
+            .event_by_reference
+            .get(reference)
+            .map(|index| &self.snapshot.events[*index])
     }
 
     fn fields(&self, reference: &str) -> Value {
-        if let Some(event) = self.events.get(reference) {
+        if let Some(event) = self.event(reference) {
             return event_fields(event);
         }
-        if let Some(doc) = self.documents.get(reference).filter(|d| d.kind == "memory") {
+        if let Some(doc) = self.document(reference).filter(|d| d.kind == "memory") {
             let sources: Vec<_> = doc
                 .evidence_refs
                 .iter()
-                .filter_map(|reference| self.events.get(reference).map(|event| (reference, event)))
+                .filter_map(|reference| self.event(reference).map(|event| (reference, event)))
                 .collect();
             let rows: Vec<_> = sources
                 .iter()
@@ -97,7 +98,7 @@ impl WorkspaceRecords {
             let original = response["results"][index].clone();
             let reference = original["ref"].as_str().unwrap_or("");
             extend(&mut response["results"][index], self.fields(reference));
-            if let Some(doc) = self.documents.get(reference) {
+            if let Some(doc) = self.document(reference) {
                 if original["text"]
                     .as_str()
                     .is_some_and(|text| text.len() < doc.text.len())

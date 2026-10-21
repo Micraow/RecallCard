@@ -548,6 +548,21 @@ fn open_encoder(provider: &Provider) -> Result<Box<dyn Encoder>> {
 // 语料：正本投影。Event 与 Memory 都进入索引，未整理的原始对话同样可被语义召回。
 // ---------------------------------------------------------------------------
 
+/// 太短的记录不进向量这一路。
+///
+/// 一句话问句（「怎么回事」「这是什么」）没有可编码的信息，却在向量空间里离什么都近，
+/// 于是长期霸占第一名。词法那一路仍然能搜到它们，只是不再让它们抢语义排序的头名。
+fn semantic_worthy(text: &str) -> bool {
+    // 长文本一定够，先看长度：每次检索都要对全库判一遍，分词太贵。
+    text.len() >= SHORT_TEXT_BYTES || crate::context::tokenize(text).len() >= SHORT_TEXT_TOKENS
+}
+
+/// 超过这个字节数的文本不必再分词：肯定是实质内容。
+const SHORT_TEXT_BYTES: usize = 64;
+
+/// 低于这个 token 数视为「没有实质内容」。中文双字切分下约等于六个汉字。
+const SHORT_TEXT_TOKENS: usize = 6;
+
 fn corpus_text(document: &Document) -> String {
     // 长正文只取前 MAX_TEXT_BYTES，避免单条吃掉整批预算；截断在 UTF-8 边界。
     crate::context::truncate_utf8(&document.text, MAX_TEXT_BYTES).to_string()
@@ -569,7 +584,7 @@ pub(crate) fn corpus_documents(
             let text = corpus_text(document);
             // 只有元数据、没有正文的记录不参与语义检索：无可编码内容，
             // 而且部分供应商会直接以「input 不能包含空字符串」拒绝整批。
-            if text.trim().is_empty() {
+            if !semantic_worthy(&text) {
                 return None;
             }
             Some(json!({
@@ -789,24 +804,28 @@ impl SemanticIndex {
         limit: usize,
         scopes: &[String],
         time: DateTime<Utc>,
-    ) -> SResult<Vec<String>> {
-        self.check_current(documents, scopes, time)?;
+    ) -> SResult<(Vec<String>, usize)> {
+        let _ = time;
+        self.check_scope(scopes)?;
         if vector.len() != self.meta.dimensions {
             return failure("dimension_mismatch");
         }
-        let mut scored: Vec<(f32, usize)> = self
-            .vectors
-            .iter()
-            .enumerate()
-            .map(|(index, stored)| (dot(vector, stored), index))
+        let matched = self.matched(documents);
+        let covered = matched.len();
+        let mut scored: Vec<(f32, usize)> = matched
+            .into_iter()
+            .map(|index| (dot(vector, &self.vectors[index]), index))
             .collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
         let take = limit.clamp(1, MAX_RESULTS).min(scored.len());
-        Ok(scored[..take]
-            .iter()
-            .filter(|(score, _)| *score > 0.0)
-            .map(|(_, index)| self.meta.documents[*index].reference.clone())
-            .collect())
+        Ok((
+            scored[..take]
+                .iter()
+                .filter(|(score, _)| *score > 0.0)
+                .map(|(_, index)| self.meta.documents[*index].reference.clone())
+                .collect(),
+            covered,
+        ))
     }
 
     pub fn document_count(&self) -> usize {
@@ -824,45 +843,42 @@ impl SemanticIndex {
         })
     }
 
-    fn check_current(
-        &self,
-        documents: &[Document],
-        scopes: &[String],
-        time: DateTime<Utc>,
-    ) -> SResult<()> {
+    fn check_scope(&self, scopes: &[String]) -> SResult<()> {
         if self.meta.scope.iter().collect::<BTreeSet<_>>() != scopes.iter().collect::<BTreeSet<_>>()
         {
             return failure("scope_mismatch");
         }
+        Ok(())
+    }
+
+    /// 索引里哪些向量仍然对应正本里的同一份内容。
+    ///
+    /// 只判断「这一条还对得上」，不要求「正本一条不多」：写了新记忆、导入了新对话，
+    /// 只是这一路暂时没覆盖到它们，词法那一路照样能搜到。以前任何变化都判
+    /// generation_mismatch，于是每写一次记忆语义检索就整个关掉，而且没人知道。
+    fn matched(&self, documents: &[Document]) -> Vec<usize> {
         let instruction = &self.meta.space.document_instruction;
-        let corpus = corpus_documents(documents, scopes, time, instruction);
-        if corpus_generation(&corpus) != self.meta.generation
-            || corpus.len() != self.meta.documents.len()
-        {
-            return failure("generation_mismatch");
-        }
         let live: BTreeMap<&str, &Document> = documents
             .iter()
             .map(|document| (document.reference.as_str(), document))
             .collect();
+        let mut valid = Vec::new();
         for (index, document) in self.meta.documents.iter().enumerate() {
             let Some(current) = live.get(document.reference.as_str()) else {
-                return failure("generation_mismatch");
+                continue;
             };
-            let Some(row) = corpus.get(index) else {
-                return failure("generation_mismatch");
-            };
-            if row["ref"].as_str() != Some(document.reference.as_str()) {
-                return failure("generation_mismatch");
+            let text = corpus_text(current);
+            if !semantic_worthy(&text) {
+                continue;
             }
-            if current.scope != document.scope
-                || document.content_hash != hash(current.text.as_bytes())
-                || document.input_hash != prepared_hash(instruction, &corpus_text(current))
+            if current.scope == document.scope
+                && document.content_hash == hash(current.text.as_bytes())
+                && document.input_hash == prepared_hash(instruction, &text)
             {
-                return failure("content_mismatch");
+                valid.push(index);
             }
         }
-        Ok(())
+        valid
     }
 }
 
@@ -929,12 +945,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// 增量重建索引：input_hash 未变化的文档沿用旧向量，只编码新增与变更部分。
-pub fn build_index(vault: &Vault, access: Access, config: Option<&Path>) -> Result<Value> {
-    let parsed = resolve_config(vault, config)?;
-    let encoder = open_encoder(&parsed.provider)?;
-    build_index_with_encoder(vault, access, &parsed, encoder.as_ref())
-}
-
 /// 用调用方给出的完整配置重建索引；界面按本机设置选择本地或云端编码。
 pub fn build_index_from_config(
     vault: &Vault,
@@ -975,31 +985,6 @@ pub fn refresh_if_present(vault: &Vault, access: Access) -> Option<Result<Value>
 /// 库内默认索引位置，供界面与本机设置共同引用。
 pub fn vault_index_path(vault: &Vault) -> PathBuf {
     vault.root().join(default_index_path())
-}
-
-fn resolve_config(vault: &Vault, config: Option<&Path>) -> Result<SemanticConfig> {
-    let parsed: SemanticConfig = match config {
-        Some(path) => read_json_file(path)?,
-        None => SemanticConfig {
-            provider: Provider::Local,
-            index_path: vault.root().join(default_index_path()),
-        },
-    };
-    parsed.provider.validate()?;
-    if !parsed.index_path.is_absolute() && config.is_some() {
-        return Err("配置文件中的 index_path 必须是绝对路径".into());
-    }
-    Ok(parsed)
-}
-
-/// 构建核心。编码器由调用方提供：生产走 open_encoder，测试注入确定性实现。
-pub(crate) fn build_index_with_encoder(
-    vault: &Vault,
-    access: Access,
-    parsed: &SemanticConfig,
-    encoder: &dyn Encoder,
-) -> Result<Value> {
-    build_index_with_progress(vault, access, parsed, encoder, &|_, _| {})
 }
 
 /// 带进度的重建：`on_progress(已完成, 总数)`，供界面显示进度条。
@@ -1392,7 +1377,7 @@ mod tests {
             provider: Provider::Local,
             index_path: vault.root().join(".index/semantic"),
         };
-        build_index_with_encoder(vault, access(), &config, &FakeEncoder).unwrap()
+        build_index_with_progress(vault, access(), &config, &FakeEncoder, &|_, _| {}).unwrap()
     }
 
     fn open_index(vault: &Vault) -> SemanticIndex {
@@ -1476,20 +1461,58 @@ mod tests {
     }
 
     #[test]
-    fn capture_after_build_invalidates_rank_not_request() {
+    fn capture_after_build_still_uses_the_indexed_documents() {
         let (_d, vault) = setup();
         capture(&vault, "已索引的事实");
         build(&vault);
         let index = open_index(&vault);
-        capture(&vault, "构建之后新增的事实");
-        // 正本变化后语义通道降级为固定错误码；请求整体仍成功返回词法结果。
+        let later = capture(&vault, "构建之后新增的事实");
+        // 新记录只是还没进向量这一路；已索引的那些照旧可用，不该整体关掉语义检索。
         let context = Context::with_semantic(&vault, access(), &index);
         let response = context.search(search_args("事实")).unwrap();
-        assert_eq!(response["coverage"]["semantic_search"], "unavailable");
-        assert_eq!(
-            response["coverage"]["semantic_error"],
-            "generation_mismatch"
+        assert_eq!(response["coverage"]["semantic_search"], "available");
+        let refs: Vec<&str> = response["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["ref"].as_str().unwrap())
+            .collect();
+        assert!(
+            refs.contains(&format!("event:{}", later.id).as_str()),
+            "没进索引的新记录仍要能被词法那一路搜到：{response}"
         );
+    }
+
+    #[test]
+    fn a_rewritten_memory_drops_out_of_the_vector_lane_without_killing_it() {
+        let (_d, vault) = setup();
+        capture(&vault, "数据库连接池泄漏已在深夜修复");
+        let event = capture(&vault, "周末计划去爬山看日出");
+        let memory = vault
+            .add_memory(
+                serde_json::from_value(json!({
+                    "content": "周末喜欢去爬山",
+                    "source_refs": [event.id],
+                    "evidence": "user_explicit",
+                    "scope": "personal",
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        build(&vault);
+        // 记忆被改写：只有它自己失去向量，事件那边照旧可用。
+        let path = vault.root().join(format!("memories/{}.md", memory.id));
+        let text = fs::read_to_string(&path).unwrap().replace("爬山", "徒步");
+        fs::write(&path, text).unwrap();
+        let index = open_index(&vault);
+        let context = Context::with_semantic(&vault, access(), &index);
+        let response = context.search(search_args("爬山")).unwrap();
+        assert_eq!(response["coverage"]["semantic_search"], "available");
+        assert!(response["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["ref"] == format!("event:{}", event.id)));
     }
 
     #[test]
@@ -1600,7 +1623,8 @@ mod tests {
             provider: Provider::Local,
             index_path: vault.root().join(".index/semantic"),
         };
-        let error = build_index_with_encoder(&vault, access(), &config, &Broken).unwrap_err();
+        let error =
+            build_index_with_progress(&vault, access(), &config, &Broken, &|_, _| {}).unwrap_err();
         assert!(error.contains("编码"), "{error}");
         assert!(
             !error.contains("secret") && !error.contains("sk-abc"),
@@ -1680,7 +1704,7 @@ mod tests {
             index_path: vault.root().join(".index/semantic"),
         };
         let started = std::time::Instant::now();
-        build_index_with_encoder(&vault, access(), &config, &Slow).expect("重建成功");
+        build_index_with_progress(&vault, access(), &config, &Slow, &|_, _| {}).expect("重建成功");
         let elapsed = started.elapsed();
         assert!(
             elapsed < std::time::Duration::from_millis(150 + 100 * ENCODE_CHUNK as u64 * 4 / 1000),
@@ -1771,7 +1795,8 @@ mod tests {
             provider: Provider::Local,
             index_path: vault.root().join(".index/semantic"),
         };
-        let error = build_index_with_encoder(&vault, access(), &config, &Explained).unwrap_err();
+        let error = build_index_with_progress(&vault, access(), &config, &Explained, &|_, _| {})
+            .unwrap_err();
         assert!(
             error.contains("401"),
             "编码器声明可公开的原因应当保留：{error}"

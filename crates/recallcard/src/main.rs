@@ -149,12 +149,10 @@ enum IndexCommand {
         #[arg(long, required = true)]
         scope: Vec<String>,
     },
-    /// 用本机模型重建索引
+    /// 按设置的编码方式重建索引（与界面同一个来源，不会悄悄换模型）
     Build {
         #[arg(long, required = true)]
         scope: Vec<String>,
-        #[arg(long)]
-        config: Option<PathBuf>,
     },
     /// 显示索引覆盖与模型空间
     Status,
@@ -390,8 +388,10 @@ fn run(cli: Cli) -> Result<Value> {
             IndexCommand::Export { scope } => {
                 Context::new(&vault, Access::new(scope)?).embedding_corpus()
             }
-            IndexCommand::Build { scope, config } => {
-                recallcard::semantic::build_index(&vault, Access::new(scope)?, config.as_deref())
+            IndexCommand::Build { scope } => {
+                let config =
+                    recallcard::settings::Settings::load(&vault)?.semantic_config(&vault)?;
+                recallcard::semantic::build_index_from_config(&vault, Access::new(scope)?, &config)
             }
             IndexCommand::Status => recallcard::semantic::index_status(&vault),
         },

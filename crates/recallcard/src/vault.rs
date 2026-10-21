@@ -3,6 +3,7 @@ use chrono::{Datelike, Utc};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -426,11 +427,26 @@ impl Vault {
         }
     }
     pub fn validate_evidence(&self, input: &MemoryInput) -> Result<()> {
+        let events = self.events()?;
+        let by_id: BTreeMap<&str, &Event> = events.iter().map(|e| (e.id.as_str(), e)).collect();
+        self.validate_evidence_with(input, &by_id)
+    }
+    /// 批量校验时用这个：`by_id` 由调用方建一次，避免每条记忆都重扫一遍全库。
+    pub(crate) fn validate_evidence_with(
+        &self,
+        input: &MemoryInput,
+        by_id: &BTreeMap<&str, &Event>,
+    ) -> Result<()> {
         input.validate()?;
-        let sources: Vec<Event> = input
+        let sources: Vec<&Event> = input
             .source_refs
             .iter()
-            .map(|id| self.event(id))
+            .map(|id| {
+                by_id
+                    .get(id.as_str())
+                    .copied()
+                    .ok_or_else(|| format!("找不到原始事件 {id}"))
+            })
             .collect::<Result<_>>()?;
         if sources.iter().any(|e| !e.data.has_original_evidence()) {
             return Err("注入的上下文不能作为新的记忆证据".into());
@@ -521,6 +537,7 @@ impl Vault {
     /// 所以每条问题都要说清楚「哪个文件、哪一项、期望什么」。
     pub fn doctor(&self) -> Result<Value> {
         let events = self.events()?;
+        let by_id: BTreeMap<&str, &Event> = events.iter().map(|e| (e.id.as_str(), e)).collect();
         let mut problems: Vec<Value> = Vec::new();
         // 逐文件检查：能读进来的收进 memories，读不进来的变成一条 problem。
         let mut memories = Vec::new();
@@ -553,7 +570,7 @@ impl Vault {
                             }));
                         }
                     }
-                    match self.validate_evidence(&memory.data) {
+                    match self.validate_evidence_with(&memory.data, &by_id) {
                         Ok(()) => memories.push(memory),
                         Err(error) => problems.push(json!({"file": name, "problem": error})),
                     }
@@ -570,7 +587,7 @@ impl Vault {
             .into_iter()
             .flatten()
             {
-                if self.event(id).is_err() {
+                if !by_id.contains_key(id.as_str()) {
                     problems.push(json!({
                         "file": format!("event:{}", event.id),
                         "problem": format!("引用了不存在的事件 {id}"),
