@@ -9,8 +9,11 @@ use serde_json::{json, Value};
 use std::fs;
 use tempfile::{tempdir, TempDir};
 
+mod support;
+
 fn vault() -> (TempDir, Vault) {
     let dir = tempdir().unwrap();
+    support::isolate_state();
     let vault = Vault::init(&dir.path().join("合成资料库")).unwrap();
     (dir, vault)
 }

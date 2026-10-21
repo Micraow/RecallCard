@@ -10,6 +10,8 @@ use serde_json::{json, Value};
 use std::path::Path;
 use tempfile::{tempdir, TempDir};
 
+mod support;
+
 struct Fixture {
     _dir: TempDir,
     ui: DesktopSession,
@@ -19,6 +21,7 @@ struct Fixture {
     memory: Memory,
 }
 fn setup() -> Fixture {
+    support::isolate_state();
     let dir = tempdir().unwrap();
     let mut ui = DesktopSession::default();
     let info = ui.select_vault(&dir.path().join("资料库"), true).unwrap();

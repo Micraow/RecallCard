@@ -4,7 +4,10 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, path::Path};
 use tempfile::{tempdir, TempDir};
 
+mod support;
+
 fn fixture() -> (TempDir, DesktopSession, String, std::path::PathBuf) {
+    support::isolate_state();
     let directory = tempdir().unwrap();
     let mut session = DesktopSession::default();
     let info = session

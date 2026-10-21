@@ -5,6 +5,8 @@ use recallcard::{
     EventInput, MemoryInput, Vault,
 };
 use serde_json::json;
+
+mod support;
 fn capture(v: &Vault, scope: &str, message: &str, content: &str) -> recallcard::Event {
     let input: EventInput = serde_json::from_value(json!({
         "role":"user","origin":"native","scope":scope,"content":content,
@@ -14,6 +16,7 @@ fn capture(v: &Vault, scope: &str, message: &str, content: &str) -> recallcard::
 }
 fn setup() -> (tempfile::TempDir, Vault) {
     let d = tempfile::tempdir().unwrap();
+    support::isolate_state();
     let v = Vault::init(&d.path().join("vault")).unwrap();
     (d, v)
 }

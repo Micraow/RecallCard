@@ -12,9 +12,12 @@ use std::{
 };
 use tempfile::{tempdir, TempDir};
 
+mod support;
+
 fn started() -> (TempDir, u16, String) {
     let dir = tempdir().unwrap();
     let vault = dir.path().join("资料库");
+    support::isolate_state();
     Vault::init(&vault).unwrap();
     let web = dir.path().join("web");
     fs::create_dir_all(&web).unwrap();

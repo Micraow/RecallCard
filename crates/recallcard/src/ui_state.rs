@@ -41,14 +41,29 @@ fn save(next: &LastUsed) -> Result<()> {
     fs::rename(&temporary, &path).map_err(|_| "无法保存上次使用的资料库".to_owned())
 }
 
+/// 临时目录里的库是跑测试或临时试用留下的，记下来只会让下次 `ui` 打不开。
+fn disposable(root: &Path) -> bool {
+    let temp = std::env::temp_dir();
+    root.starts_with(&temp)
+        || root.starts_with("/tmp")
+        || root.starts_with("/var/tmp")
+        || root.starts_with("/run")
+}
+
 /// 任何命令成功打开资料库后都调用一次，下一次 `ui` 就能零参数启动。
 pub fn remember_vault(root: &Path) -> Result<()> {
+    if disposable(root) {
+        return Ok(());
+    }
     let mut state = load()?;
     state.vault = Some(root.to_path_buf());
     save(&state)
 }
 
 pub fn remember_session(root: &Path, scope: &str, port: u16) -> Result<()> {
+    if disposable(root) {
+        return Ok(());
+    }
     let mut state = load()?;
     state.vault = Some(root.to_path_buf());
     state.scope = Some(scope.to_owned());

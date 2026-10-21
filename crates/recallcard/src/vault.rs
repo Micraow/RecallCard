@@ -104,6 +104,10 @@ impl Vault {
         &self.root
     }
     pub fn state_dir(&self) -> Result<PathBuf> {
+        // 测试里所有库都落到临时目录：既不污染用户真实状态，也让命令行子进程
+        // 与父进程看到同一把锁。
+        #[cfg(test)]
+        crate::isolate_test_state();
         let base = std::env::var_os("RECALLCARD_STATE_DIR")
             .map(PathBuf::from)
             .or_else(dirs::state_dir)

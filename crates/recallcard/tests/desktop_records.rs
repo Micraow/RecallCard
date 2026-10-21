@@ -7,7 +7,10 @@ use serde_json::{json, Value};
 use std::path::Path;
 use tempfile::{tempdir, TempDir};
 
+mod support;
+
 fn setup() -> (TempDir, DesktopSession, VaultInfo, Vault) {
+    support::isolate_state();
     let dir = tempdir().unwrap();
     let mut session = DesktopSession::default();
     let info = session

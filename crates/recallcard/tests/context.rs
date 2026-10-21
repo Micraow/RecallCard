@@ -5,8 +5,11 @@ use recallcard::{
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
+
+mod support;
 fn setup() -> (TempDir, Vault) {
     let d = tempfile::tempdir().unwrap();
+    support::isolate_state();
     let v = Vault::init(&d.path().join("vault")).unwrap();
     (d, v)
 }

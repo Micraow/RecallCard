@@ -6,12 +6,15 @@ use recallcard::{
 use serde_json::json;
 use tempfile::tempdir;
 
+mod support;
+
 const LLM_KEY: &str = "sk-合成-不要外泄-0001";
 const EMBEDDING_KEY: &str = "sk-合成-不要外泄-0002";
 
 #[test]
 fn keys_never_come_back_through_the_settings_view() {
     let dir = tempdir().unwrap();
+    support::isolate_state();
     Vault::init(dir.path()).unwrap();
     let vault = Vault::open(dir.path()).unwrap();
 

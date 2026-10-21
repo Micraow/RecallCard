@@ -4,6 +4,8 @@ use recallcard::{dream_task, vault::Vault};
 use serde_json::json;
 use tempfile::tempdir;
 
+mod support;
+
 const SCOPE: &str = "personal";
 
 fn capture(vault: &Vault, content: &str, occurred_at: chrono::DateTime<Utc>) -> recallcard::Event {
@@ -22,6 +24,7 @@ fn capture(vault: &Vault, content: &str, occurred_at: chrono::DateTime<Utc>) -> 
 #[test]
 fn already_consolidated_events_are_not_offered_again() {
     let dir = tempdir().unwrap();
+    support::isolate_state();
     Vault::init(dir.path()).unwrap();
     let vault = Vault::open(dir.path()).unwrap();
 

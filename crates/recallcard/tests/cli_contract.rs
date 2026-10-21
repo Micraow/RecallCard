@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
+mod support;
+
 fn run(vault: &Vault, args: &[&str], input: Option<&str>) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_recallcard"))
         .arg("--vault")
@@ -34,6 +36,7 @@ fn ok(output: Output) -> Value {
 }
 fn setup() -> (tempfile::TempDir, Vault) {
     let dir = tempfile::tempdir().unwrap();
+    support::isolate_state();
     let vault = Vault::init(&dir.path().join("vault")).unwrap();
     (dir, vault)
 }

@@ -9,8 +9,11 @@ use std::{
 };
 use tempfile::{tempdir, TempDir};
 
+mod support;
+
 fn vault() -> (TempDir, Vault) {
     let dir = tempdir().expect("创建测试目录");
+    support::isolate_state();
     let vault = Vault::init(&dir.path().join("资料库")).expect("初始化资料库");
     (dir, vault)
 }

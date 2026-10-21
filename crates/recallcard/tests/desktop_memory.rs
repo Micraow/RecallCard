@@ -7,7 +7,10 @@ use serde_json::json;
 use std::path::Path;
 use tempfile::{tempdir, TempDir};
 
+mod support;
+
 fn setup() -> (TempDir, DesktopSession, VaultInfo, Vault, Event, Memory) {
+    support::isolate_state();
     let dir = tempdir().unwrap();
     let mut ui = DesktopSession::default();
     let info = ui.select_vault(&dir.path().join("资料库"), true).unwrap();
