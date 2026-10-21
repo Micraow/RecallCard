@@ -721,8 +721,10 @@ fn rank<'a>(docs: &'a [Document], query: &[String], raw: &str) -> Vec<(f64, &'a 
             }
             let n = df[*term] as f64;
             let idf = (1.0 + (docs.len() as f64 - n + 0.5) / (n + 0.5)).ln();
-            score +=
-                idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * tokens.len() as f64 / avg.max(1.0)));
+            // BM25 默认奖励"比平均更短"的文档，因为短文档通常更聚焦。这里不成立：
+            // 一句「怎么回事」比任何正经回答都短，却什么信息都没有。所以长度只罚不奖。
+            let length = (tokens.len() as f64 / avg.max(1.0)).max(1.0);
+            score += idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * length));
         }
         if doc.text.to_lowercase().contains(&raw) {
             score += 5.0;
