@@ -252,3 +252,37 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 const SETTINGS_BROKEN: &str = "本机设置文件无法解析；请修正或删除后重试";
 const SAVE_FAILED: &str = "无法保存本机设置";
+
+/// 一次重建是整库外发：上限给足，超了会报出实际字节数，不会静默只发一半。
+pub const CLOUD_INDEX_BUDGET: usize = 16 * 1024 * 1024;
+
+impl Settings {
+    /// 设置是唯一事实源：编码怎么走只在这里决定一次，界面与命令行共用。
+    pub fn semantic_config(
+        &self,
+        vault: &crate::vault::Vault,
+    ) -> Result<crate::semantic::SemanticConfig> {
+        let index_path = crate::semantic::vault_index_path(vault);
+        if self.embedding.provider != "cloud" {
+            return Ok(crate::semantic::SemanticConfig {
+                provider: crate::semantic::Provider::Local,
+                index_path,
+            });
+        }
+        if self.embedding.key.is_empty() {
+            return Err("云端编码需要密钥；请到设置页填写".into());
+        }
+        Ok(crate::semantic::SemanticConfig {
+            provider: crate::semantic::Provider::Cloud {
+                endpoint: self.embedding.endpoint.clone(),
+                model: self.embedding.model.clone(),
+                dimensions: self.embedding.dimensions,
+                key_env: "RECALLCARD_EMBEDDING_KEY".into(),
+                timeout_ms: 30_000,
+                max_transmitted_bytes: CLOUD_INDEX_BUDGET,
+                key: Some(self.embedding.key.clone()),
+            },
+            index_path,
+        })
+    }
+}

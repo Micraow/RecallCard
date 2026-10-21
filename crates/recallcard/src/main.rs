@@ -103,9 +103,6 @@ enum Command {
         detail: String,
         #[arg(long)]
         cursor: Option<String>,
-        /// 由本机维护者固定的可选语义索引配置；默认不启用
-        #[arg(long)]
-        semantic_config: Option<PathBuf>,
     },
     /// 重建语义索引；只读正本，不外发
     Index {
@@ -116,8 +113,6 @@ enum Command {
     Mcp {
         #[arg(long, required = true)]
         scope: Vec<String>,
-        #[arg(long)]
-        semantic_config: Option<PathBuf>,
     },
     /// 离线重建文本快照与视图，不重新调用模型
     Rebuild,
@@ -373,12 +368,8 @@ fn run(cli: Cli) -> Result<Value> {
             as_of,
             detail,
             cursor,
-            semantic_config,
         } => {
-            let index = recallcard::semantic::SemanticIndex::open_for(
-                vault.root(),
-                semantic_config.as_deref(),
-            );
+            let index = recallcard::semantic::SemanticIndex::open_for_vault(&vault);
             let access = Access::new(scope)?;
             let context = match index.as_ref() {
                 Some(index) => Context::with_semantic(&vault, access, index),
@@ -422,17 +413,10 @@ fn main() {
         }
         return;
     }
-    if let Command::Mcp {
-        scope,
-        semantic_config,
-    } = &cli.command
-    {
+    if let Command::Mcp { scope } = &cli.command {
         let result = Vault::open(&vault_path(&cli)).and_then(|vault| {
             let access = Access::new(scope.clone())?;
-            let index = recallcard::semantic::SemanticIndex::open_for(
-                vault.root(),
-                semantic_config.as_deref(),
-            );
+            let index = recallcard::semantic::SemanticIndex::open_for_vault(&vault);
             recallcard::transport::serve_mcp_io(
                 &vault,
                 access,

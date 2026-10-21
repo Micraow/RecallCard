@@ -649,7 +649,9 @@ impl SemanticIndex {
         let dir = root.join(default_index_path());
         let meta: IndexMeta = read_json_file(&dir.join("index.json"))?;
         if meta.space.provider != "local-onnx" {
-            return Err("索引由云端编码空间生成，请用 --semantic-config 指明端点".into());
+            return Err(
+                "索引由云端编码空间生成，需要库里的编码设置；请到设置页确认端点与密钥".into(),
+            );
         }
         Self::from_config(SemanticConfig {
             provider: Provider::Local,
@@ -657,12 +659,25 @@ impl SemanticIndex {
         })
     }
 
-    /// 检索与 MCP 的唯一取索引入口：配置优先，其次库内本地索引；
-    /// 都没有或都不可用时返回 None，调用方降级为纯词法检索。
-    pub fn open_for(root: &Path, config: Option<&Path>) -> Option<Self> {
-        match config {
-            Some(path) => Self::open(path).ok(),
-            None => Self::open_vault(root).ok(),
+    /// 检索与 MCP 的唯一取索引入口：按库里保存的编码设置打开索引。
+    ///
+    /// 打不开就降级为纯词法检索，但必须把原因说出来——默默不检索比报错更难查。
+    pub fn open_for_vault(vault: &crate::vault::Vault) -> Option<Self> {
+        let config = match crate::settings::Settings::load(vault)
+            .and_then(|settings| settings.semantic_config(vault))
+        {
+            Ok(config) => config,
+            Err(error) => {
+                crate::log::note("索引", format!("语义索引不可用：{error}"));
+                return None;
+            }
+        };
+        match Self::from_config(config) {
+            Ok(index) => Some(index),
+            Err(error) => {
+                crate::log::note("索引", format!("语义索引不可用：{error}"));
+                None
+            }
         }
     }
 

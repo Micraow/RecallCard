@@ -430,7 +430,7 @@ fn build_index(shared: &Shared) -> Result<Value> {
         let info = state.session.status(&state.session_id)?;
         let vault = Vault::open(&PathBuf::from(&info.root))?;
         let settings = Settings::load(&vault)?;
-        let config = provider_config(&vault, &settings)?;
+        let config = settings.semantic_config(&vault)?;
         Ok((vault, config, state.scope.clone()))
     })?;
     let access = Access::new(vec![scope])?;
@@ -568,36 +568,6 @@ fn settings(shared: &Shared, body: &Value) -> Result<Value> {
 }
 
 /// 把本机设置翻译成索引配置：云端要地址、模型、维度与密钥环境变量之外的信息。
-/// 单次云端重建允许外发的正文字节上限（JSON 封装后的实际发送量）。
-const CLOUD_INDEX_BUDGET: usize = 16 * 1024 * 1024;
-
-fn provider_config(vault: &Vault, settings: &Settings) -> Result<semantic::SemanticConfig> {
-    let index_path = semantic::vault_index_path(vault);
-    if settings.embedding.provider == "cloud" {
-        if settings.embedding.key.is_empty() {
-            return Err("云端编码需要密钥；请到设置页填写".into());
-        }
-        return Ok(semantic::SemanticConfig {
-            provider: semantic::Provider::Cloud {
-                endpoint: settings.embedding.endpoint.clone(),
-                model: settings.embedding.model.clone(),
-                dimensions: settings.embedding.dimensions,
-                key_env: "RECALLCARD_EMBEDDING_KEY".into(),
-                timeout_ms: 30_000,
-                // 一次重建是整库外发，上限按"够用但不放任"给：超了会报出实际字节数，
-                // 不会静默只发一半。
-                max_transmitted_bytes: CLOUD_INDEX_BUDGET,
-                key: Some(settings.embedding.key.clone()),
-            },
-            index_path,
-        });
-    }
-    Ok(semantic::SemanticConfig {
-        provider: semantic::Provider::Local,
-        index_path,
-    })
-}
-
 fn current_vault(shared: &Shared) -> Result<Vault> {
     with_state(shared, |state| {
         let info = state.session.status(&state.session_id)?;

@@ -572,7 +572,7 @@ impl DesktopSession {
         self.semantic = self
             .vault(session_id)
             .ok()
-            .and_then(|vault| crate::semantic::SemanticIndex::open_for(vault.root(), None));
+            .and_then(crate::semantic::SemanticIndex::open_for_vault);
     }
 }
 
