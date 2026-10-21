@@ -27,7 +27,7 @@ recallcard connect --vault ~/我的资料 --scope personal
 ```sh
 recallcard init    --vault ~/我的资料
 recallcard capture --vault ~/我的资料 --content "决定先核对来源，再继续实现"
-recallcard search  --vault ~/我的资料 --query "核对来源"
+recallcard search  --vault ~/我的资料 --scope personal "核对来源"
 recallcard doctor  --vault ~/我的资料
 ```
 
@@ -40,11 +40,15 @@ recallcard dream review --vault ~/我的资料 --input result.md
 recallcard dream apply  --vault ~/我的资料 --input result.md
 ```
 
-桌面版（Tauri）负责选库、搜索阅读、随身背景、记忆管理、整理审阅、生成连接配置。构建：
+界面是一个本地网页，由 CLI 现场起服务，不常驻、不联网：
 
 ```sh
-cd desktop && npm exec --yes --package=@tauri-apps/cli@2.12.1 -- tauri build
+cd web && pnpm install && pnpm build   # 只需构建一次
+recallcard ui --vault ~/我的资料 --scope personal
 ```
+
+终端会打印一个带一次性令牌的地址，用浏览器打开即可。服务只监听 `127.0.0.1`，
+令牌换成的 Cookie 只存在本次进程里；关掉进程，页面也随之失效。
 
 ## 设计
 
@@ -60,10 +64,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-界面回归（jsdom，无需浏览器）：
+界面构建与类型检查：
 
 ```sh
-cd desktop/tests/local-dom && npm ci && npm test
+cd web && pnpm install --frozen-lockfile && pnpm build
 ```
 
 约定见 [AGENTS.md](AGENTS.md)。

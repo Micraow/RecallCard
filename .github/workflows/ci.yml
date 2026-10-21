@@ -2,7 +2,7 @@ name: 核心验证
 on:
   workflow_dispatch:
   pull_request:
-    paths: ["crates/**", "Cargo.*", ".github/workflows/ci.yml"]
+    paths: ["crates/**", "web/**", "Cargo.*", ".github/workflows/ci.yml"]
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -26,3 +26,20 @@ jobs:
       - run: cargo test --locked --workspace
         env:
           RECALLCARD_STATE_DIR: ${{ runner.temp }}/recallcard-state
+  web:
+    name: 界面构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
+      - run: pnpm build
+        working-directory: web

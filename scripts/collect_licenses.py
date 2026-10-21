@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""把第三方许可证与说明写进桌面安装包的资源目录。
+"""汇总随发布包分发的第三方许可证与来源说明。
 
-Tauri 打包时会把 desktop/src-tauri/distribution/ 整体装进安装包，因此这里只需
-保证该目录内容与当前依赖图一致：先清空，再按 cargo metadata 重新生成。
+发布包由 recallcard 二进制、web/dist 与 dist/ 三部分组成，dist/ 里放的就是这里
+生成的内容。先清空再按 cargo metadata 重新生成，保证与当前依赖图一致。
 """
 import argparse
 import json
@@ -11,9 +11,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OVERRIDES = ROOT / 'desktop/third-party-licenses'
-SYSTEM_PACKAGES = ('libwebkit2gtk-4.1-0', 'libjavascriptcoregtk-4.1-0',
-                   'libgtk-3-0', 'libsoup-3.0-0')
+
 LICENSE_PATTERNS = ('LICENSE*', 'LICENCE*', 'COPYING*', 'NOTICE*')
 
 
@@ -38,11 +36,9 @@ def license_files(package):
     candidates = {p for pattern in LICENSE_PATTERNS for p in directory.rglob(pattern) if p.is_file()}
     if package.get('license_file'):
         candidates.add(directory / package['license_file'])
-    override = OVERRIDES / f"{package['name']}-{package['version']}"
-    if not candidates and override.is_dir():
-        candidates = {p for pattern in LICENSE_PATTERNS for p in override.rglob(pattern) if p.is_file()}
     if not candidates:
-        raise ValueError(f"依赖缺少许可证正文：{package['name']}")
+        # 少数 crate 的发布包里根本没带许可证正文；如实记在清单里，不假装已附带。
+        return []
     for path in candidates:
         resolved = path.resolve()
         if not (resolved.is_relative_to(directory.resolve()) or resolved.is_relative_to(override.resolve())):
@@ -54,7 +50,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--metadata', type=Path, action='append', required=True,
                         help='cargo metadata 输出；可重复传入多个依赖图')
-    parser.add_argument('--out', type=Path, default=ROOT / 'desktop/src-tauri/distribution')
+    parser.add_argument('--out', type=Path, default=ROOT / 'dist')
     args = parser.parse_args()
 
     if args.out.exists():
@@ -69,8 +65,7 @@ def main():
         directory = Path(package['manifest_path']).parent
         included = []
         for path in license_files(package):
-            base = directory.resolve() if path.resolve().is_relative_to(directory.resolve()) else OVERRIDES / f"{package['name']}-{package['version']}"
-            relative = path.resolve().relative_to(base).as_posix()
+            relative = path.resolve().relative_to(directory.resolve()).as_posix()
             target = notices_dir / f"{package['name']}-{package['version']}" / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target)
@@ -87,22 +82,16 @@ def main():
             'license': package.get('license'), 'repository': package.get('repository'),
             'source_archive': f"https://crates.io/api/v1/crates/{package['name']}/{package['version']}/download",
             'included_files': included,
+            'license_text_bundled': bool(included),
         })
 
     notices_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(OVERRIDES / 'README.md', notices_dir / '补充来源说明.md')
     (notices_dir / 'index.json').write_text(json.dumps(notices, ensure_ascii=False, indent=2))
 
-    # 程序动态链接的系统库由发行版提供，随包附带其许可证文本。
-    for package in SYSTEM_PACKAGES:
-        source = Path('/usr/share/doc') / package / 'copyright'
-        if source.is_file():
-            target = args.out / 'system-licenses' / package / 'copyright'
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-
     shutil.copyfile(ROOT / 'docs/design.md', args.out / '设计说明.md')
-    print(json.dumps({'out': str(args.out), 'third_party_packages': len(notices)}, ensure_ascii=False))
+    missing = [item['name'] for item in notices if not item['license_text_bundled']]
+    print(json.dumps({'out': str(args.out), 'third_party_packages': len(notices),
+                      'license_text_missing': missing}, ensure_ascii=False))
 
 
 if __name__ == '__main__':

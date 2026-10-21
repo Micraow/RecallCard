@@ -7,3 +7,5 @@ dist
 .workbuddy/
 __pycache__/
 *.pyc
+/web/.pnpm-store
+/vendor

@@ -1,0 +1,46 @@
+name: 打包
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  bundle:
+    name: 发布包 / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
+      - run: pnpm build
+        working-directory: web
+      - run: cargo build --release --locked --package recallcard
+      - run: python scripts/collect_licenses.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recallcard-${{ matrix.os }}
+          path: |
+            target/release/recallcard
+            target/release/recallcard.exe
+            web/dist
+            dist/
