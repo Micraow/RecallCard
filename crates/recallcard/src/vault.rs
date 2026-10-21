@@ -482,6 +482,12 @@ impl Vault {
             &self.root.join("generated/views/memories.md"),
             out.as_bytes(),
         )?;
+        // 主题导航：记忆的 labels 就是它在目录里的位置，一条可以有多个。
+        // 这里只出标题与一句话，正文永远只在 memories/ 里存一份。
+        self.write_bytes(
+            &self.root.join("generated/views/nav.md"),
+            navigation_view(&memories).as_bytes(),
+        )?;
         Ok(memories.len())
     }
     pub fn ensure_derived(&self) -> Result<()> {
@@ -688,6 +694,77 @@ pub fn render_memory(memory: &Memory) -> Result<String> {
         memory.data.content
     ))
 }
+/// 由 labels 生成的分层导航：`环境/操作系统` 逐级成一个节点，一条记忆可挂多处。
+///
+/// 第一层是主题，第二层是主题下的记忆，第三层是 `memories/<id>.md` 正文，
+/// 第四层是它引用的原始事件——读的顺序就是这样往下走。父节点给出整棵子树的条数，
+/// 所以不必展开就能知道哪块内容多。
+fn navigation_view(memories: &[Memory]) -> String {
+    let mut direct: std::collections::BTreeMap<String, Vec<&Memory>> =
+        std::collections::BTreeMap::new();
+    for memory in memories {
+        if memory.data.tags.is_empty() {
+            direct.entry("未分类".into()).or_default().push(memory);
+            continue;
+        }
+        for label in &memory.data.tags {
+            direct
+                .entry(label.trim().to_owned())
+                .or_default()
+                .push(memory);
+        }
+    }
+    let mut out = String::from(
+        "# 主题导航\n\n由记忆的 labels 确定性生成。这里只给入口和一句话；\
+正文只存在 memories/ 里，一条记忆可以从多个主题到达。\n",
+    );
+    if direct.is_empty() {
+        out.push_str("\n_还没有记忆。_\n");
+        return out;
+    }
+    // 节点 = 每条标签以及它的所有上层路径，这样 `环境` 会作为 `环境/桌面` 的父节点出现。
+    let mut nodes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for label in direct.keys() {
+        for (index, _) in label.match_indices('/') {
+            nodes.insert(label[..index].to_owned());
+        }
+        nodes.insert(label.clone());
+    }
+    for node in &nodes {
+        let prefix = format!("{node}/");
+        let total: usize = direct
+            .iter()
+            .filter(|(path, _)| *path == node || path.starts_with(&prefix))
+            .map(|(_, entries)| entries.len())
+            .sum();
+        let depth = node.matches('/').count() + 1;
+        out.push_str(&format!("\n{} {node}（{total} 条）\n", "#".repeat(depth)));
+        let entries = direct.get(node).map(Vec::as_slice).unwrap_or_default();
+        if entries.is_empty() {
+            continue;
+        }
+        out.push('\n');
+        for memory in entries {
+            out.push_str(&format!(
+                "- `{}`：{}\n",
+                memory.id,
+                summary(&memory.data.content)
+            ));
+        }
+    }
+    out
+}
+
+/// 一句话概览：取正文首行，截断在 UTF-8 边界。
+fn summary(content: &str) -> String {
+    let line = content.lines().next().unwrap_or_default().trim();
+    let clipped = crate::context::truncate_utf8(line, 80);
+    match clipped.len() < line.len() {
+        true => format!("{clipped}…"),
+        false => clipped.to_string(),
+    }
+}
+
 pub fn parse_memory(text: &str) -> Result<Memory> {
     let rest = text
         .strip_prefix("---\n")

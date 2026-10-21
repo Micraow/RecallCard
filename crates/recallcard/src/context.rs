@@ -375,10 +375,19 @@ impl<'a> Context<'a> {
     }
     fn label_view(&self, label: &str, time: DateTime<Utc>, budget: usize) -> Result<Value> {
         // 标签从授权后的正本投影中精确匹配，绝不拼接生成文件或任意本机路径。
+        // 读 `环境` 应当连同 `环境/操作系统` 一起给出，否则上层就是个空壳。
+        let under = |candidate: &str| {
+            candidate == label
+                || candidate
+                    .strip_prefix(label)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        };
         let records = self
             .documents()?
             .into_iter()
-            .filter(|doc| doc.current_memory_at(time) && doc.labels.iter().any(|l| l == label))
+            .filter(|doc| {
+                doc.current_memory_at(time) && doc.labels.iter().any(|l| under(l.as_str()))
+            })
             .map(|doc| {
                 let mut value = serde_json::to_value(doc).map_err(|e| e.to_string())?;
                 value["ref"] = value["reference"].take();
@@ -588,14 +597,24 @@ pub fn parse_ref(reference: &str) -> Result<(&str, &str, Option<u64>)> {
     }
     Ok((kind, id, revision))
 }
+/// 标签即目录位置：`环境/操作系统` 这样用 `/` 分层。
+///
+/// 它会被当成路径看待，所以每一段都按单段老规矩检查：不许空、不许 `.`/`..`、
+/// 不许出现别的分隔符或控制字符。
 fn valid_view_label(label: &str) -> bool {
     !label.is_empty()
         && label.len() <= 128
-        && label != "."
-        && !label.contains("..")
-        && label
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && !label.starts_with('/')
+        && !label.ends_with('/')
+        && !label.contains("//")
+        && label.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && !segment.contains("..")
+                && segment
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
 }
 pub fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
