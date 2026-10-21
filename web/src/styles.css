@@ -94,6 +94,14 @@ button.quiet {
   padding: 4px 7px;
 }
 
+/* 字段里的小动作（取模型名、探测维度）：不拉成整行，也不该看着像一行说明 */
+.field > button.quiet {
+  align-self: flex-start;
+  border-color: var(--rule-strong);
+  margin-top: 3px;
+  font-size: 12px;
+}
+
 button.quiet:hover:not(:disabled) {
   background: var(--paper-sunk);
   color: var(--ink);

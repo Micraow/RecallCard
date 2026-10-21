@@ -283,7 +283,7 @@ function SettingsForm({ state, onError, onReload, settings }: Props & { settings
                 onClick={() => void fetchModels('llm', { base_url: baseUrl, key: llmKey })}
                 disabled={probing !== ''}
               >
-                {probing === 'llm' ? <span className="spin" /> : null} 从服务端取模型名
+                {probing === 'llm' ? <span className="spin" /> : null} 取模型名
               </button>
             </div>
             <div className="field">
