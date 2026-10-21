@@ -147,7 +147,9 @@ export function SearchPage({ scope, onError }: Props) {
                 {row.kind === 'memory' && <span className="tag seal">记忆</span>}
                 {row.platform && row.platform !== 'manual' && <span>{row.platform}</span>}
               </div>
-              <div className="row-text">{plainPreview(row.text, 220)}</div>
+              <div className={row.text.trim() ? 'row-text' : 'row-text muted'}>
+                {row.text.trim() ? plainPreview(row.text, 220) : '这条记录只有元数据，没有正文'}
+              </div>
             </button>
           ))}
         </div>
@@ -187,7 +189,11 @@ export function SearchPage({ scope, onError }: Props) {
                   </div>
                 )}
               </div>
-              <Markdown text={reader.text} />
+              {reader.text.trim() ? (
+                <Markdown text={reader.text} />
+              ) : (
+                <p className="muted">这条记录只有元数据与出处，正文没有保存在本地。</p>
+              )}
               {sources.length > 0 && (
                 <div className="source-list">
                   <div className="row-meta">出处 · {sources.length} 条</div>

@@ -507,20 +507,24 @@ textarea {
 }
 
 .markdown h1 {
-  font-size: 1.3em;
+  font-size: 1.42em;
+  margin-top: 1.7em;
 }
 
 .markdown h2 {
-  font-size: 1.18em;
+  font-size: 1.26em;
+  margin-top: 1.6em;
 }
 
 .markdown h3 {
-  font-size: 1.05em;
+  font-size: 1.12em;
+  margin-top: 1.5em;
 }
 
 .markdown h4 {
   font-size: 1em;
   color: var(--ink-soft);
+  margin-top: 1.3em;
 }
 
 .markdown p {
@@ -970,4 +974,14 @@ pre.json {
   border: none;
   background: transparent;
   padding: 44px 0 0;
+}
+
+.muted {
+  color: var(--ink-faint);
+}
+
+.row-text.muted,
+.markdown p.muted {
+  font-family: var(--sans);
+  font-size: 13px;
 }
