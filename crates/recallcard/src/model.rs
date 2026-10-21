@@ -125,10 +125,11 @@ pub struct EventInput {
 }
 
 impl EventInput {
-    /// 人工粘贴的一句话：其余字段取默认值。
+    /// 人工粘贴的一句话：用户自己写下的输入，因此来源记为 UserInput，
+    /// 可以充当记忆的原始证据（origin 未知的记录不行）。
     pub fn from_content(content: &str) -> Self {
-        serde_json::from_value(serde_json::json!({ "content": content }))
-            .expect("人工粘贴输入只有 content，必须可解析")
+        serde_json::from_value(serde_json::json!({ "content": content, "origin": "user_input" }))
+            .expect("人工粘贴输入只有 content 与 origin，必须可解析")
     }
 }
 

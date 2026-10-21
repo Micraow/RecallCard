@@ -28,6 +28,18 @@ test('实际首页与资料入口存在，选择资料库以前没有原生写�
   ui.noAutomaticWrites();
 });
 
+test('打开资料库后搜索页立即浏览可见资料，不存在空列表停在首页', async t => {
+  const ui = await fixture(t);
+  await ui.openVault();
+  await ui.idle();
+  // 打开库已在 run() 里；取数不能依赖第二个嵌套 run，否则列表永远是空的。
+  assert.equal(ui.native.count('browse_records'), 1);
+  assert.equal(ui.one('#content h1').textContent, '搜索结果');
+  assert.equal(ui.document.querySelectorAll('.results .result-card').length, 2);
+  assert.equal(ui.document.querySelector('.results .empty'), null);
+  ui.noWrites();
+});
+
 test('受保护记忆默认未批准，检查与取消不写入，最终确认只发送已审阅的可编辑字段', async t => {
   const ui = await fixture(t);
   await editMemory(ui);

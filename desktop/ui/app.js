@@ -138,7 +138,8 @@ async function openWorkspaceContents(current = workspaceCurrent()) {
   if (!current()) return;
   state.page = 'search';
   render();
-  await loadRecords(true);
+  await fetchRecords(true, current);
+  if (current()) render();
 }
 async function restoreWorkspace() {
   if (!window.__TAURI__?.core?.invoke) return;
@@ -203,7 +204,7 @@ function needsVault() {
   content.append(heading('打开资料库', '选择保存记忆的文件夹，即可导入、检索和审阅资料。'), $('div', { class: 'empty' }, $('div', { class: 'empty-icon' }, '▧'), $('h2', {}, '选择保存资料的位置'), paragraph('从已有资料库继续，或创建一个新的本地空间。'), button('选择资料库', vaultChooser, true)));
 }
 function home() {
-  content.append($('section', { class: 'onboarding' }, $('h1', {}, '把以前的对话接着用'), paragraph('导入历史，找到原话，换一个 AI 继续。'), button('开始使用', () => run('正在准备本机保存位置…', async initialCurrent => {
+  content.append($('section', { class: 'onboarding' }, $('h1', {}, '把以前的对话接着用'), paragraph('搜索原话，核对出处，把需要的背景带给下一个 AI。'), button('开始使用', () => run('正在准备本机保存位置…', async initialCurrent => {
     const vault = await invoke('open_default_workspace', {}); if (!initialCurrent()) return;
     activateVault(state, vault); const current = workspaceCurrent();
     await rememberWorkspace(current);
@@ -226,22 +227,24 @@ async function readRecordValue(item, current) {
   state.selected = { ...item, ...first, text_truncated: false, truncated: Boolean(result.truncated || first.truncated), ref: reference, sources_loaded: true, sources_truncated: sourcesTruncated };
   state.sources = records;
 }
+// 取数本身不加 busy 包装：打开资料库时已经在 run() 里，嵌套 run 会被重入保护直接丢掉。
+async function fetchRecords(preserve, current) {
+  const selected = preserve ? state.selected : null;
+  if (!preserve) { resetReaderView('search:'); state.viewport['search:'].list = 0; }
+  state.selected = null; state.sources = [];
+  state.results = []; state.searchLoaded = false; state.searchError = false; state.resultNote = '正在查找本地资料…'; render();
+  const query = state.query.trim();
+  let result;
+  try { result = await invoke(query ? 'search_records' : 'browse_records', { ...args(), target: state.target, ...(query ? { query } : {}) }); }
+  catch (error) { if (current()) { state.searchError = true; state.resultNote = '查找未完成'; } throw error; }
+  if (!current()) return;
+  state.results = result.results || []; state.searchLoaded = true; state.resultQuery = query;
+  state.resultNote = result.truncated ? '结果较多，请缩小关键词范围' : `${state.results.length} 条可见资料`;
+  const freshSelected = selected && state.results.find(item => recordRef(item) === recordRef(selected));
+  if (freshSelected) await readRecordValue(freshSelected, current);
+}
 async function loadRecords(preserve = false) {
-  await run('正在查找本地资料…', async current => {
-    const selected = preserve ? state.selected : null;
-    if (!preserve) { resetReaderView('search:'); state.viewport['search:'].list = 0; }
-    state.selected = null; state.sources = [];
-    state.results = []; state.searchLoaded = false; state.searchError = false; state.resultNote = '正在查找本地资料…'; render();
-    const query = state.query.trim();
-    let result;
-    try { result = await invoke(query ? 'search_records' : 'browse_records', { ...args(), target: state.target, ...(query ? { query } : {}) }); }
-    catch (error) { if (current()) { state.searchError = true; state.resultNote = '查找未完成'; } throw error; }
-    if (!current()) return;
-    state.results = result.results || []; state.searchLoaded = true; state.resultQuery = query;
-    state.resultNote = result.truncated ? '结果较多，请缩小关键词范围' : `${state.results.length} 条可见资料`;
-    const freshSelected = selected && state.results.find(item => recordRef(item) === recordRef(selected));
-    if (freshSelected) await readRecordValue(freshSelected, current);
-  });
+  await run('正在查找本地资料…', current => fetchRecords(preserve, current));
 }
 async function readRecord(item) {
   await run('正在读取记录与出处…', async current => {
@@ -289,7 +292,7 @@ function readingPane() {
 function searchPage() {
   const target = $('select', { 'aria-label': '资料类型' }, $('option', { value: 'all' }, '所有资料'), $('option', { value: 'events' }, '原始记录'), $('option', { value: 'memories' }, '长期记忆'));
   target.value = state.target; target.addEventListener('change', () => { state.target = target.value; loadRecords(); });
-  content.append($('div', { class: 'workspace-heading' }, $('h1', {}, '搜索结果'), $('span', { class: 'muted' }, state.resultNote || '在当前范围内查找'), target, button('返回工作区', () => navigate(state.workspace), false, 'small')));
+  content.append($('div', { class: 'workspace-heading' }, $('h1', {}, '搜索结果'), $('span', { class: 'muted' }, state.resultNote || '在当前范围内查找'), target));
   const results = $('div', { class: 'results list-scroll', 'data-scroll': 'list', 'aria-label': '搜索结果' });
   if (!state.results.length) results.append(state.searchError
     ? $('div', { class: 'empty' }, $('h3', {}, '这次查找未完成'), paragraph('旧结果已移除。请重试，或修改上方查询。'), button('重试查找', () => loadRecords(false), true))
@@ -322,7 +325,7 @@ function dreamPage() {
   content.append($('div', { class:'toolbar' }, button('返回阅读', () => navigate(state.workspace), false, 'small')));
   const refs=state.selectedRefs;
   const taskArgs=()=>({...args(),sourceRefs:state.selectedRefs.filter(r=>r.startsWith('event:')),memoryRefs:state.selectedRefs.filter(r=>r.startsWith('memory:'))});
-  const exportBox=panel($('h2',{},'1. 选好要整理的对话'),paragraph(refs.length?`已选 ${refs.length} 条来源或旧记忆。也可回到阅读区增减。`:'先打开一段会话，或搜索原话后选择来源。没有来源时不会凭空生成记忆。'));
+  const exportBox=panel($('h2',{},'1. 选好要整理的对话'),paragraph(refs.length?`已选 ${refs.length} 条来源或旧记忆。也可回到阅读区增减。`:'先在搜索里选中来源，再回来整理。没有来源时不会凭空生成记忆。'));
   exportBox.append(button('搜索选择来源',()=>navigate('search')));
   for (const ref of refs) {
     const message = state.results.find(item => recordRef(item) === ref);

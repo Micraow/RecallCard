@@ -177,6 +177,9 @@ fn cli_capture_takes_bare_text_without_inventing_a_platform() {
     for event in &events {
         assert_eq!(event.data.source.platform, "manual");
         assert_eq!(event.data.content, "手写的一句话");
+        // 人工粘贴是用户自己的输入，必须能充当记忆的原始证据。
+        assert_eq!(event.data.origin, recallcard::Origin::UserInput);
+        assert!(event.data.has_original_evidence());
     }
     assert_ne!(
         events[0].data.source.message_id,

@@ -14,11 +14,10 @@
 
 ```
 vault/
-  events/<scope>/<YYYY-MM>.jsonl     # 原始事件，只追加
-  memories/<id>.md                   # 长期记忆，YAML front matter + 正文
-  generated/
-    semantic/index.json + vectors.bin
-    views/                            # 人读视图，可重建
+  events/<年>/<月>/<会话>/<事件>.jsonl   # 原始事件，一条一个文件，只追加
+  memories/<id>.md                     # 长期记忆，YAML front matter + 正文
+  .index/semantic/index.json + vectors.bin
+  generated/views/                     # 人读视图，可重建
 ```
 
 Event 与 Memory 都是纯文本，`grep`、`git diff`、手工编辑全部可行。没有数据库，没有二进制黑箱。
