@@ -1,0 +1,6 @@
+# 每个测试二进制都静态链上全部依赖，带调试符号时一个就有 200 MB，十八个
+# 测试文件能把 target/ 顶到十几 GB。这里只关掉调试信息与增量编译，
+# 失败信息、断言内容都不受影响；发布用的 release profile 不动。
+[profile.dev]
+debug = 0
+incremental = false

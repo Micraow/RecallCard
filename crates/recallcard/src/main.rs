@@ -51,13 +51,13 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
-    /// 打印 Agent 接入配置片段；不修改任何文件
     /// 打印一段提示词，把整个库交给外部 agent 整理；它写完后用 doctor 验收
     Brief {
         /// 授权范围；省略时用库里的第一个范围
         #[arg(long)]
         scope: Option<String>,
     },
+    /// 打印 Agent 接入配置片段；不修改任何文件
     Connect {
         #[arg(long, required = true)]
         scope: Vec<String>,
@@ -248,11 +248,11 @@ fn value<T: serde::Serialize>(v: T) -> Result<Value> {
 
 fn run(cli: Cli) -> Result<Value> {
     if let Command::Init = cli.command {
-        let vault = Vault::init(&vault_path(&cli))?;
+        let vault = Vault::init(&vault_path(&cli)?)?;
         recallcard::ui_state::remember_vault(vault.root()).ok();
         return Ok(json!({"ok": true, "vault": vault.root(), "schema_version": 1}));
     }
-    let vault = Vault::open(&vault_path(&cli))?;
+    let vault = Vault::open(&vault_path(&cli)?)?;
     recallcard::ui_state::remember_vault(vault.root()).ok();
     match cli.command {
         Command::Init => unreachable!(),
@@ -404,7 +404,7 @@ fn build_brief(vault: Option<std::path::PathBuf>, scope: Option<String>) -> Resu
         vault,
         command: Command::Brief { scope: None },
     };
-    let vault = Vault::open(&vault_path(&cli))?;
+    let vault = Vault::open(&vault_path(&cli)?)?;
     recallcard::ui_state::remember_vault(vault.root()).ok();
     let scope = match scope {
         Some(scope) => scope,
@@ -421,7 +421,12 @@ fn build_brief(vault: Option<std::path::PathBuf>, scope: Option<String>) -> Resu
         .rev()
         .find(|event| event.data.scope == scope)
         .map(|event| event.id)
-        .ok_or("这个范围里还没有记录")?;
+        .ok_or_else(|| {
+            format!(
+                "库里还没有原始记录（{}）；先用 capture 或导入，再运行 brief",
+                vault.root().display()
+            )
+        })?;
     Ok(recallcard::brief::prompt(
         vault.root(),
         &scope,
@@ -465,17 +470,19 @@ fn main() {
         return;
     }
     if let Command::Mcp { scope } = &cli.command {
-        let result = Vault::open(&vault_path(&cli)).and_then(|vault| {
-            let access = Access::new(scope.clone())?;
-            let index = recallcard::semantic::SemanticIndex::open_for_vault(&vault);
-            recallcard::transport::serve_mcp_io(
-                &vault,
-                access,
-                index.as_ref(),
-                std::io::stdin().lock(),
-                std::io::stdout().lock(),
-            )
-        });
+        let result = vault_path(&cli)
+            .and_then(|path| Vault::open(&path))
+            .and_then(|vault| {
+                let access = Access::new(scope.clone())?;
+                let index = recallcard::semantic::SemanticIndex::open_for_vault(&vault);
+                recallcard::transport::serve_mcp_io(
+                    &vault,
+                    access,
+                    index.as_ref(),
+                    std::io::stdin().lock(),
+                    std::io::stdout().lock(),
+                )
+            });
         if let Err(error) = result {
             eprintln!("{error}");
             std::process::exit(1);
@@ -591,6 +598,8 @@ fn start_ui(
 }
 
 /// 没给 --vault 时沿用 clap 之外的既有行为：当前目录下的 vault/。
-fn vault_path(cli: &Cli) -> PathBuf {
-    cli.vault.clone().unwrap_or_else(|| PathBuf::from("vault"))
+/// 没有 --vault 时沿用上次打开过的库；都没有就说清楚该怎么做，
+/// 而不是抛一个 "No such file or directory"。
+fn vault_path(cli: &Cli) -> Result<PathBuf> {
+    recallcard::ui_state::resolve_vault(cli.vault.clone())
 }
