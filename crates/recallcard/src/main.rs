@@ -36,6 +36,19 @@ enum Command {
         #[arg(long)]
         file: Option<String>,
     },
+    /// 启动本地界面服务：只在回环地址监听，首次访问需要终端里打印的令牌
+    Ui {
+        #[arg(long, required = true)]
+        scope: String,
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+        /// 已构建的前端目录；省略时依次找程序旁的 web 与仓库里的 web/dist
+        #[arg(long)]
+        web_dir: Option<PathBuf>,
+        /// 不尝试自动打开浏览器
+        #[arg(long)]
+        no_open: bool,
+    },
     /// 打印 Agent 接入配置片段；不修改任何文件
     Connect {
         #[arg(long, required = true)]
@@ -246,6 +259,22 @@ fn run(cli: Cli) -> Result<Value> {
             };
             value(vault.capture(event)?)
         }
+        Command::Ui {
+            scope,
+            port,
+            web_dir,
+            no_open,
+        } => {
+            let web = resolve_web_dir(web_dir)?;
+            recallcard::http::serve(recallcard::http::UiOptions {
+                vault: vault.root().to_path_buf(),
+                scope,
+                web_dir: web,
+                port,
+                open_browser: !no_open,
+            })?;
+            value(json!({"ok": true}))
+        }
         Command::Connect { scope, client } => {
             let binary = std::env::current_exe().map_err(|e| e.to_string())?;
             recallcard::transport::connect_config(&binary, vault.root(), &scope, &client)
@@ -445,4 +474,24 @@ fn ensure_current_visible(vault: &Vault, id: &str, revision: Option<u64>) -> Res
         }
     }
     Ok(())
+}
+
+/// 前端目录：显式参数 > 程序旁的 web > 仓库里的 web/dist。
+fn resolve_web_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let mut candidates = Vec::new();
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            candidates.push(directory.join("web"));
+        }
+    }
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/dist"));
+    candidates
+        .into_iter()
+        .find(|path| path.is_dir())
+        .ok_or_else(|| {
+            "找不到前端构建产物；请先在 web 目录执行 pnpm install && pnpm build".to_string()
+        })
 }

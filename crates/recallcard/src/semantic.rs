@@ -70,6 +70,9 @@ pub enum Provider {
         timeout_ms: u64,
         #[serde(default = "default_transmit_bytes")]
         max_transmitted_bytes: usize,
+        /// 界面填写的密钥只放在内存里，绝不写入索引、配置或日志。
+        #[serde(skip)]
+        key: Option<String>,
     },
 }
 
@@ -149,6 +152,7 @@ impl Provider {
                 key_env,
                 timeout_ms,
                 max_transmitted_bytes,
+                key: _,
             } => {
                 if !endpoint.starts_with("https://") || endpoint.len() > 2048 {
                     return Err("云端点必须是 https 绝对地址".into());
@@ -291,13 +295,17 @@ impl CloudEncoder {
             key_env,
             timeout_ms,
             max_transmitted_bytes,
+            key,
         } = provider
         else {
             return Err("云端编码器配置类型不符".into());
         };
-        let api_key = std::env::var(key_env).map_err(|_| {
-            format!("云端编码需要凭据环境变量 {key_env}；不会从命令行或配置文件读取密钥")
-        })?;
+        let api_key = match key.as_deref().filter(|value| !value.trim().is_empty()) {
+            Some(value) => value.to_owned(),
+            None => std::env::var(key_env).map_err(|_| {
+                format!("云端编码需要凭据环境变量 {key_env}；不会从命令行或配置文件读取密钥")
+            })?,
+        };
         if api_key.trim().is_empty() {
             return Err(format!("凭据环境变量 {key_env} 为空"));
         }
@@ -746,6 +754,22 @@ pub fn build_index(vault: &Vault, access: Access, config: Option<&Path>) -> Resu
     let parsed = resolve_config(vault, config)?;
     let encoder = open_encoder(&parsed.provider)?;
     build_index_with_encoder(vault, access, &parsed, encoder.as_ref())
+}
+
+/// 用调用方给出的完整配置重建索引；界面按本机设置选择本地或云端编码。
+pub fn build_index_from_config(
+    vault: &Vault,
+    access: Access,
+    config: &SemanticConfig,
+) -> Result<Value> {
+    config.provider.validate()?;
+    let encoder = open_encoder(&config.provider)?;
+    build_index_with_encoder(vault, access, config, encoder.as_ref())
+}
+
+/// 库内默认索引位置，供界面与本机设置共同引用。
+pub fn vault_index_path(vault: &Vault) -> PathBuf {
+    vault.root().join(default_index_path())
 }
 
 fn resolve_config(vault: &Vault, config: Option<&Path>) -> Result<SemanticConfig> {
@@ -1208,6 +1232,7 @@ mod tests {
                 key_env: default_key_env(),
                 timeout_ms: default_timeout(),
                 max_transmitted_bytes: default_transmit_bytes(),
+                key: None,
             },
             index_path: dir,
         };
@@ -1227,6 +1252,7 @@ mod tests {
             key_env: key_env.into(),
             timeout_ms: default_timeout(),
             max_transmitted_bytes: default_transmit_bytes(),
+            key: None,
         };
         assert!(base("http://api.example.com/v1/embeddings", "K")
             .validate()

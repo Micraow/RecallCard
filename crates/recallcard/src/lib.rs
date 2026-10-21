@@ -12,4 +12,7 @@ pub mod transport;
 pub mod desktop;
 pub mod dream;
 pub mod dream_task;
+pub mod http;
+pub mod llm;
 pub mod semantic;
+pub mod settings;

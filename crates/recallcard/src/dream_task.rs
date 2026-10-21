@@ -2,13 +2,16 @@
 //! 本模块不调用模型、不读取 Vault、不执行内容，也不批准或发布记忆。
 use crate::{
     dream::{DreamJob, DreamOperation, DreamProposal, DreamResult},
-    model::{hash, validate_id, validate_scope, Evidence, Result},
+    model::{hash, validate_id, validate_scope, Event, Evidence, Result},
+    vault::Vault,
 };
 use serde::Serialize;
 use std::{collections::BTreeSet, io::Write};
 
 pub const MAX_TASK_BYTES: usize = 1024 * 1024;
 pub const MAX_RESULT_TEXT_BYTES: usize = 1024 * 1024;
+/// 单次整理的来源正文上限，避免一次任务大到模型放不下。
+const DREAM_BYTE_LIMIT: usize = 96 * 1024;
 const RESULT_SCHEMA: &str = "recallcard.dream-result/1";
 const TASK_LIMIT: &str = "整理任务超过 1 MiB；请选择更少的来源或旧记忆后重新生成，不会截断证据";
 const RESULT_LIMIT: &str = "整理结果超过 1 MiB；请缩小来源重新整理，不会截断或拼接结果";
@@ -278,4 +281,44 @@ impl Write for BoundedBytes {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+/// 自动挑选整理来源：范围内尚未被任何记忆引用的原始记录，新的优先。
+pub fn select_sources(
+    vault: &Vault,
+    scope: &str,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    limit: usize,
+) -> Result<Vec<Event>> {
+    let covered: std::collections::BTreeSet<String> = vault
+        .memories()?
+        .into_iter()
+        .flat_map(|memory| memory.data.source_refs.clone())
+        .collect();
+    let mut events: Vec<crate::model::Event> = vault
+        .events()?
+        .into_iter()
+        .filter(|event| event.data.scope == scope && event.data.has_original_evidence())
+        .filter(|event| !covered.contains(&event.id))
+        .filter(|event| match (since, until) {
+            (Some(since), _) if event.data.occurred_at.is_none_or(|at| at < since) => false,
+            (_, Some(until)) if event.data.occurred_at.is_none_or(|at| at > until) => false,
+            _ => true,
+        })
+        .collect();
+    events.sort_by_key(|event| std::cmp::Reverse(event.data.occurred_at));
+    let mut total = 0;
+    let mut picked = Vec::new();
+    for event in events {
+        if picked.len() >= limit {
+            break;
+        }
+        total += event.data.text().len();
+        if !picked.is_empty() && total > DREAM_BYTE_LIMIT {
+            break;
+        }
+        picked.push(event);
+    }
+    Ok(picked)
 }

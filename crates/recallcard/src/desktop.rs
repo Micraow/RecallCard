@@ -72,6 +72,8 @@ pub struct DreamPreview {
 #[derive(Default)]
 pub struct DesktopSession {
     selected: Option<SelectedVault>,
+    /// 库内语义索引；缺失时检索自动退回词法，不影响正确性。
+    semantic: Option<crate::semantic::SemanticIndex>,
     pending_dream: Option<PendingDream>,
     pending_note: Option<PendingNote>,
     pending_memory: Option<memory::PendingMemory>,
@@ -152,6 +154,7 @@ impl DesktopSession {
             marker,
             access,
         });
+        self.reload_semantic_index(&session_id);
         match self.status(&session_id) {
             Ok(info) => Ok(info),
             Err(error) => {
@@ -163,6 +166,7 @@ impl DesktopSession {
 
     pub fn close_vault(&mut self) {
         self.selected = None;
+        self.semantic = None;
         self.pending_dream = None;
         self.pending_note = None;
         self.pending_memory = None;
@@ -555,10 +559,20 @@ impl DesktopSession {
 
     fn context(&self, session_id: &str, scope: &str) -> Result<Context<'_>> {
         check_scope(scope)?;
-        Ok(Context::new(
-            self.vault(session_id)?,
-            Access::new(vec![scope.into()]).map_err(|_| "请选择一个有效范围")?,
-        ))
+        let vault = self.vault(session_id)?;
+        let access = Access::new(vec![scope.into()]).map_err(|_| "请选择一个有效范围")?;
+        Ok(match &self.semantic {
+            Some(index) => Context::with_semantic(vault, access, index),
+            None => Context::new(vault, access),
+        })
+    }
+
+    /// 重建索引后必须重新加载，否则会话里拿的还是旧向量。
+    pub fn reload_semantic_index(&mut self, session_id: &str) {
+        self.semantic = self
+            .vault(session_id)
+            .ok()
+            .and_then(|vault| crate::semantic::SemanticIndex::open_for(vault.root(), None));
     }
 }
 
