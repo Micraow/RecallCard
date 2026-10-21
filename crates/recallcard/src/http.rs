@@ -444,6 +444,9 @@ fn settings(shared: &Shared, body: &Value) -> Result<Value> {
 }
 
 /// 把本机设置翻译成索引配置：云端要地址、模型、维度与密钥环境变量之外的信息。
+/// 单次云端重建允许外发的正文字节上限（JSON 封装后的实际发送量）。
+const CLOUD_INDEX_BUDGET: usize = 16 * 1024 * 1024;
+
 fn provider_config(vault: &Vault, settings: &Settings) -> Result<semantic::SemanticConfig> {
     let index_path = semantic::vault_index_path(vault);
     if settings.embedding.provider == "cloud" {
@@ -457,7 +460,9 @@ fn provider_config(vault: &Vault, settings: &Settings) -> Result<semantic::Seman
                 dimensions: settings.embedding.dimensions,
                 key_env: "RECALLCARD_EMBEDDING_KEY".into(),
                 timeout_ms: 30_000,
-                max_transmitted_bytes: 4 * 1024 * 1024,
+                // 一次重建是整库外发，上限按"够用但不放任"给：超了会报出实际字节数，
+                // 不会静默只发一半。
+                max_transmitted_bytes: CLOUD_INDEX_BUDGET,
                 key: Some(settings.embedding.key.clone()),
             },
             index_path,
