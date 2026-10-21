@@ -18,7 +18,8 @@ use std::{
     about = "本地优先、可追溯的个人 AI 上下文与记忆层"
 )]
 struct Cli {
-    /// 本地 Vault 目录（不会自动上传到任何服务）；省略时用上次打开过的库
+    /// 本地 Vault 目录（不会自动上传到任何服务）；省略时用默认库，
+    /// 见 recallcard vault list
     #[arg(long, global = true)]
     vault: Option<PathBuf>,
     #[command(subcommand)]
@@ -50,6 +51,11 @@ enum Command {
         /// 不尝试自动打开浏览器
         #[arg(long)]
         no_open: bool,
+    },
+    /// 管理已知的资料库：列出、设为默认、从清单移除
+    Vault {
+        #[command(subcommand)]
+        action: VaultCommand,
     },
     /// 打印一段提示词，把整个库交给外部 agent 整理；它写完后用 doctor 验收
     Brief {
@@ -155,6 +161,24 @@ enum IndexCommand {
 }
 
 #[derive(Subcommand)]
+enum VaultCommand {
+    /// 列出知道的资料库，并探测现在还能不能打开
+    List,
+    /// 设为默认：以后不带 --vault 就用它
+    Use {
+        /// 资料库路径，或 list 里显示的名字
+        #[arg(value_name = "资料库")]
+        target: String,
+    },
+    /// 从清单里移除（不动磁盘上的任何文件）
+    Forget {
+        /// 资料库路径，或 list 里显示的名字
+        #[arg(value_name = "资料库")]
+        target: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum DreamCommand {
     /// 导出明确选择的有界来源；不自动发送任何云端
     Export {
@@ -247,15 +271,29 @@ fn value<T: serde::Serialize>(v: T) -> Result<Value> {
 }
 
 fn run(cli: Cli) -> Result<Value> {
+    if let Command::Vault { action } = cli.command {
+        return match action {
+            VaultCommand::List => Ok(recallcard::vaults::listing()),
+            VaultCommand::Use { target } => {
+                recallcard::vaults::set_default(&recallcard::vaults::pick(&target)?)
+            }
+            VaultCommand::Forget { target } => {
+                // 已经打不开的库也要能移除，所以认不出来时按字面路径处理。
+                let path = recallcard::vaults::pick(&target)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(&target));
+                recallcard::vaults::forget(&path)
+            }
+        };
+    }
     if let Command::Init = cli.command {
         let vault = Vault::init(&vault_path(&cli)?)?;
-        recallcard::ui_state::remember_vault(vault.root()).ok();
+        recallcard::vaults::remember(vault.root()).ok();
         return Ok(json!({"ok": true, "vault": vault.root(), "schema_version": 1}));
     }
     let vault = Vault::open(&vault_path(&cli)?)?;
-    recallcard::ui_state::remember_vault(vault.root()).ok();
+    recallcard::vaults::remember(vault.root()).ok();
     match cli.command {
-        Command::Init => unreachable!(),
+        Command::Init | Command::Vault { .. } => unreachable!(),
         // 已在 main 里提前处理，这里不可达。
         Command::Ui { .. } | Command::Brief { .. } => unreachable!(),
         Command::Capture { content, file } => {
@@ -405,14 +443,19 @@ fn build_brief(vault: Option<std::path::PathBuf>, scope: Option<String>) -> Resu
         command: Command::Brief { scope: None },
     };
     let vault = Vault::open(&vault_path(&cli)?)?;
-    recallcard::ui_state::remember_vault(vault.root()).ok();
+    recallcard::vaults::remember(vault.root()).ok();
     let scope = match scope {
         Some(scope) => scope,
         None => vault
             .events()?
             .first()
             .map(|event| event.data.scope.clone())
-            .ok_or("库里还没有记录；用 --scope 指定范围")?,
+            .ok_or_else(|| {
+                format!(
+                    "{} 里还没有原始记录；先 capture 或导入，再用 --scope 指定范围",
+                    vault.root().display()
+                )
+            })?,
     };
     let pending = recallcard::dream_task::pending_count(&vault, &scope, None, None)?;
     let sample = vault
@@ -562,10 +605,10 @@ fn start_ui(
     web_dir: Option<PathBuf>,
     no_open: bool,
 ) -> Result<()> {
-    let root = recallcard::ui_state::resolve_vault(vault)?;
-    let scope = recallcard::ui_state::resolve_scope(&root, scope)?;
+    let root = recallcard::vaults::resolve(vault)?;
+    let scope = recallcard::vaults::resolve_scope(&root, scope)?;
     let web = resolve_web_dir(web_dir)?;
-    let preferred = port.unwrap_or_else(|| recallcard::ui_state::remembered_port(7878));
+    let preferred = port.unwrap_or_else(|| recallcard::vaults::remembered_port(7878));
     let bound = match recallcard::http::bind(recallcard::http::UiOptions {
         vault: root.clone(),
         scope: scope.clone(),
@@ -584,10 +627,10 @@ fn start_ui(
         })?,
     };
     let url = bound.url().to_owned();
-    recallcard::ui_state::remember_session(&root, &scope, bound.port()).ok();
+    recallcard::vaults::remember_session(&root, &scope, bound.port()).ok();
     println!(
         "资料库 {}（范围 {}）",
-        recallcard::ui_state::describe(&root),
+        recallcard::vaults::describe(&root),
         scope
     );
     println!("{url}");
@@ -601,5 +644,5 @@ fn start_ui(
 /// 没有 --vault 时沿用上次打开过的库；都没有就说清楚该怎么做，
 /// 而不是抛一个 "No such file or directory"。
 fn vault_path(cli: &Cli) -> Result<PathBuf> {
-    recallcard::ui_state::resolve_vault(cli.vault.clone())
+    recallcard::vaults::resolve(cli.vault.clone())
 }

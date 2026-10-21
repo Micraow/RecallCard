@@ -19,7 +19,7 @@ pub mod log;
 pub mod providers;
 pub mod semantic;
 pub mod settings;
-pub mod ui_state;
+pub mod vaults;
 
 /// 单元测试用：把本机状态目录固定到临时目录，别写进用户真实的 `~/.local/state`。
 #[cfg(test)]
