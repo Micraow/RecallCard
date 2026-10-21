@@ -16,3 +16,4 @@ pub mod http;
 pub mod llm;
 pub mod semantic;
 pub mod settings;
+pub mod ui_state;

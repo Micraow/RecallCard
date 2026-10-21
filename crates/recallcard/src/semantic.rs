@@ -221,11 +221,11 @@ impl LocalEncoder {
         let Provider::Local = provider else {
             return Err("本机编码器配置类型不符".into());
         };
-        // 缓存目录沿用 fastembed 约定（FASTEMBED_CACHE_DIR / HF_HOME），不另设配置项。
-        let model = fastembed::TextEmbedding::try_new(fastembed::TextInitOptions::new(
-            fastembed::EmbeddingModel::BGESmallZHV15,
-        ))
-        .map_err(|_| "本机编码模型不可用；首次使用需要联网下载模型文件".to_string())?;
+        // 缓存目录固定到本机状态目录：fastembed 默认相对当前目录，换个目录启动就找不到模型。
+        let mut options = fastembed::TextInitOptions::new(fastembed::EmbeddingModel::BGESmallZHV15);
+        options.cache_dir = crate::settings::model_cache_dir()?;
+        let model = fastembed::TextEmbedding::try_new(options)
+            .map_err(|_| "本机编码模型不可用；首次使用需要联网下载模型文件".to_string())?;
         Ok(Self {
             space: provider.space(),
             model: Mutex::new(model),
@@ -765,6 +765,22 @@ pub fn build_index_from_config(
     config.provider.validate()?;
     let encoder = open_encoder(&config.provider)?;
     build_index_with_encoder(vault, access, config, encoder.as_ref())
+}
+
+/// 库里已经有索引时，把新增的记录补进去；没有索引就不建。
+///
+/// 索引是派生物，补建失败只影响语义检索这一路，不能影响写入结果本身，
+/// 所以返回 Option 并把错误交给调用方决定是否提示。
+pub fn refresh_if_present(vault: &Vault, access: Access) -> Option<Result<Value>> {
+    let path = vault_index_path(vault);
+    if !path.join("index.json").is_file() {
+        return None;
+    }
+    let config = SemanticConfig {
+        provider: Provider::Local,
+        index_path: path,
+    };
+    Some(build_index_from_config(vault, access, &config))
 }
 
 /// 库内默认索引位置，供界面与本机设置共同引用。

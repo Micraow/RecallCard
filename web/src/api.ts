@@ -92,6 +92,13 @@ export interface SettingsView {
   };
 }
 
+export interface ListResponse {
+  results: RecordRow[];
+  total: number;
+  truncated: boolean;
+  coverage?: { semantic_search?: string };
+}
+
 export interface StateResponse {
   vault: VaultInfo;
   scope: string;
@@ -154,10 +161,8 @@ async function call<T>(path: string, body?: unknown): Promise<T> {
 export const api = {
   state: () => call<StateResponse>('/api/state'),
   setScope: (scope: string) => call<{ ok: boolean }>('/api/scope', { scope }),
-  search: (query: string, target: string) =>
-    call<{ results: RecordRow[]; total: number; truncated: boolean }>('/api/search', { query, target }),
-  browse: (target: string) =>
-    call<{ results: RecordRow[]; total: number; truncated: boolean }>('/api/browse', { target }),
+  search: (query: string, target: string) => call<ListResponse>('/api/search', { query, target }),
+  browse: (target: string) => call<ListResponse>('/api/browse', { target }),
   read: (ref: string) =>
     call<{ results: RecordEnvelope[]; truncated: boolean }>('/api/read', { ref }),
   sources: (ref: string) =>

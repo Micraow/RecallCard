@@ -18,9 +18,9 @@ use std::{
     about = "本地优先、可追溯的个人 AI 上下文与记忆层"
 )]
 struct Cli {
-    /// 本地 Vault 目录（不会自动上传到任何服务）
-    #[arg(long, default_value = "vault", global = true)]
-    vault: PathBuf,
+    /// 本地 Vault 目录（不会自动上传到任何服务）；省略时用上次打开过的库
+    #[arg(long, global = true)]
+    vault: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -38,10 +38,12 @@ enum Command {
     },
     /// 启动本地界面服务：只在回环地址监听，首次访问需要终端里打印的令牌
     Ui {
-        #[arg(long, required = true)]
-        scope: String,
-        #[arg(long, default_value_t = 7878)]
-        port: u16,
+        /// 授权范围；省略时用该库的第一个范围
+        #[arg(long)]
+        scope: Option<String>,
+        /// 监听端口；省略时沿用上次的，被占用会自动换一个
+        #[arg(long)]
+        port: Option<u16>,
         /// 已构建的前端目录；省略时依次找程序旁的 web 与仓库里的 web/dist
         #[arg(long)]
         web_dir: Option<PathBuf>,
@@ -245,35 +247,30 @@ fn value<T: serde::Serialize>(v: T) -> Result<Value> {
 
 fn run(cli: Cli) -> Result<Value> {
     if let Command::Init = cli.command {
-        let vault = Vault::init(&cli.vault)?;
+        let vault = Vault::init(&vault_path(&cli))?;
+        recallcard::ui_state::remember_vault(vault.root()).ok();
         return Ok(json!({"ok": true, "vault": vault.root(), "schema_version": 1}));
     }
-    let vault = Vault::open(&cli.vault)?;
+    let vault = Vault::open(&vault_path(&cli))?;
+    recallcard::ui_state::remember_vault(vault.root()).ok();
     match cli.command {
         Command::Init => unreachable!(),
+        // 已在 main 里提前处理，这里不可达。
+        Command::Ui { .. } => unreachable!(),
         Command::Capture { content, file } => {
             let event = match (content, file) {
                 (Some(content), None) => EventInput::from_content(&content),
                 (None, Some(file)) => input::<EventInput>(&file)?,
                 _ => return Err("请给出 --content 或 --file 之一".into()),
             };
-            value(vault.capture(event)?)
-        }
-        Command::Ui {
-            scope,
-            port,
-            web_dir,
-            no_open,
-        } => {
-            let web = resolve_web_dir(web_dir)?;
-            recallcard::http::serve(recallcard::http::UiOptions {
-                vault: vault.root().to_path_buf(),
-                scope,
-                web_dir: web,
-                port,
-                open_browser: !no_open,
-            })?;
-            value(json!({"ok": true}))
+            let event = vault.capture(event)?;
+            // 索引是派生物：已有索引就把这条补进去，没有就等用户显式建立。
+            if let Ok(access) = Access::new(vec![event.data.scope.clone()]) {
+                if let Some(Err(error)) = recallcard::semantic::refresh_if_present(&vault, access) {
+                    eprintln!("索引补建失败（不影响已保存的记录）：{error}");
+                }
+            }
+            value(event)
         }
         Command::Connect { scope, client } => {
             let binary = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -406,12 +403,31 @@ fn run(cli: Cli) -> Result<Value> {
 
 fn main() {
     let cli = Cli::parse();
+    if let Command::Ui {
+        scope,
+        port,
+        web_dir,
+        no_open,
+    } = &cli.command
+    {
+        if let Err(error) = start_ui(
+            cli.vault.clone(),
+            scope.clone(),
+            *port,
+            web_dir.clone(),
+            *no_open,
+        ) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Command::Mcp {
         scope,
         semantic_config,
     } = &cli.command
     {
-        let result = Vault::open(&cli.vault).and_then(|vault| {
+        let result = Vault::open(&vault_path(&cli)).and_then(|vault| {
             let access = Access::new(scope.clone())?;
             let index = recallcard::semantic::SemanticIndex::open_for(
                 vault.root(),
@@ -494,4 +510,52 @@ fn resolve_web_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
         .ok_or_else(|| {
             "找不到前端构建产物；请先在 web 目录执行 pnpm install && pnpm build".to_string()
         })
+}
+
+/// 零参数也能起来：找库、定范围、挑端口、开浏览器。
+fn start_ui(
+    vault: Option<PathBuf>,
+    scope: Option<String>,
+    port: Option<u16>,
+    web_dir: Option<PathBuf>,
+    no_open: bool,
+) -> Result<()> {
+    let root = recallcard::ui_state::resolve_vault(vault)?;
+    let scope = recallcard::ui_state::resolve_scope(&root, scope)?;
+    let web = resolve_web_dir(web_dir)?;
+    let preferred = port.unwrap_or_else(|| recallcard::ui_state::remembered_port(7878));
+    let bound = match recallcard::http::bind(recallcard::http::UiOptions {
+        vault: root.clone(),
+        scope: scope.clone(),
+        web_dir: web.clone(),
+        port: preferred,
+        open_browser: false,
+    }) {
+        Ok(bound) => bound,
+        // 端口被占就换一个，不让人去查是谁占的
+        Err(_) => recallcard::http::bind(recallcard::http::UiOptions {
+            vault: root.clone(),
+            scope: scope.clone(),
+            web_dir: web,
+            port: 0,
+            open_browser: false,
+        })?,
+    };
+    let url = bound.url().to_owned();
+    recallcard::ui_state::remember_session(&root, &scope, bound.port()).ok();
+    println!(
+        "资料库 {}（范围 {}）",
+        recallcard::ui_state::describe(&root),
+        scope
+    );
+    println!("{url}");
+    if !no_open {
+        recallcard::http::open_browser(&url);
+    }
+    recallcard::http::run(bound)
+}
+
+/// 没给 --vault 时沿用 clap 之外的既有行为：当前目录下的 vault/。
+fn vault_path(cli: &Cli) -> PathBuf {
+    cli.vault.clone().unwrap_or_else(|| PathBuf::from("vault"))
 }

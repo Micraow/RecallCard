@@ -123,18 +123,26 @@ pub fn serve(options: UiOptions) -> Result<()> {
     let bound = bind(options)?;
     println!("{}", bound.url());
     if open {
-        open_in_browser(bound.url());
+        open_browser(bound.url());
     }
     run(bound)
 }
 
-fn open_in_browser(url: &str) {
-    // 打不开浏览器不算失败：用户可以直接复制打印出来的地址。
-    let _ = std::process::Command::new("xdg-open")
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+/// 打开默认浏览器。打不开不算失败：终端里已经打印了地址。
+pub fn open_browser(url: &str) {
+    let candidates: [&[&str]; 3] = [&["xdg-open"], &["gio", "open"], &["sensible-browser"]];
+    for candidate in candidates {
+        let (program, arguments) = candidate.split_first().expect("候选命令至少有一个词");
+        let started = std::process::Command::new(program)
+            .args(arguments)
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if started.is_ok() {
+            return;
+        }
+    }
 }
 
 fn handle(shared: Arc<Shared>, mut request: Request) {
@@ -374,12 +382,26 @@ fn dream_preview(shared: &Shared, body: &Value) -> Result<Value> {
 fn dream_apply(shared: &Shared, body: &Value) -> Result<Value> {
     let preview_id = text(body, "previewId")?;
     let approve = body.get("approveProtected") == Some(&Value::Bool(true));
-    with_state(shared, |state| {
+    let (receipt, scope) = with_state(shared, |state| {
         let receipt = state
             .session
             .apply_dream(&state.session_id, &preview_id, approve)?;
-        Ok(json!({"receipt": receipt}))
-    })
+        Ok((receipt, state.scope.clone()))
+    })?;
+    // 新记忆会让旧索引过期；已有索引时就地补上，失败也不影响已经写入的结果。
+    if let Ok(vault) = current_vault(shared) {
+        if let Ok(access) = Access::new(vec![scope]) {
+            if let Some(Err(error)) = semantic::refresh_if_present(&vault, access) {
+                eprintln!("索引补建失败（不影响已写入的记忆）：{error}");
+            }
+        }
+    }
+    with_state(shared, |state| {
+        let id = state.session_id.clone();
+        state.session.reload_semantic_index(&id);
+        Ok(())
+    })?;
+    Ok(json!({"receipt": receipt}))
 }
 
 fn connect(shared: &Shared) -> Result<Value> {

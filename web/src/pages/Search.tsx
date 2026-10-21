@@ -5,6 +5,7 @@ import { message } from '../App';
 
 interface Props {
   scope: string;
+  indexConfigured: boolean;
   onError: (text: string) => void;
 }
 
@@ -14,7 +15,7 @@ const TARGETS = [
   { value: 'events', label: '只看原始记录' },
 ];
 
-export function SearchPage({ scope, onError }: Props) {
+export function SearchPage({ scope, indexConfigured, onError }: Props) {
   const [query, setQuery] = useState('');
   const [target, setTarget] = useState('all');
   const [rows, setRows] = useState<RecordRow[]>([]);
@@ -25,6 +26,8 @@ export function SearchPage({ scope, onError }: Props) {
   const [sources, setSources] = useState<RecordRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
+  const [semantic, setSemantic] = useState('');
+  const [rebuilding, setRebuilding] = useState(false);
   const input = useRef<HTMLInputElement>(null);
 
   // 打开就是最近记录；带 #ref 的地址可直接定位到某一条。
@@ -45,6 +48,7 @@ export function SearchPage({ scope, onError }: Props) {
       setTotal(response.total);
       setTruncated(response.truncated);
       setNote(response.results.length === 0 ? '没有匹配的记录' : '');
+      setSemantic(response.coverage?.semantic_search ?? '');
       if (!selected) {
         setReader(null);
         setSources([]);
@@ -53,6 +57,19 @@ export function SearchPage({ scope, onError }: Props) {
       onError(message(cause));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function rebuild() {
+    setRebuilding(true);
+    onError('');
+    try {
+      await api.buildIndex();
+      await load(query);
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      setRebuilding(false);
     }
   }
 
@@ -106,6 +123,20 @@ export function SearchPage({ scope, onError }: Props) {
           ))}
         </select>
       </form>
+
+      {indexConfigured && semantic === 'unavailable' && (
+        <div className="notice warn" style={{ marginBottom: 14 }}>
+          语义检索暂时关闭：索引还没建，或与当前资料对不上。关键词检索照常可用。
+          <button
+            className="quiet"
+            style={{ marginLeft: 8 }}
+            onClick={() => void rebuild()}
+            disabled={rebuilding}
+          >
+            {rebuilding ? <span className="spin" /> : null} 重建索引
+          </button>
+        </div>
+      )}
 
       <div className="page-head">
         <h1>{query.trim() ? '搜索结果' : '最近的记录'}</h1>

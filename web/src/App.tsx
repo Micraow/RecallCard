@@ -116,7 +116,9 @@ export function App() {
             <div className="notice error">{error}</div>
           </div>
         )}
-        {page === 'search' && <SearchPage scope={state.scope} onError={setError} />}
+        {page === 'search' && (
+          <SearchPage scope={state.scope} indexConfigured={state.index.configured} onError={setError} />
+        )}
         {page === 'memories' && (
           <MemoriesPage scope={state.scope} onError={setError} onChanged={refresh} />
         )}

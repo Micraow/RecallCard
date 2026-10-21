@@ -9,3 +9,5 @@ __pycache__/
 *.pyc
 /web/.pnpm-store
 /vendor
+
+.fastembed_cache/

@@ -13,6 +13,54 @@ use crate::vault::Vault;
 
 const FILE: &str = "settings.json";
 
+/// 全局状态目录：`<base>/recallcard`，与各库的 hashed 目录同级。
+pub fn global_dir() -> Result<PathBuf> {
+    let base = std::env::var_os("RECALLCARD_STATE_DIR")
+        .map(PathBuf::from)
+        .or_else(dirs::state_dir)
+        .or_else(dirs::data_local_dir)
+        .ok_or("无法确定本机状态目录，请设置 RECALLCARD_STATE_DIR")?;
+    let directory = base.join("recallcard");
+    fs::create_dir_all(&directory).map_err(|_| "无法创建本机状态目录".to_owned())?;
+    Ok(directory)
+}
+
+/// 编码模型的缓存目录。fastembed 默认用当前目录下的 `.fastembed_cache`，
+/// 换个目录启动就"模型不可用"；这里固定到状态目录，并顺手迁移旧缓存。
+pub fn model_cache_dir() -> Result<PathBuf> {
+    let cache = global_dir()?.join("models");
+    fs::create_dir_all(&cache).map_err(|_| "无法创建模型缓存目录".to_owned())?;
+    let empty = fs::read_dir(&cache)
+        .map(|entries| entries.count() == 0)
+        .unwrap_or(false);
+    if empty {
+        if let Ok(current) = std::env::current_dir() {
+            let legacy = current.join(".fastembed_cache");
+            if legacy.is_dir() {
+                copy_tree(&legacy, &cache);
+            }
+        }
+    }
+    Ok(cache)
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    let Ok(entries) = fs::read_dir(from) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        if source.is_dir() {
+            if fs::create_dir_all(&target).is_ok() {
+                copy_tree(&source, &target);
+            }
+        } else if fs::copy(&source, &target).is_err() {
+            // 迁移失败不算致命：下一次仍会尝试从网络下载。
+        }
+    }
+}
+
 fn https_or_empty(value: &str) -> Result<()> {
     if value.is_empty() || value.starts_with("https://") || value.starts_with("http://127.0.0.1") {
         Ok(())
