@@ -166,6 +166,25 @@ fn cli_capture_accepts_stdin_and_rejects_oversized_files_before_writing() {
 }
 
 #[test]
+fn cli_capture_takes_bare_text_without_inventing_a_platform() {
+    let (_dir, vault) = setup();
+    // 人工粘贴只给正文；相同正文两次粘贴仍是两条事件，不被当成同一消息的重复版本。
+    for _ in 0..2 {
+        ok(run(&vault, &["capture", "--content", "手写的一句话"], None));
+    }
+    let events = vault.events().unwrap();
+    assert_eq!(events.len(), 2);
+    for event in &events {
+        assert_eq!(event.data.source.platform, "manual");
+        assert_eq!(event.data.content, "手写的一句话");
+    }
+    assert_ne!(
+        events[0].data.source.message_id,
+        events[1].data.source.message_id
+    );
+}
+
+#[test]
 fn cli_read_and_sources_refuse_an_active_writer_instead_of_mixing_revisions() {
     let (_dir, vault) = setup();
     let event = event(&vault, "a", "first");

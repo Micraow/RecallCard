@@ -182,6 +182,39 @@ fn temporal_filters_do_not_rewrite_unknown_time() {
         .is_empty());
 }
 #[test]
+fn mcp_requires_initialize_but_not_the_optional_initialized_notification() {
+    let (_d, v) = setup();
+    let requests = [
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"合成测试","version":"1"}}}),
+        // 规范里 notifications/initialized 是 SHOULD 且不携带信息；省略也应可用。
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+    ];
+    let data = requests
+        .iter()
+        .map(|v| format!("{v}\n"))
+        .collect::<String>();
+    let mut output = Vec::new();
+    transport::serve_mcp_io(
+        &v,
+        Access::new(vec!["personal".into()]).unwrap(),
+        None,
+        std::io::Cursor::new(data),
+        &mut output,
+    )
+    .unwrap();
+    let responses = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str::<Value>(s).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(responses[0]["error"]["code"], json!(-32002));
+    assert!(responses[0].get("result").is_none());
+    assert_eq!(responses[1]["result"]["serverInfo"]["name"], "recallcard");
+    assert_eq!(responses[2]["result"]["tools"].as_array().unwrap().len(), 5);
+}
+
+#[test]
 fn mcp_exposes_four_readonly_tools_plus_event_only_write() {
     let (_d, v) = setup();
     capture(&v, "personal", "a", "跨客户端原始决定");

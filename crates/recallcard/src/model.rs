@@ -59,16 +59,30 @@ fn default_score() -> f64 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
-    #[serde(alias = "adapter")]
+    /// 省略即为人工粘贴，不需要编造平台与会话标识。
+    #[serde(alias = "adapter", default = "manual_platform")]
     pub platform: String,
     #[serde(default)]
     pub account_namespace: String,
-    #[serde(alias = "external_session_id")]
+    #[serde(alias = "external_session_id", default = "manual_conversation")]
     pub conversation_id: String,
-    #[serde(alias = "external_event_id")]
+    /// 每次人工粘贴都是独立消息，正文相同也各自成条。
+    #[serde(alias = "external_event_id", default = "manual_message")]
     pub message_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+fn manual_platform() -> String {
+    "manual".into()
+}
+
+fn manual_conversation() -> String {
+    "manual".into()
+}
+
+fn manual_message() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,12 +114,36 @@ pub struct EventInput {
     pub metadata: serde_json::Value,
     #[serde(default)]
     pub capture: CaptureInfo,
+    #[serde(default = "user_role")]
     pub role: Role,
     #[serde(default = "native_origin")]
     pub origin: Origin,
     #[serde(default)]
     pub content: String,
+    #[serde(default = "manual_source")]
     pub source: Source,
+}
+
+impl EventInput {
+    /// 人工粘贴的一句话：其余字段取默认值。
+    pub fn from_content(content: &str) -> Self {
+        serde_json::from_value(serde_json::json!({ "content": content }))
+            .expect("人工粘贴输入只有 content，必须可解析")
+    }
+}
+
+fn user_role() -> Role {
+    Role::User
+}
+
+fn manual_source() -> Source {
+    Source {
+        platform: manual_platform(),
+        account_namespace: String::new(),
+        conversation_id: manual_conversation(),
+        message_id: manual_message(),
+        url: None,
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]

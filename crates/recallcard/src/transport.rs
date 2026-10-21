@@ -248,8 +248,9 @@ pub fn serve_mcp_service_io<R: BufRead, W: Write>(
     mut reader: R,
     mut writer: W,
 ) -> Result<()> {
+    // notifications/initialized 在规范里是 SHOULD，且不携带信息：接受并忽略，
+    // 只以 initialize 请求作为握手完成的判据，避免拒绝合规客户端。
     let mut initialized = false;
-    let mut ready = false;
     while let Some(line) = read_line_bounded(&mut reader, 1024 * 1024)? {
         let request: Value = match serde_json::from_slice(&line) {
             Ok(v) => v,
@@ -274,9 +275,6 @@ pub fn serve_mcp_service_io<R: BufRead, W: Write>(
         }
         let method = request["method"].as_str().unwrap();
         if request.get("id").is_none() {
-            if method == "notifications/initialized" && initialized {
-                ready = true;
-            }
             continue;
         }
         let id = request["id"].clone();
@@ -306,11 +304,7 @@ pub fn serve_mcp_service_io<R: BufRead, W: Write>(
                 }
             }
             "ping" => json!({"jsonrpc":"2.0","id":id,"result":{}}),
-            _ if !ready => rpc_error(
-                id,
-                -32002,
-                "请先 initialize 并发送 notifications/initialized",
-            ),
+            _ if !initialized => rpc_error(id, -32002, "请先发送 initialize"),
             "tools/list" => json!({"jsonrpc":"2.0","id":id,"result":{"tools":tool_definitions()}}),
             "tools/call" => {
                 let result = service(

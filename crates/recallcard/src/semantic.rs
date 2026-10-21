@@ -509,8 +509,34 @@ impl SemanticIndex {
         Self::from_config(parsed)
     }
 
+    /// 库内默认索引：无配置时直接用 `<vault>/.index/semantic`。
+    /// 只有本地编码能在无配置时自描述；云端端点不入索引，仍需显式配置。
+    pub fn open_vault(root: &Path) -> Result<Self> {
+        let dir = root.join(default_index_path());
+        let meta: IndexMeta = read_json_file(&dir.join("index.json"))?;
+        if meta.space.provider != "local-onnx" {
+            return Err("索引由云端编码空间生成，请用 --semantic-config 指明端点".into());
+        }
+        Self::from_config(SemanticConfig {
+            provider: Provider::Local,
+            index_path: dir,
+        })
+    }
+
+    /// 检索与 MCP 的唯一取索引入口：配置优先，其次库内本地索引；
+    /// 都没有或都不可用时返回 None，调用方降级为纯词法检索。
+    pub fn open_for(root: &Path, config: Option<&Path>) -> Option<Self> {
+        match config {
+            Some(path) => Self::open(path).ok(),
+            None => Self::open_vault(root).ok(),
+        }
+    }
+
     pub fn from_config(config: SemanticConfig) -> Result<Self> {
         config.provider.validate()?;
+        if config.index_path.is_relative() {
+            return Err("索引路径必须是绝对路径；配置里的相对路径无法确定库根".into());
+        }
         let space = config.provider.space();
         let expected = space_signature(&space)?;
         let dir = config.index_path.clone();

@@ -176,7 +176,8 @@ impl<'a> Context<'a> {
                 text: event.data.text(),
                 scope: event.data.scope.clone(),
                 kind: "event".into(),
-                evidence_refs: vec![format!("event:{}", event.id)],
+                // 事件的 evidence_refs 只会重复它自己的 ref，不占正文预算。
+                evidence_refs: Vec::new(),
                 session_ref: Some(event.data.session_key()),
                 state: "captured".into(),
                 occurred_at: event.data.occurred_at,

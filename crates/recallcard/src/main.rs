@@ -29,10 +29,12 @@ struct Cli {
 enum Command {
     /// 创建本地事实源目录
     Init,
-    /// 保存一条原始事件；文件为 - 时从标准输入读取 JSON
+    /// 保存一条原始事件：--content 直接给正文，或用 --file 指定 JSON（- 为标准输入）
     Capture {
         #[arg(long)]
-        file: String,
+        content: Option<String>,
+        #[arg(long)]
+        file: Option<String>,
     },
     /// 打印 Agent 接入配置片段；不修改任何文件
     Connect {
@@ -236,7 +238,14 @@ fn run(cli: Cli) -> Result<Value> {
     let vault = Vault::open(&cli.vault)?;
     match cli.command {
         Command::Init => unreachable!(),
-        Command::Capture { file } => value(vault.capture(input::<EventInput>(&file)?)?),
+        Command::Capture { content, file } => {
+            let event = match (content, file) {
+                (Some(content), None) => EventInput::from_content(&content),
+                (None, Some(file)) => input::<EventInput>(&file)?,
+                _ => return Err("请给出 --content 或 --file 之一".into()),
+            };
+            value(vault.capture(event)?)
+        }
         Command::Connect { scope, client } => {
             let binary = std::env::current_exe().map_err(|e| e.to_string())?;
             recallcard::transport::connect_config(&binary, vault.root(), &scope, &client)
@@ -340,10 +349,10 @@ fn run(cli: Cli) -> Result<Value> {
             cursor,
             semantic_config,
         } => {
-            let index = semantic_config
-                .as_deref()
-                .map(recallcard::semantic::SemanticIndex::open)
-                .transpose()?;
+            let index = recallcard::semantic::SemanticIndex::open_for(
+                vault.root(),
+                semantic_config.as_deref(),
+            );
             let access = Access::new(scope)?;
             let context = match index.as_ref() {
                 Some(index) => Context::with_semantic(&vault, access, index),
@@ -375,10 +384,10 @@ fn main() {
     {
         let result = Vault::open(&cli.vault).and_then(|vault| {
             let access = Access::new(scope.clone())?;
-            let index = semantic_config
-                .as_deref()
-                .map(recallcard::semantic::SemanticIndex::open)
-                .transpose()?;
+            let index = recallcard::semantic::SemanticIndex::open_for(
+                vault.root(),
+                semantic_config.as_deref(),
+            );
             recallcard::transport::serve_mcp_io(
                 &vault,
                 access,
