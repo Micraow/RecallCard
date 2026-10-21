@@ -356,7 +356,11 @@ pub fn validate_id(id: &str, prefix: &str) -> Result<()> {
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     {
-        return Err("无效的记录编号；不接受路径".into());
+        // 外部写入者（人，或替你整理的 agent）会照着这句话改，所以要写清形状。
+        return Err(format!(
+            "编号 `{id}` 不合法：应为 `{prefix}` 加 {len} 位小写十六进制（当前后缀 {} 位）",
+            suffix.len()
+        ));
     }
     Ok(())
 }

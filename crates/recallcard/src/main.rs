@@ -52,6 +52,12 @@ enum Command {
         no_open: bool,
     },
     /// 打印 Agent 接入配置片段；不修改任何文件
+    /// 打印一段提示词，把整个库交给外部 agent 整理；它写完后用 doctor 验收
+    Brief {
+        /// 授权范围；省略时用库里的第一个范围
+        #[arg(long)]
+        scope: Option<String>,
+    },
     Connect {
         #[arg(long, required = true)]
         scope: Vec<String>,
@@ -251,7 +257,7 @@ fn run(cli: Cli) -> Result<Value> {
     match cli.command {
         Command::Init => unreachable!(),
         // 已在 main 里提前处理，这里不可达。
-        Command::Ui { .. } => unreachable!(),
+        Command::Ui { .. } | Command::Brief { .. } => unreachable!(),
         Command::Capture { content, file } => {
             let event = match (content, file) {
                 (Some(content), None) => EventInput::from_content(&content),
@@ -392,8 +398,53 @@ fn run(cli: Cli) -> Result<Value> {
     }
 }
 
+/// 生成给外部 agent 的提示词：库路径、待整理条数都由真实数据算出来。
+fn build_brief(vault: Option<std::path::PathBuf>, scope: Option<String>) -> Result<String> {
+    let cli = Cli {
+        vault,
+        command: Command::Brief { scope: None },
+    };
+    let vault = Vault::open(&vault_path(&cli))?;
+    recallcard::ui_state::remember_vault(vault.root()).ok();
+    let scope = match scope {
+        Some(scope) => scope,
+        None => vault
+            .events()?
+            .first()
+            .map(|event| event.data.scope.clone())
+            .ok_or("库里还没有记录；用 --scope 指定范围")?,
+    };
+    let pending = recallcard::dream_task::pending_count(&vault, &scope, None, None)?;
+    let sample = vault
+        .events()?
+        .into_iter()
+        .rev()
+        .find(|event| event.data.scope == scope)
+        .map(|event| event.id)
+        .ok_or("这个范围里还没有记录")?;
+    Ok(recallcard::brief::prompt(
+        vault.root(),
+        &scope,
+        pending,
+        &sample,
+    ))
+}
+
 fn main() {
     let cli = Cli::parse();
+    if let Command::Brief { scope } = &cli.command {
+        // 提示词要能整段复制，所以直接写纯文本，不套 JSON。
+        match build_brief(cli.vault.clone(), scope.clone()) {
+            Ok(text) => {
+                println!("{text}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Command::Ui {
         scope,
         port,

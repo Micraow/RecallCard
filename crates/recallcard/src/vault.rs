@@ -492,23 +492,74 @@ impl Vault {
         }
         Ok(())
     }
+    /// 体检：一次把所有问题都列出来，而不是遇到第一个就停。
+    ///
+    /// 这个命令是外部写入者（人，或替你整理记忆的 agent）唯一的验收标准，
+    /// 所以每条问题都要说清楚「哪个文件、哪一项、期望什么」。
     pub fn doctor(&self) -> Result<Value> {
         let events = self.events()?;
-        let memories = self.memories()?;
-        for m in &memories {
-            self.validate_evidence(&m.data)?;
-        }
-        for e in &events {
-            for id in [&e.data.revision_of, &e.data.reply_to, &e.data.caused_by]
-                .into_iter()
-                .flatten()
-            {
-                self.event(id)?;
+        let mut problems: Vec<Value> = Vec::new();
+        // 逐文件检查：能读进来的收进 memories，读不进来的变成一条 problem。
+        let mut memories = Vec::new();
+        let dir = self.root.join("memories");
+        for path in files_recursive(&dir, "md")? {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            let id = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            if path.parent() != Some(dir.as_path()) {
+                problems
+                    .push(json!({"file": name, "problem": "记忆文件必须直接放在 memories/ 下"}));
+                continue;
+            }
+            match self.memory(&id) {
+                Ok(memory) => match self.validate_evidence(&memory.data) {
+                    Ok(()) => memories.push(memory),
+                    Err(error) => problems.push(json!({"file": name, "problem": error})),
+                },
+                Err(error) => problems.push(json!({"file": name, "problem": error})),
             }
         }
-        Ok(
-            json!({"ok":true,"events":events.len(),"memories":memories.len(),"schema_version":SCHEMA_VERSION}),
-        )
+        for event in &events {
+            for id in [
+                &event.data.revision_of,
+                &event.data.reply_to,
+                &event.data.caused_by,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if self.event(id).is_err() {
+                    problems.push(json!({
+                        "file": format!("event:{}", event.id),
+                        "problem": format!("引用了不存在的事件 {id}"),
+                    }));
+                }
+            }
+        }
+        // 覆盖情况：多少原始记录真的被某条记忆引用过。
+        let cited: std::collections::BTreeSet<String> = memories
+            .iter()
+            .flat_map(|memory| memory.data.source_refs.clone())
+            .collect();
+        let uncited = events
+            .iter()
+            .filter(|event| !cited.contains(&event.id))
+            .count();
+        Ok(json!({
+            "ok": problems.is_empty(),
+            "events": events.len(),
+            "memories": memories.len(),
+            "uncited_events": uncited,
+            "problems": problems,
+            "schema_version": SCHEMA_VERSION,
+        }))
     }
     pub(crate) fn ensure_no_pending_dream(&self) -> Result<()> {
         let path = self.state_dir()?.join("dream-transaction.json");
