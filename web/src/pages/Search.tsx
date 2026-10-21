@@ -48,7 +48,8 @@ export function SearchPage({ scope, indexConfigured, onError }: Props) {
       setTotal(response.total);
       setTruncated(response.truncated);
       setNote(response.results.length === 0 ? '没有匹配的记录' : '');
-      setSemantic(response.coverage?.semantic_search ?? '');
+      // 只有真正的检索才能判断语义这一路好不好；浏览列表不参与，否则一进页面就误报。
+      setSemantic(text.trim() ? (response.coverage?.semantic_search ?? '') : '');
       if (!selected) {
         setReader(null);
         setSources([]);
