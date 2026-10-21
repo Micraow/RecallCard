@@ -248,6 +248,7 @@ fn dispatch(shared: &Shared, path: &str, body: &Value) -> Result<Value> {
             serde_json::to_value(page).map_err(|e| e.to_string())
         }),
         "/api/settings" => settings(shared, body),
+        "/api/settings/reset" => reset_settings(shared),
         "/api/vault/open" => open_vault(shared, body),
         "/api/index/build" => build_index(shared),
         "/api/dream/sources" => dream_sources(shared, body),
@@ -262,12 +263,29 @@ fn state(shared: &Shared) -> Result<Value> {
     with_state(shared, |state| {
         let info = state.session.status(&state.session_id)?;
         let vault = Vault::open(&PathBuf::from(&info.root))?;
+        // 设置文件坏掉只影响设置页，不该让整个界面打不开。
+        let (settings, settings_error) = match Settings::load(&vault) {
+            Ok(settings) => (settings.public_view(), Value::Null),
+            Err(error) => (Value::Null, Value::String(error)),
+        };
         Ok(json!({
             "vault": info,
             "scope": state.scope,
             "index": semantic::index_status(&vault)?,
-            "settings": Settings::load(&vault)?.public_view(),
+            "settings": settings,
+            "settings_error": settings_error,
         }))
+    })
+}
+
+/// 设置文件损坏时留一条出路：直接写回默认值，不需要用户去找文件。
+fn reset_settings(shared: &Shared) -> Result<Value> {
+    with_state(shared, |state| {
+        let info = state.session.status(&state.session_id)?;
+        let vault = Vault::open(&PathBuf::from(&info.root))?;
+        let defaults = Settings::default();
+        Settings::save(&vault, &defaults)?;
+        Ok(defaults.public_view())
     })
 }
 

@@ -996,3 +996,23 @@ pre.json {
   font-family: var(--sans);
   font-size: 13px;
 }
+
+/* 错误条：不参与页面布局的伸缩，页面自己滚动 */
+.notice.banner {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 12px 24px 0;
+  border-radius: 3px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.notice.banner span {
+  flex: 1;
+}
+
+.topbar {
+  flex: none;
+}

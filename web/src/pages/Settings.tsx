@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api, type StateResponse } from '../api';
+import { api, type SettingsView, type StateResponse } from '../api';
 import { message } from '../App';
 
 interface Props {
@@ -8,8 +8,47 @@ interface Props {
   onReload: () => void;
 }
 
-export function SettingsPage({ state, onError, onReload }: Props) {
-  const settings = state.settings;
+export function SettingsPage(props: Props) {
+  if (!props.state.settings) {
+    return <SettingsBroken {...props} error={props.state.settings_error ?? '本机设置文件无法读取'} />;
+  }
+  return <SettingsForm {...props} settings={props.state.settings} />;
+}
+
+/// 设置文件损坏时的唯一出口：写回默认值，不让人去翻目录找文件。
+function SettingsBroken({ error, onError, onReload }: Props & { error: string }) {
+  const [busy, setBusy] = useState(false);
+  async function reset() {
+    setBusy(true);
+    onError('');
+    try {
+      await api.resetSettings();
+      onReload();
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="content">
+      <div className="page-head">
+        <h1>设置</h1>
+      </div>
+      <div className="panel" style={{ maxWidth: 620 }}>
+        <h2>本机设置读不出来</h2>
+        <p className="hint" style={{ marginBottom: 16 }}>
+          {error}
+        </p>
+        <button className="primary" onClick={() => void reset()} disabled={busy}>
+          {busy ? <span className="spin" /> : null} 写回默认设置
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SettingsForm({ state, onError, onReload, settings }: Props & { settings: SettingsView }) {
   const [baseUrl, setBaseUrl] = useState(settings.llm.base_url);
   const [model, setModel] = useState(settings.llm.model);
   const [llmKey, setLlmKey] = useState('');

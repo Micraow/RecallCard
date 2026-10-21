@@ -49,10 +49,36 @@ export function App() {
   if (!state) {
     return (
       <div className="app">
-        <aside className="sidebar" />
+        <aside className="sidebar">
+          <div className="brand">
+            <div className="brand-mark">记</div>
+            <div>
+              <div className="brand-name">RecallCard</div>
+              <div className="brand-sub">个人资料库</div>
+            </div>
+          </div>
+        </aside>
         <main className="main">
+          <header className="topbar">
+            <span className="topbar-title">读取</span>
+          </header>
           <div className="content">
-            {error ? <div className="notice error">{error}</div> : <span className="spin" />}
+            {error ? (
+              <div className="panel" style={{ maxWidth: 620, marginTop: 28 }}>
+                <h2>读不到资料库</h2>
+                <p className="hint" style={{ marginBottom: 12 }}>
+                  {error}
+                </p>
+                <p className="hint" style={{ marginBottom: 16 }}>
+                  如果终端里的服务已经退出，重新运行 <code>recallcard ui</code>，再用新打印的地址打开。
+                </p>
+                <button className="primary" onClick={() => void refresh()}>
+                  重试
+                </button>
+              </div>
+            ) : (
+              <span className="spin" />
+            )}
           </div>
         </main>
       </div>
@@ -112,8 +138,11 @@ export function App() {
           )}
         </header>
         {error && (
-          <div className="content" style={{ paddingBottom: 0 }}>
-            <div className="notice error">{error}</div>
+          <div className="notice error banner" role="alert">
+            <span>{error}</span>
+            <button className="quiet" onClick={() => setError('')} aria-label="关闭">
+              ✕
+            </button>
           </div>
         )}
         {page === 'search' && (

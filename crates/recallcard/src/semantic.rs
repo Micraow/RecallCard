@@ -187,10 +187,46 @@ impl Provider {
 }
 
 /// 编码器：本机 ONNX 或批准的云端点。两者产出同一形状（L2 归一化定长向量）。
+/// 编码器失败。
+///
+/// 只有编码器自己声明"已脱敏"的说明才允许出现在用户可见信息里：供应商错误页
+/// 可能回显密钥或内部路径，别家编码器也可能随手带上原始正文。未经声明的一律
+/// 只留固定文案，宁可少一句诊断，也不把不该外泄的内容写进日志和界面。
+pub(crate) enum EncoderFailure {
+    /// 编码器已自行抹掉密钥并截断的说明
+    Redacted(String),
+    /// 未说明原因
+    Opaque,
+}
+
+impl EncoderFailure {
+    fn public(&self) -> &str {
+        match self {
+            Self::Redacted(detail) => detail,
+            Self::Opaque => "编码器没有给出可以公开的原因",
+        }
+    }
+}
+
+impl From<String> for EncoderFailure {
+    fn from(_: String) -> Self {
+        Self::Opaque
+    }
+}
+
+impl From<&str> for EncoderFailure {
+    fn from(_: &str) -> Self {
+        Self::Opaque
+    }
+}
+
 pub(crate) trait Encoder: Send {
     fn space(&self) -> Space;
-    fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
-    fn embed_query(&self, text: &str) -> Result<Vec<f32>>;
+    fn embed_documents(
+        &self,
+        texts: &[String],
+    ) -> std::result::Result<Vec<Vec<f32>>, EncoderFailure>;
+    fn embed_query(&self, text: &str) -> std::result::Result<Vec<f32>, EncoderFailure>;
     fn transmitted_bytes(&self) -> u64;
 }
 
@@ -203,13 +239,16 @@ impl Encoder for LocalEncoder {
     fn space(&self) -> Space {
         self.space.clone()
     }
-    fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.embed(texts, "")
+    fn embed_documents(
+        &self,
+        texts: &[String],
+    ) -> std::result::Result<Vec<Vec<f32>>, EncoderFailure> {
+        self.embed(texts, "").map_err(EncoderFailure::Redacted)
     }
-    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        Ok(self
-            .embed(&[text.to_string()], QUERY_INSTRUCTION)?
-            .remove(0))
+    fn embed_query(&self, text: &str) -> std::result::Result<Vec<f32>, EncoderFailure> {
+        self.embed(&[text.to_string()], QUERY_INSTRUCTION)
+            .map_err(EncoderFailure::Redacted)
+            .map(|mut vectors| vectors.remove(0))
     }
     fn transmitted_bytes(&self) -> u64 {
         0
@@ -321,6 +360,7 @@ impl CloudEncoder {
         })
     }
 
+    /// 这里的错误文案全部由我们自己写，供应商正文已脱敏，因此可以公开。
     fn request(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let body = json!({
             "model": self.model,
@@ -334,7 +374,10 @@ impl CloudEncoder {
             .lock()
             .map_err(|_| "计量锁已损坏".to_string())?;
         if *sent + payload.len() as u64 > self.budget as u64 {
-            return Err("云端外发预算已用尽；提高预算或改用本机模型".into());
+            return Err(format!(
+                "云端外发预算已用尽：本次已发送 {} 字节，上限 {} 字节；分小时间范围多次整理，或改用本机模型",
+                *sent, self.budget
+            ));
         }
         let client = reqwest::blocking::Client::builder()
             .timeout(self.timeout)
@@ -353,8 +396,20 @@ impl CloudEncoder {
             .text()
             .map_err(|_| "云端编码响应无法读取".to_string())?;
         if !status.is_success() {
-            // 不回显响应正文：供应商错误页可能包含密钥回显或内部路径。
-            return Err(format!("云端编码返回状态 {status}"));
+            // 供应商错误页可能回显密钥，因此先抹掉密钥再截断，只保留可判断原因的部分。
+            let detail = redact(&text, &self.api_key);
+            let hint = match status.as_u16() {
+                401 | 403 => "密钥无效或没有该模型的权限；到设置页重新填写",
+                404 => "地址或模型名不对；检查服务地址是否以 /v1/embeddings 结尾",
+                429 => "触发了限流；稍后重试或改用本机模型",
+                _ => "",
+            };
+            return Err(match (hint.is_empty(), detail.is_empty()) {
+                (false, false) => format!("云端编码返回 {status}：{hint}（{detail}）"),
+                (false, true) => format!("云端编码返回 {status}：{hint}"),
+                (true, false) => format!("云端编码返回状态 {status}：{detail}"),
+                (true, true) => format!("云端编码返回状态 {status}"),
+            });
         }
         let parsed: Value =
             serde_json::from_str(&text).map_err(|_| "云端编码响应不是有效 JSON".to_string())?;
@@ -393,19 +448,40 @@ impl CloudEncoder {
     }
 }
 
+/// 供应商响应只用来判断原因：抹掉密钥、压缩空白、截断到一小段。
+fn redact(text: &str, api_key: &str) -> String {
+    let mut cleaned = text.replace(api_key, "***");
+    if let Some(position) = cleaned.find("Bearer ") {
+        let rest = &cleaned[position + 7..];
+        let end = rest.find(['"', ' ', '\\']).unwrap_or(rest.len());
+        cleaned = format!("{}Bearer ***{}", &cleaned[..position], &rest[end..]);
+    }
+    let flattened = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clipped: String = flattened.chars().take(240).collect();
+    match flattened.chars().count() > 240 {
+        true => format!("{clipped}…"),
+        false => clipped,
+    }
+}
+
 impl Encoder for CloudEncoder {
     fn space(&self) -> Space {
         self.space.clone()
     }
-    fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed_documents(
+        &self,
+        texts: &[String],
+    ) -> std::result::Result<Vec<Vec<f32>>, EncoderFailure> {
         let mut vectors = Vec::with_capacity(texts.len());
         for chunk in texts.chunks(CLOUD_BATCH) {
-            vectors.extend(self.request(chunk)?);
+            vectors.extend(self.request(chunk).map_err(EncoderFailure::Redacted)?);
         }
         Ok(vectors)
     }
-    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        Ok(self.request(&[text.to_string()])?.remove(0))
+    fn embed_query(&self, text: &str) -> std::result::Result<Vec<f32>, EncoderFailure> {
+        self.request(&[text.to_string()])
+            .map_err(EncoderFailure::Redacted)
+            .map(|mut vectors| vectors.remove(0))
     }
     fn transmitted_bytes(&self) -> u64 {
         self.transmitted.lock().map(|v| *v).unwrap_or(u64::MAX)
@@ -894,10 +970,10 @@ pub(crate) fn build_index_with_encoder(
         0
     } else {
         let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
-        // 编码失败（云错误页、模型损坏）不转发供应商正文：可能含密钥回显或内部路径。
-        let encoded = encoder
-            .embed_documents(&texts)
-            .map_err(|_| "编码失败；索引未写入，正文未外泄".to_string())?;
+        // 编码失败不转发供应商正文原文：原因已由编码器脱敏，这里只补上下文。
+        let encoded = encoder.embed_documents(&texts).map_err(|failure| {
+            format!("编码失败（索引未写入，正文未外泄）：{}", failure.public())
+        })?;
         if encoded.len() != texts.len() {
             return Err("编码输出数量与待编码文档不符".into());
         }
@@ -1051,10 +1127,13 @@ mod tests {
                 preprocessing_version: "1".into(),
             }
         }
-        fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        fn embed_documents(
+            &self,
+            texts: &[String],
+        ) -> std::result::Result<Vec<Vec<f32>>, EncoderFailure> {
             Ok(texts.iter().map(|t| fake_vector(t)).collect())
         }
-        fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        fn embed_query(&self, text: &str) -> std::result::Result<Vec<f32>, EncoderFailure> {
             Ok(fake_vector(text))
         }
         fn transmitted_bytes(&self) -> u64 {
@@ -1294,10 +1373,13 @@ mod tests {
             fn space(&self) -> Space {
                 FakeEncoder.space()
             }
-            fn embed_documents(&self, _: &[String]) -> Result<Vec<Vec<f32>>> {
+            fn embed_documents(
+                &self,
+                _: &[String],
+            ) -> std::result::Result<Vec<Vec<f32>>, EncoderFailure> {
                 Err("供应商内部路径 /opt/secret 与密钥 sk-abc 泄漏样本".into())
             }
-            fn embed_query(&self, _: &str) -> Result<Vec<f32>> {
+            fn embed_query(&self, _: &str) -> std::result::Result<Vec<f32>, EncoderFailure> {
                 Err("供应商内部路径 /opt/secret 与密钥 sk-abc 泄漏样本".into())
             }
             fn transmitted_bytes(&self) -> u64 {
@@ -1316,5 +1398,43 @@ mod tests {
             !error.contains("secret") && !error.contains("sk-abc"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn declared_redacted_reason_reaches_the_message() {
+        struct Explained;
+        impl Encoder for Explained {
+            fn space(&self) -> Space {
+                FakeEncoder.space()
+            }
+            fn embed_documents(
+                &self,
+                _: &[String],
+            ) -> std::result::Result<Vec<Vec<f32>>, EncoderFailure> {
+                Err(EncoderFailure::Redacted(
+                    "云端编码返回 401：密钥无效".into(),
+                ))
+            }
+            fn embed_query(&self, _: &str) -> std::result::Result<Vec<f32>, EncoderFailure> {
+                Err(EncoderFailure::Redacted(
+                    "云端编码返回 401：密钥无效".into(),
+                ))
+            }
+            fn transmitted_bytes(&self) -> u64 {
+                0
+            }
+        }
+        let (_d, vault) = setup();
+        capture(&vault, "任意事实");
+        let config = SemanticConfig {
+            provider: Provider::Local,
+            index_path: vault.root().join(".index/semantic"),
+        };
+        let error = build_index_with_encoder(&vault, access(), &config, &Explained).unwrap_err();
+        assert!(
+            error.contains("401"),
+            "编码器声明可公开的原因应当保留：{error}"
+        );
+        assert!(error.contains("密钥无效"), "{error}");
     }
 }

@@ -103,7 +103,8 @@ export interface StateResponse {
   vault: VaultInfo;
   scope: string;
   index: IndexStatus;
-  settings: SettingsView;
+  settings: SettingsView | null;
+  settings_error?: string;
 }
 
 export interface MemoryRow {
@@ -175,6 +176,7 @@ export const api = {
   background: () => call<Record<string, unknown>>('/api/background'),
   settings: () => call<SettingsView>('/api/settings'),
   saveSettings: (patch: unknown) => call<SettingsView>('/api/settings', patch),
+  resetSettings: () => call<SettingsView>('/api/settings/reset', {}),
   buildIndex: () => call<Record<string, unknown>>('/api/index/build', {}),
   openVault: (path: string, create: boolean) =>
     call<{ vault: VaultInfo; scope: string }>('/api/vault/open', { path, create }),

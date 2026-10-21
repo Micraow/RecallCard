@@ -61,6 +61,19 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+/// 密钥栏最常见的填错是把服务地址又贴一遍，这在保存时就能看出来。
+fn check_key_shape(key: &str, label: &str) -> Result<()> {
+    if key.starts_with("http://") || key.starts_with("https://") {
+        return Err(format!(
+            "{label}的密钥填的是网址；访问凭据填在密钥栏，地址填在服务地址栏"
+        ));
+    }
+    if key.chars().any(char::is_whitespace) {
+        return Err(format!("{label}的密钥含空白字符，粘贴时可能带入了换行"));
+    }
+    Ok(())
+}
+
 fn https_or_empty(value: &str) -> Result<()> {
     if value.is_empty() || value.starts_with("https://") || value.starts_with("http://127.0.0.1") {
         Ok(())
@@ -123,6 +136,7 @@ impl Settings {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.check_keys()?;
         let embedding = &self.embedding;
         match embedding.provider.as_str() {
             "" | "local" | "cloud" => {}
@@ -165,6 +179,12 @@ impl Settings {
     }
 
     /// 界面提交的补丁：密钥字段为空表示“保持原值”，`clear_*` 用于真正删除。
+    fn check_keys(&self) -> Result<()> {
+        check_key_shape(&self.embedding.key, "编码服务")?;
+        check_key_shape(&self.llm.key, "模型服务")?;
+        Ok(())
+    }
+
     pub fn apply_patch(&self, patch: &Value) -> Result<Self> {
         let mut next = self.clone();
         if let Some(embedding) = patch.get("embedding").and_then(Value::as_object) {
